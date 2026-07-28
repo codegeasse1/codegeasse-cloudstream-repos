@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
 
 class MrdsProvider : MainAPI() {
@@ -99,10 +100,10 @@ class MrdsProvider : MainAPI() {
                         source = "MRDS Server",
                         name = "MRDS Server",
                         url = cleanUrl,
+                        type = ExtractorLinkType.M3U8,
                     ) {
                         this.referer = "$mainUrl/"
                         this.quality = Qualities.Unknown.value
-                        this.isM3u8 = true
                     }
                 )
                 found = true
