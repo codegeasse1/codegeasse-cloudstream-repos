@@ -140,7 +140,7 @@ class LuciferDonghuaProvider : MainAPI() {
         val document = app.get(data).document
         var found = false
 
-        // 1. Check for Base64 encoded player embed
+        // 1. Check for Base64 encoded player embed (Common in these themes)
         val embedDiv = document.selectFirst("#pembed[data-default-embed]")
         val encoded = embedDiv?.attr("data-default-embed")
 
@@ -154,16 +154,47 @@ class LuciferDonghuaProvider : MainAPI() {
                 Regex("src=\"([^\"]+)\"").find(it)?.groupValues?.get(1)
             }
             if (!iframeSrc.isNullOrBlank()) {
-                loadExtractor(iframeSrc, data, subtitleCallback, callback)
+                // Clean geo.dailymotion URLs into standard Dailymotion URLs
+                val finalSrc = if (iframeSrc.contains("geo.dailymotion.com")) {
+                    val vid = Regex("video=([a-zA-Z0-9]+)").find(iframeSrc)?.groupValues?.get(1)
+                    if (vid != null) "https://www.dailymotion.com/video/$vid" else iframeSrc
+                } else iframeSrc
+                
+                loadExtractor(finalSrc, data, subtitleCallback, callback)
                 found = true
             }
         }
 
-        // 2. Direct DOM scan for Dailymotion and player iframes
-        document.select("iframe[src], meta[itemprop=contentUrl]").forEach { element ->
-            val src = fixUrlNull(element.attr("src").ifBlank { element.attr("content") }) ?: return@forEach
-            if (src.contains("dailymotion") || src.contains("player") || src.contains("embed")) {
-                loadExtractor(src, data, subtitleCallback, callback)
+        // 2. Direct DOM scan for Dailymotion meta tags (SEO tags usually exist in raw HTML)
+        document.select("meta[itemprop=contentUrl]").forEach { element ->
+            val src = element.attr("content")
+            if (src.contains("dailymotion.com")) {
+                // Clean the /crawler/video/ tag into a standard URL
+                val vidId = Regex("video/([a-zA-Z0-9]+)").find(src)?.groupValues?.get(1)
+                if (vidId != null) {
+                    loadExtractor("https://www.dailymotion.com/video/$vidId", data, subtitleCallback, callback)
+                    found = true
+                }
+            }
+        }
+
+        // 3. Scan for any remaining iframes
+        document.select("iframe[src]").forEach { iframe ->
+            val src = fixUrlNull(iframe.attr("src")) ?: return@forEach
+            
+            // Clean up any remaining weird Dailymotion links
+            val finalSrc = if (src.contains("geo.dailymotion.com")) {
+                val vid = Regex("video=([a-zA-Z0-9]+)").find(src)?.groupValues?.get(1)
+                if (vid != null) "https://www.dailymotion.com/video/$vid" else src
+            } else if (src.contains("dailymotion.com/crawler/video/")) {
+                 val vid = Regex("video/([a-zA-Z0-9]+)").find(src)?.groupValues?.get(1)
+                 if (vid != null) "https://www.dailymotion.com/video/$vid" else src
+            } else {
+                src
+            }
+            
+            if (finalSrc.contains("dailymotion") || finalSrc.contains("player") || finalSrc.contains("embed")) {
+                loadExtractor(finalSrc, data, subtitleCallback, callback)
                 found = true
             }
         }
