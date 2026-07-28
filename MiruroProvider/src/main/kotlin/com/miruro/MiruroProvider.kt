@@ -5,7 +5,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.network.WebViewResolver
-import org.jsoup.nodes.Element
+import com.fasterxml.jackson.annotation.JsonProperty
 
 class MiruroProvider : MainAPI() {
     override var mainUrl = "https://www.miruro.to"
@@ -15,53 +15,89 @@ class MiruroProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    // The magical interceptor that forces CloudStream to execute React/Javascript
+    // WebViewResolver kept ONLY for the detail page (load) to render episode buttons
     private val webView = WebViewResolver(Regex(".*miruro\\.to.*"))
 
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // JSON DATA CLASSES (For parsing Miruro's secret API)
+    // ---------------------------------------------------------------
+    data class MiruroSearchResponse(
+        @JsonProperty("results") val results: List<MiruroMedia>? = null,
+        @JsonProperty("media") val media: List<MiruroMedia>? = null
+    )
+
+    data class MiruroMedia(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("title") val title: MiruroTitle? = null,
+        @JsonProperty("image") val image: String? = null,
+        @JsonProperty("cover") val cover: String? = null
+    )
+
+    data class MiruroTitle(
+        @JsonProperty("english") val english: String? = null,
+        @JsonProperty("romaji") val romaji: String? = null,
+        @JsonProperty("userPreferred") val userPreferred: String? = null
+    )
+
+    // ---------------------------------------------------------------
+    // MAIN PAGE (API Bypass)
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Home",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["UPDATED_AT_DESC"],"type":"ANIME"}}""" to "Newest",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["TRENDING_DESC"],"type":"ANIME"}}""" to "Popular",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["SCORE_DESC"],"type":"ANIME"}}""" to "Top Rated"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // Intercepting with WebView to render the React DOM
-        val document = app.get(request.data, interceptor = webView).document
+        // Dynamically inject the page number into the JSON string
+        val payload = request.data.replace("\"page\":1", "\"page\":$page")
+        val encodedPayload = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
+        val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
-        // Grabbing the cards based exactly on the data-card-wrapper attribute
-        val home = document.select("a[data-card-wrapper=true]").mapNotNull { it.toSearchResult() }
+        // Hit the API directly, completely bypassing HTML/React!
+        val response = app.get(apiUrl).parsedSafe<MiruroSearchResponse>()
+        val items = response?.results ?: response?.media ?: emptyList()
+
+        val home = items.mapNotNull { media ->
+            val id = media.id ?: return@mapNotNull null
+            val title = media.title?.english ?: media.title?.romaji ?: media.title?.userPreferred ?: return@mapNotNull null
+            val poster = media.image ?: media.cover
+            
+            newAnimeSearchResponse(title, "$mainUrl/watch/$id", TvType.Anime) {
+                this.posterUrl = poster
+            }
+        }
+
         return newHomePageResponse(request.name, home)
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val rawHref = fixUrlNull(this.attr("href")) ?: return null
-        
-        // The homepage often appends ?ep=1 to the URL. We strip it here so it links to the series page.
-        val href = rawHref.substringBefore("?")
-        
-        val title = this.attr("title").ifBlank { this.selectFirst("img")?.attr("alt") }?.replace("Play ", "")?.trim() ?: return null
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
+    // ---------------------------------------------------------------
+    // SEARCH (API Bypass)
+    // ---------------------------------------------------------------
+    override suspend fun search(query: String): List<SearchResponse> {
+        val payload = """{"path":"search","method":"POST","query":{"query":"$query","page":1,"perPage":24,"type":"ANIME"}}"""
+        val encodedPayload = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
+        val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
-            this.posterUrl = posterUrl
+        val response = app.get(apiUrl).parsedSafe<MiruroSearchResponse>()
+        val items = response?.results ?: response?.media ?: emptyList()
+
+        return items.mapNotNull { media ->
+            val id = media.id ?: return@mapNotNull null
+            val title = media.title?.english ?: media.title?.romaji ?: media.title?.userPreferred ?: return@mapNotNull null
+            val poster = media.image ?: media.cover
+            
+            newAnimeSearchResponse(title, "$mainUrl/watch/$id", TvType.Anime) {
+                this.posterUrl = poster
+            }
         }
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
-    override suspend fun search(query: String): List<SearchResponse> {
-        // WebView renders the search results
-        val document = app.get("$mainUrl/search?q=$query", interceptor = webView).document
-        return document.select("a[data-card-wrapper=true]").mapNotNull { it.toSearchResult() }
-    }
-
-    // ---------------------------------------------------------------
-    // LOAD (anime detail page + episode list)
+    // LOAD (Anime Detail Page + Episodes)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        // WebView renders the anime details and episode buttons
+        // We still use WebView here to let React generate the Episode List buttons
         val document = app.get(url, interceptor = webView).document
 
         val title = document.selectFirst("h1, .title")?.text()?.trim() ?: ""
@@ -70,16 +106,13 @@ class MiruroProvider : MainAPI() {
 
         val anilistId = url.substringAfter("/watch/").substringBefore("/")
 
-        // Extracting episodes and passing the raw ID to loadLinks
         val episodes = document.select("div[data-episode-list=true] button[data-episode-id]").mapNotNull { btn ->
             val epTitle = btn.attr("title").ifBlank { btn.text() }.trim()
             val epNum = Regex("(?i)(?:EP|Episode)\\s*(\\d+)").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
             
-            // This is the secret ID needed for the API
             val epId = btn.attr("data-episode-id")
             if (epId.isBlank()) return@mapNotNull null
 
-            // Pack the ID and Anilist ID together to send to loadLinks
             val linkData = "$epId||$anilistId"
 
             newEpisode(linkData) {
@@ -96,7 +129,7 @@ class MiruroProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (video extraction via Hidden API)
+    // LOAD LINKS (Video API)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -123,9 +156,7 @@ class MiruroProvider : MainAPI() {
                 val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
                 try {
-                    // Do NOT use WebViewResolver here, we just want the raw JSON from the internal API
                     val response = app.get(apiUrl).text
-                    
                     val urls = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(response).map { it.groupValues[1] }.toList()
                     
                     urls.forEach { parsedUrl ->
@@ -135,9 +166,7 @@ class MiruroProvider : MainAPI() {
                             found = true
                         }
                     }
-                } catch (e: Exception) {
-                    // Silently ignore failures for missing providers
-                }
+                } catch (e: Exception) {}
             }
         }
         
