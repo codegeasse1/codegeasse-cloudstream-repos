@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 
 class MiruroProvider : MainAPI() {
     override var mainUrl = "https://www.miruro.to"
@@ -19,13 +20,15 @@ class MiruroProvider : MainAPI() {
     private val webView = WebViewResolver(Regex(".*miruro\\.to.*"))
 
     // ---------------------------------------------------------------
-    // JSON DATA CLASSES (For parsing Miruro's secret API)
+    // JSON DATA CLASSES (With ignoreUnknown to prevent silent crashes)
     // ---------------------------------------------------------------
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class MiruroSearchResponse(
         @JsonProperty("results") val results: List<MiruroMedia>? = null,
         @JsonProperty("media") val media: List<MiruroMedia>? = null
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class MiruroMedia(
         @JsonProperty("id") val id: String? = null,
         @JsonProperty("title") val title: MiruroTitle? = null,
@@ -33,6 +36,7 @@ class MiruroProvider : MainAPI() {
         @JsonProperty("cover") val cover: String? = null
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class MiruroTitle(
         @JsonProperty("english") val english: String? = null,
         @JsonProperty("romaji") val romaji: String? = null,
@@ -40,21 +44,19 @@ class MiruroProvider : MainAPI() {
     )
 
     // ---------------------------------------------------------------
-    // MAIN PAGE (API Bypass)
+    // MAIN PAGE (Patched with required version and body fields)
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
-        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["UPDATED_AT_DESC"],"type":"ANIME"}}""" to "Newest",
-        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["TRENDING_DESC"],"type":"ANIME"}}""" to "Popular",
-        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["SCORE_DESC"],"type":"ANIME"}}""" to "Top Rated"
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["UPDATED_AT_DESC"],"type":"ANIME"},"body":null,"version":"0.2.0"}""" to "Newest",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["TRENDING_DESC"],"type":"ANIME"},"body":null,"version":"0.2.0"}""" to "Popular",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["SCORE_DESC"],"type":"ANIME"},"body":null,"version":"0.2.0"}""" to "Top Rated"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // Dynamically inject the page number into the JSON string
         val payload = request.data.replace("\"page\":1", "\"page\":$page")
         val encodedPayload = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
         val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
-        // Hit the API directly, completely bypassing HTML/React!
         val response = app.get(apiUrl).parsedSafe<MiruroSearchResponse>()
         val items = response?.results ?: response?.media ?: emptyList()
 
@@ -72,10 +74,10 @@ class MiruroProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (API Bypass)
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val payload = """{"path":"search","method":"POST","query":{"query":"$query","page":1,"perPage":24,"type":"ANIME"}}"""
+        val payload = """{"path":"search","method":"POST","query":{"query":"$query","page":1,"perPage":24,"type":"ANIME"},"body":null,"version":"0.2.0"}"""
         val encodedPayload = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
         val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
@@ -94,10 +96,9 @@ class MiruroProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Anime Detail Page + Episodes)
+    // LOAD
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        // We still use WebView here to let React generate the Episode List buttons
         val document = app.get(url, interceptor = webView).document
 
         val title = document.selectFirst("h1, .title")?.text()?.trim() ?: ""
@@ -129,7 +130,7 @@ class MiruroProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Video API)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
