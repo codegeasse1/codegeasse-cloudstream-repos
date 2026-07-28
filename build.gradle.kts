@@ -7,7 +7,7 @@ buildscript {
         maven("https://jitpack.io")
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.1.2")
+       classpath("com.android.tools.build:gradle:8.2.2")
         // Pinned commit instead of the -SNAPSHOT the template ships with,
         // since -SNAPSHOT no longer resolves on JitPack.
         classpath("com.github.recloudstream:gradle:81b1d424d2")
