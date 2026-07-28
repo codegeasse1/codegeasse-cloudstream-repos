@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.nodes.Element
 
 class MrdsProvider : MainAPI() {
@@ -15,6 +16,9 @@ class MrdsProvider : MainAPI() {
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
+
+    // The interceptor to execute the site's image decryption JavaScript
+    private val webView = WebViewResolver(Regex(".*mrds\\.com.*"))
 
     // ---------------------------------------------------------------
     // MAIN PAGE
@@ -26,35 +30,28 @@ class MrdsProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
-        val document = app.get(url).document
+        
+        // Use interceptor = webView to let the JavaScript decrypt the images!
+        val document = app.get(url, interceptor = webView).document
 
         val home = document.select("a:has(.post-card)").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
     // ---------------------------------------------------------------
-    // SEARCH & HOMEPAGE ITEM PARSING (Thumbnail Fix)
+    // ITEM PARSING (Scraping the Decrypted Base64)
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
         val title = this.text().substringBefore(" • ").trim()
 
-        // 1. Search for a standard <img> tag, but STRICTLY EXCLUDE Base64 data images
-        var posterUrl = this.selectFirst("img:not([src^=data:image])")?.attr("src")
+        // Now that JS has run, the decrypted Base64 is injected into the style attribute
+        val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
+        var posterUrl = Regex("""url\(['"]?(data:image[^'"]+)['"]?\)""").find(style)?.groupValues?.get(1)
 
-        // 2. Fallback: Search the background style, ignoring Base64 data strings
+        // Fallback to normal img tags if they exist
         if (posterUrl.isNullOrBlank()) {
-            val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
-            val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
-            
-            if (rawMatch != null && !rawMatch.startsWith("data:")) {
-                posterUrl = rawMatch.replace("&quot;", "")
-            }
-        }
-        
-        // 3. Fallback: Check for lazy-loaded data attributes
-        if (posterUrl.isNullOrBlank()) {
-            posterUrl = this.selectFirst("[data-src]:not([data-src^=data:image])")?.attr("data-src")
+            posterUrl = this.selectFirst("img")?.attr("src")
         }
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
@@ -66,33 +63,29 @@ class MrdsProvider : MainAPI() {
     // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
+        // Use interceptor = webView
+        val document = app.get("$mainUrl/?s=$query", interceptor = webView).document
         return document.select("a:has(.post-card)").mapNotNull { it.toSearchResult() }
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page Thumbnail Fix)
+    // LOAD
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        // Use interceptor = webView
+        val document = app.get(url, interceptor = webView).document
 
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
 
-        // 1. Prioritize OpenGraph image (usually the highest quality standard URL)
         var poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         
-        // 2. Fallback to background styles if meta tag is missing or is Base64
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             val style = document.selectFirst(".blog-background")?.attr("style") ?: ""
-            val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
-            if (rawMatch != null && !rawMatch.startsWith("data:")) {
-                poster = rawMatch.replace("&quot;", "")
-            }
+            poster = Regex("""url\(['"]?(data:image[^'"]+)['"]?\)""").find(style)?.groupValues?.get(1)
         }
         
-        // 3. Final fallback to any non-Base64 standard image on the page
         if (poster.isNullOrBlank()) {
-            poster = document.selectFirst("img:not([src^=data:image])")?.attr("src")
+            poster = document.selectFirst("img")?.attr("src")
         }
 
         val synopsis = document.selectFirst(".post-content p, article p")?.text()
@@ -104,7 +97,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Uses newExtractorLink builder)
+    // LOAD LINKS (Keep Raw HTML extraction for fast video loading)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -115,8 +108,6 @@ class MrdsProvider : MainAPI() {
         var found = false
         val html = app.get(data).text
 
-        // CDN host varies per video/session, AND the url sits inside JSON with escaped slashes
-        // (e.g. "url":"https:\/\/hls.dscxru.cn\/videos5\/...m3u8"), so tolerate optional backslashes before each slash
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
         cdnRegex.findAll(html).forEach { match ->
