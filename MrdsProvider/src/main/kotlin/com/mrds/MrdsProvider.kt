@@ -74,7 +74,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Targeted CDN Extraction using newExtractorLink)
+    // LOAD LINKS (Compatible ExtractorLink Constructor)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -92,16 +92,15 @@ class MrdsProvider : MainAPI() {
             cleanUrl = cleanUrl.replace("&amp;", "&")
             
             if (cleanUrl.isNotBlank()) {
-                // Using newExtractorLink builder function to fix deprecation and quality errors
                 callback(
-                    newExtractorLink(
-                        source = "MRDS Stream",
+                    ExtractorLink(
+                        source = "MRDS Server",
                         name = "MRDS Server",
                         url = cleanUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$mainUrl/"
-                    }
+                        referer = "$mainUrl/",
+                        quality = Qualities.Unknown.value,
+                        isM3u8 = true
+                    )
                 )
                 found = true
             }
