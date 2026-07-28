@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# Add this block to grant push access
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
