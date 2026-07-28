@@ -5,4 +5,4 @@ To install this repository:
 2. Copy and paste this exact link:
 
 ```text
-[https://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json](https://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json)
+https://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json
