@@ -22,7 +22,8 @@ cloudstream {
 }
 
 android {
-    defaultConfig {
-        minSdk = 21
-    }
-}
+       namespace = "com.anime4i"
+       defaultConfig {
+           minSdk = 21
+       }
+   }
