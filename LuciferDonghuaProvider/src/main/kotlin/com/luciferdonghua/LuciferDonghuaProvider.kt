@@ -23,35 +23,68 @@ class LuciferDonghuaProvider : MainAPI() {
         "$mainUrl/anime/?status=completed&type=&order=update" to "Completed",
     )
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else request.data.replace("?", "page/$page/?")
+   // ---------------------------------------------------------------
+    // LOAD (anime detail page + episode list)
+    // ---------------------------------------------------------------
+    override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request.name, home)
-    }
+        val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)episode\\s*\\d+.*"), "") ?: ""
+        
+        val rawPoster = document.selectFirst(".limit img, .infox img, img[itemprop=image], .thumb img")?.attr("src")
+        val poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
+        
+        val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis, .desc")?.text()
+        val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val linkEl = this.selectFirst("a") ?: return null
+        fun parseEpisodeGrid(doc: org.jsoup.nodes.Document, currentUrl: String): List<Episode> {
+            val elements = doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li")
+            return elements.mapNotNull { li ->
+                val epLink = li.selectFirst("a")
+                // If there is no link, but the item is marked as "selected", we are already on that episode's URL
+                val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) 
+                             else if (li.hasClass("selected") || li.hasAttr("selected") || li.select("div.playinfo").isNotEmpty()) currentUrl 
+                             else return@mapNotNull null
+                             
+                if (epHref == null) return@mapNotNull null
+                
+                val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
+                
+                // Extract episode number
+                val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
+                val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
 
-        val rawHref = fixUrlNull(linkEl.attr("href")) ?: return null
-        // Strip the "-episode-X-lucifer-donghua" suffix to recover the main series page
-        val href = rawHref.replace(Regex("-episode-\\d+-[a-zA-Z0-9-]+/?$"), "")
-            .let { if (it.contains("/anime/")) it else "$mainUrl/anime/${it.substringAfterLast("/")}" }
+                newEpisode(epHref) {
+                    this.name = epTitle.ifBlank { "Episode $epNum" }
+                    this.episode = epNum
+                }
+            }.distinctBy { it.data }.reversed()
+        }
 
-        val title = linkEl.attr("title").ifBlank {
-            this.selectFirst("div.tt")?.text()
-        }?.trim() ?: return null
+        var episodes = parseEpisodeGrid(document, url)
+        
+        // Fallback: If the series page has no episode list, find ANY episode link on the page and scrape the list from there
+        if (episodes.isEmpty()) {
+            val firstEpLink = document.selectFirst(".epcurfirst a, .epcurlast a, .inepcx a, .bxcl a, a:matchesOwn((?i)watch)")?.attr("href")
+            val anyEpLink = document.select("a[href]").firstOrNull { 
+                it.attr("href").contains("-episode-") && it.attr("href").contains(mainUrl)
+            }?.attr("href")
+            
+            val fallbackHref = fixUrlNull(firstEpLink ?: anyEpLink)
+            
+            if (fallbackHref != null) {
+                val epDocument = app.get(fallbackHref).document
+                episodes = parseEpisodeGrid(epDocument, fallbackHref)
+            }
+        }
 
-        val rawPoster = this.selectFirst("img")?.attr("data-lazy-src")?.ifBlank { null }
-            ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
-            ?: this.selectFirst("img")?.attr("src")
-
-        // Strip Jetpack CDN proxy (i0.wp.com / i3.wp.com) and resize query params
-        val posterUrl = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
-
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
-            this.posterUrl = posterUrl
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            this.posterUrl = poster
+            this.plot = synopsis
+            this.tags = genres
+            addEpisodes(DubStatus.Subbed, episodes)
         }
     }
 
