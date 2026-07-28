@@ -55,12 +55,16 @@ subprojects {
     }
 
     dependencies {
-        val implementation by configurations
-        implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.4.11")
-        implementation("org.jsoup:jsoup:1.18.3")
-        // IMPORTANT: do not bump Jackson above 2.13.1 — newer versions break
-        // compatibility with older Android devices running CloudStream.
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
-    }
-}
+           val implementation by configurations
+           implementation(kotlin("stdlib"))
+           implementation("com.github.Blatzar:NiceHttp:0.4.11")
+           implementation("org.jsoup:jsoup:1.18.3")
+           implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+       }
+
+       tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+           kotlinOptions {
+               jvmTarget = "1.8"
+           }
+       }
+   }
