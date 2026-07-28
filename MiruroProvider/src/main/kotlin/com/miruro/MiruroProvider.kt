@@ -16,11 +16,11 @@ class MiruroProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    // WebViewResolver kept ONLY for the detail page (load) to render episode buttons
+    // The interceptor ensures Cloudflare Turnstile doesn't block our raw API requests
     private val webView = WebViewResolver(Regex(".*miruro\\.to.*"))
 
     // ---------------------------------------------------------------
-    // JSON DATA CLASSES (With ignoreUnknown to prevent silent crashes)
+    // JSON DATA CLASSES (Fixed ID type to Int to prevent crashes)
     // ---------------------------------------------------------------
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class MiruroSearchResponse(
@@ -30,7 +30,7 @@ class MiruroProvider : MainAPI() {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class MiruroMedia(
-        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("id") val id: Int? = null, // Changed to Int (Anilist uses integers)
         @JsonProperty("title") val title: MiruroTitle? = null,
         @JsonProperty("image") val image: String? = null,
         @JsonProperty("cover") val cover: String? = null
@@ -44,12 +44,12 @@ class MiruroProvider : MainAPI() {
     )
 
     // ---------------------------------------------------------------
-    // MAIN PAGE (Patched with required version and body fields)
+    // MAIN PAGE (Added exact "object":null requirement)
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
-        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["UPDATED_AT_DESC"],"type":"ANIME"},"body":null,"version":"0.2.0"}""" to "Newest",
-        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["TRENDING_DESC"],"type":"ANIME"},"body":null,"version":"0.2.0"}""" to "Popular",
-        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["SCORE_DESC"],"type":"ANIME"},"body":null,"version":"0.2.0"}""" to "Top Rated"
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["UPDATED_AT_DESC"],"type":"ANIME"},"body":null,"object":null,"version":"0.2.0"}""" to "Newest",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["TRENDING_DESC"],"type":"ANIME"},"body":null,"object":null,"version":"0.2.0"}""" to "Popular",
+        """{"path":"search","method":"POST","query":{"page":1,"perPage":24,"sort":["SCORE_DESC"],"type":"ANIME"},"body":null,"object":null,"version":"0.2.0"}""" to "Top Rated"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -57,11 +57,12 @@ class MiruroProvider : MainAPI() {
         val encodedPayload = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
         val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
-        val response = app.get(apiUrl).parsedSafe<MiruroSearchResponse>()
+        // Use webView interceptor to bypass Cloudflare API blocking
+        val response = app.get(apiUrl, interceptor = webView, headers = mapOf("Referer" to "$mainUrl/")).parsedSafe<MiruroSearchResponse>()
         val items = response?.results ?: response?.media ?: emptyList()
 
         val home = items.mapNotNull { media ->
-            val id = media.id ?: return@mapNotNull null
+            val id = media.id?.toString() ?: return@mapNotNull null
             val title = media.title?.english ?: media.title?.romaji ?: media.title?.userPreferred ?: return@mapNotNull null
             val poster = media.image ?: media.cover
             
@@ -77,15 +78,15 @@ class MiruroProvider : MainAPI() {
     // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val payload = """{"path":"search","method":"POST","query":{"query":"$query","page":1,"perPage":24,"type":"ANIME"},"body":null,"version":"0.2.0"}"""
+        val payload = """{"path":"search","method":"POST","query":{"query":"$query","page":1,"perPage":24,"type":"ANIME"},"body":null,"object":null,"version":"0.2.0"}"""
         val encodedPayload = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
         val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
-        val response = app.get(apiUrl).parsedSafe<MiruroSearchResponse>()
+        val response = app.get(apiUrl, interceptor = webView, headers = mapOf("Referer" to "$mainUrl/")).parsedSafe<MiruroSearchResponse>()
         val items = response?.results ?: response?.media ?: emptyList()
 
         return items.mapNotNull { media ->
-            val id = media.id ?: return@mapNotNull null
+            val id = media.id?.toString() ?: return@mapNotNull null
             val title = media.title?.english ?: media.title?.romaji ?: media.title?.userPreferred ?: return@mapNotNull null
             val poster = media.image ?: media.cover
             
@@ -148,16 +149,16 @@ class MiruroProvider : MainAPI() {
         providers.forEach { provider ->
             listOf("sub", "dub").forEach { category ->
                 val jsonPayload = if (anilistId != null && anilistId.toIntOrNull() != null) {
-                    """{"path":"sources","method":"GET","query":{"episodeId":"$epId","provider":"$provider","category":"$category","anilistId":$anilistId},"body":null,"version":"0.2.0"}"""
+                    """{"path":"sources","method":"GET","query":{"episodeId":"$epId","provider":"$provider","category":"$category","anilistId":$anilistId},"body":null,"object":null,"version":"0.2.0"}"""
                 } else {
-                    """{"path":"sources","method":"GET","query":{"episodeId":"$epId","provider":"$provider","category":"$category"},"body":null,"version":"0.2.0"}"""
+                    """{"path":"sources","method":"GET","query":{"episodeId":"$epId","provider":"$provider","category":"$category"},"body":null,"object":null,"version":"0.2.0"}"""
                 }
                 
                 val encodedPayload = Base64.encodeToString(jsonPayload.toByteArray(), Base64.NO_WRAP)
                 val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
                 try {
-                    val response = app.get(apiUrl).text
+                    val response = app.get(apiUrl, interceptor = webView).text
                     val urls = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(response).map { it.groupValues[1] }.toList()
                     
                     urls.forEach { parsedUrl ->
