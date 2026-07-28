@@ -1,5 +1,8 @@
 # Anime4i CloudStream Repository
 
-Click the button below on your Android device to automatically open CloudStream and add this repository.
+To install this repository:
+1. Open CloudStream and go to **Settings** > **Extensions** > **Add Repository**
+2. Copy and paste this exact link:
 
-[![Install in CloudStream](https://img.shields.io/badge/Install_in-CloudStream-blue?style=for-the-badge&logo=android)](cloudstreamrepository://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json)
+```text
+[https://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json](https://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json)
