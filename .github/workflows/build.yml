@@ -24,9 +24,15 @@ jobs:
       - name: Build plugins
         run: gradle make makePluginsJson
 
+      - name: Collect build output
+        run: |
+          mkdir -p release
+          find . -name "*.cs3" -not -path "./release/*" -exec cp {} release/ \;
+          cp build/plugins.json release/repo.json
+
       - name: Push to builds branch
         run: |
-          cd build/plugins || exit 1
+          cd release
           git init
           git checkout -b builds
           git add .
