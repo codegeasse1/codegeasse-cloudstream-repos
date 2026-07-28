@@ -11,7 +11,6 @@ class MrdsProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    // Assuming posts act as single videos (Movies)
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
@@ -19,31 +18,24 @@ class MrdsProvider : MainAPI() {
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
-        "$mainUrl/category/trending/" to "Trending" // Add other categories if they exist
+        "$mainUrl/category/trending/" to "Trending"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Locate anchor tags that wrap the .post-card elements
         val home = document.select("a:has(.post-card)").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
-        
-        // Grab the title from the visible text inside the card
         val title = this.text().substringBefore(" • ").trim()
         
-        // Extract Base64 background image from the style attribute
-        val bgDiv = this.selectFirst(".blog-background")
-        val style = bgDiv?.attr("style") ?: ""
-        
-        // Regex to pull the data URI out of url('...')
-        val posterUrl = Regex("""url\(['"]?(data:image[^'"]+)['"]?\)""").find(style)?.groupValues?.get(1) 
-            ?: this.selectFirst("img")?.attr("src")
+        val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
+        val posterMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+        val posterUrl = posterMatch?.replace("&quot;", "") ?: this.selectFirst("img")?.attr("src")
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
@@ -59,20 +51,22 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         
-        // Grab the Base64 image from the <p> tags if present
-        val poster = document.selectFirst("img[src^=data:image]")?.attr("src") 
+        val style = document.selectFirst(".blog-background")?.attr("style") ?: ""
+        val posterMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+        
+        val poster = posterMatch?.replace("&quot;", "")
+            ?: document.selectFirst("img[src^=data:image]")?.attr("src") 
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
         val synopsis = document.selectFirst(".post-content p, article p")?.text()
 
-        // Treating it as a movie since it's a single video post
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = synopsis
@@ -80,7 +74,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Video Extraction)
+    // LOAD LINKS (Targeted CDN Extraction)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -88,28 +82,35 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        var found = false
+        val html = app.get(data).text
         
-        // Locate the div containing the JSON video configuration
-        val dataConfig = document.selectFirst(".data-video")?.attr("data-config")
+        // Target the specific CDN domain structure you found with IDM
+        // This Regex safely captures URLs containing dscxru.cn and cleans up any JSON escape backslashes
+        val cdnRegex = Regex("""https?://[^\s"'<>]+?dscxru\.cn[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
         
-        if (!dataConfig.isNullOrBlank()) {
-            // Use Regex to pluck the URL directly from the JSON string
-            val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
-            val match = urlRegex.find(dataConfig)
+        cdnRegex.findAll(html).forEach { match ->
+            var cleanUrl = match.value.replace("\\/", "/")
+            // Clean out HTML escape artifacts if present
+            cleanUrl = cleanUrl.replace("&amp;", "&")
             
-            if (match != null) {
-                // The URL contains escaped slashes (e.g. https:\/\/hls...). We clean them here.
-                val rawUrl = match.groupValues[1]
-                val cleanUrl = rawUrl.replace("\\/", "/")
-                
-                if (cleanUrl.isNotBlank()) {
-                    loadExtractor(cleanUrl, data, subtitleCallback, callback)
-                    return true
-                }
+            if (cleanUrl.isNotBlank()) {
+                // Since this is a direct HLS (.m3u8) stream link with an auth key, 
+                // we register it directly as an ExtractorLink
+                callback(
+                    ExtractorLink(
+                        source = "MRDS Stream",
+                        name = "MRDS Server",
+                        url = cleanUrl,
+                        referer = "$mainUrl/",
+                        quality = Qualities.Unknown.value,
+                        isM3u8 = true
+                    )
+                )
+                found = true
             }
         }
         
-        return false
+        return found
     }
 }
