@@ -37,7 +37,8 @@ class MrdsProvider : MainAPI() {
         val title = this.text().substringBefore(" • ").trim()
 
         val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
-        val posterMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+        val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+        val posterMatch = rawMatch?.takeUnless { it.startsWith("data:") }
         val posterUrl = posterMatch?.replace("&quot;", "") ?: this.selectFirst("img")?.attr("src")
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
@@ -62,11 +63,12 @@ class MrdsProvider : MainAPI() {
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
 
         val style = document.selectFirst(".blog-background")?.attr("style") ?: ""
-        val posterMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+        val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+        val posterMatch = rawMatch?.takeUnless { it.startsWith("data:") }
 
         val poster = posterMatch?.replace("&quot;", "")
-            ?: document.selectFirst("img[src^=data:image]")?.attr("src")
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: document.selectFirst("img[src^=data:image]")?.attr("src")
 
         val synopsis = document.selectFirst(".post-content p, article p")?.text()
 
@@ -88,8 +90,9 @@ class MrdsProvider : MainAPI() {
         var found = false
         val html = app.get(data).text
 
-        // CDN host varies per video/session (dscxru.cn, syjiaotong.mobi, etc.) so match any .m3u8, not one fixed domain
-        val cdnRegex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        // CDN host varies per video/session, AND the url sits inside JSON with escaped slashes
+        // (e.g. "url":"https:\/\/hls.dscxru.cn\/videos5\/...m3u8"), so tolerate optional backslashes before each slash
+        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
         cdnRegex.findAll(html).forEach { match ->
             var cleanUrl = match.value.replace("\\/", "/")
