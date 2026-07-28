@@ -88,7 +88,8 @@ class MrdsProvider : MainAPI() {
         var found = false
         val html = app.get(data).text
 
-        val cdnRegex = Regex("""https?://[^\s"'<>]+?dscxru\.cn[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        // CDN host varies per video/session (dscxru.cn, syjiaotong.mobi, etc.) so match any .m3u8, not one fixed domain
+        val cdnRegex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
         cdnRegex.findAll(html).forEach { match ->
             var cleanUrl = match.value.replace("\\/", "/")
