@@ -45,7 +45,7 @@ class Anime4iProvider : MainAPI() {
             this.selectFirst("div.tt")?.text()
         }?.trim() ?: return null
 
-        val posterUrl = fixUrlNull(it.selectFirst("img")?.attr("src")?.substringBefore("?"))
+       val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src")?.substringBefore("?"))
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
