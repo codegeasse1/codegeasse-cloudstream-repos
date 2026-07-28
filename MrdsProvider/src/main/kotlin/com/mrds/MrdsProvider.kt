@@ -74,7 +74,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Targeted CDN Extraction)
+    // LOAD LINKS (Targeted CDN Extraction using newExtractorLink)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -85,27 +85,23 @@ class MrdsProvider : MainAPI() {
         var found = false
         val html = app.get(data).text
         
-        // Target the specific CDN domain structure you found with IDM
-        // This Regex safely captures URLs containing dscxru.cn and cleans up any JSON escape backslashes
         val cdnRegex = Regex("""https?://[^\s"'<>]+?dscxru\.cn[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
         
         cdnRegex.findAll(html).forEach { match ->
             var cleanUrl = match.value.replace("\\/", "/")
-            // Clean out HTML escape artifacts if present
             cleanUrl = cleanUrl.replace("&amp;", "&")
             
             if (cleanUrl.isNotBlank()) {
-                // Since this is a direct HLS (.m3u8) stream link with an auth key, 
-                // we register it directly as an ExtractorLink
+                // Using newExtractorLink builder function to fix deprecation and quality errors
                 callback(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "MRDS Stream",
                         name = "MRDS Server",
                         url = cleanUrl,
-                        referer = "$mainUrl/",
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = true
-                    )
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "$mainUrl/"
+                    }
                 )
                 found = true
             }
