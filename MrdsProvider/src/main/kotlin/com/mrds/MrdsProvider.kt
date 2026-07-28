@@ -32,14 +32,30 @@ class MrdsProvider : MainAPI() {
         return newHomePageResponse(request.name, home)
     }
 
+    // ---------------------------------------------------------------
+    // SEARCH & HOMEPAGE ITEM PARSING (Thumbnail Fix)
+    // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
         val title = this.text().substringBefore(" • ").trim()
 
-        val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
-        val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
-        val posterMatch = rawMatch?.takeUnless { it.startsWith("data:") }
-        val posterUrl = posterMatch?.replace("&quot;", "") ?: this.selectFirst("img")?.attr("src")
+        // 1. Search for a standard <img> tag, but STRICTLY EXCLUDE Base64 data images
+        var posterUrl = this.selectFirst("img:not([src^=data:image])")?.attr("src")
+
+        // 2. Fallback: Search the background style, ignoring Base64 data strings
+        if (posterUrl.isNullOrBlank()) {
+            val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
+            val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+            
+            if (rawMatch != null && !rawMatch.startsWith("data:")) {
+                posterUrl = rawMatch.replace("&quot;", "")
+            }
+        }
+        
+        // 3. Fallback: Check for lazy-loaded data attributes
+        if (posterUrl.isNullOrBlank()) {
+            posterUrl = this.selectFirst("[data-src]:not([data-src^=data:image])")?.attr("data-src")
+        }
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
@@ -55,20 +71,29 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD
+    // LOAD (Detail Page Thumbnail Fix)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
 
-        val style = document.selectFirst(".blog-background")?.attr("style") ?: ""
-        val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
-        val posterMatch = rawMatch?.takeUnless { it.startsWith("data:") }
-
-        val poster = posterMatch?.replace("&quot;", "")
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: document.selectFirst("img[src^=data:image]")?.attr("src")
+        // 1. Prioritize OpenGraph image (usually the highest quality standard URL)
+        var poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        
+        // 2. Fallback to background styles if meta tag is missing or is Base64
+        if (poster.isNullOrBlank() || poster.startsWith("data:")) {
+            val style = document.selectFirst(".blog-background")?.attr("style") ?: ""
+            val rawMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
+            if (rawMatch != null && !rawMatch.startsWith("data:")) {
+                poster = rawMatch.replace("&quot;", "")
+            }
+        }
+        
+        // 3. Final fallback to any non-Base64 standard image on the page
+        if (poster.isNullOrBlank()) {
+            poster = document.selectFirst("img:not([src^=data:image])")?.attr("src")
+        }
 
         val synopsis = document.selectFirst(".post-content p, article p")?.text()
 
@@ -79,7 +104,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (uses newExtractorLink builder, not deprecated constructor)
+    // LOAD LINKS (Uses newExtractorLink builder)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
