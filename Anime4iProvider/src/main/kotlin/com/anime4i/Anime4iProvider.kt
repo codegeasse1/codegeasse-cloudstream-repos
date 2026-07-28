@@ -45,7 +45,12 @@ class Anime4iProvider : MainAPI() {
             this.selectFirst("div.tt")?.text()
         }?.trim() ?: return null
 
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src")?.substringBefore("?"))
+        val rawPoster = this.selectFirst("img")?.attr("data-lazy-src")?.ifBlank { null }
+            ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
+            ?: this.selectFirst("img")?.attr("src")
+
+        // Strip the Jetpack proxy, strip resize parameters, and get the direct image
+        val posterUrl = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
