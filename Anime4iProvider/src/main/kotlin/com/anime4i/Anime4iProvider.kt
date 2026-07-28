@@ -13,7 +13,6 @@ class Anime4iProvider : MainAPI() {
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
-    override var version = 2
 
     // ---------------------------------------------------------------
     // MAIN PAGE
