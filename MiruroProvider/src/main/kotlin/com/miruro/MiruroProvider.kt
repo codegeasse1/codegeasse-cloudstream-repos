@@ -1,8 +1,10 @@
 package com.miruro
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.nodes.Element
 
 class MiruroProvider : MainAPI() {
@@ -13,6 +15,9 @@ class MiruroProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
+    // The magical interceptor that forces CloudStream to execute React/Javascript
+    private val webView = WebViewResolver(Regex(".*miruro\\.to.*"))
+
     // ---------------------------------------------------------------
     // MAIN PAGE
     // ---------------------------------------------------------------
@@ -21,7 +26,8 @@ class MiruroProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get(request.data).document
+        // Intercepting with WebView to render the React DOM
+        val document = app.get(request.data, interceptor = webView).document
 
         // Grabbing the cards based exactly on the data-card-wrapper attribute
         val home = document.select("a[data-card-wrapper=true]").mapNotNull { it.toSearchResult() }
@@ -46,7 +52,8 @@ class MiruroProvider : MainAPI() {
     // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search?q=$query").document
+        // WebView renders the search results
+        val document = app.get("$mainUrl/search?q=$query", interceptor = webView).document
         return document.select("a[data-card-wrapper=true]").mapNotNull { it.toSearchResult() }
     }
 
@@ -54,7 +61,8 @@ class MiruroProvider : MainAPI() {
     // LOAD (anime detail page + episode list)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        // WebView renders the anime details and episode buttons
+        val document = app.get(url, interceptor = webView).document
 
         val title = document.selectFirst("h1, .title")?.text()?.trim() ?: ""
         val poster = fixUrlNull(document.selectFirst("img[alt*=poster], .poster img")?.attr("src"))
@@ -101,38 +109,34 @@ class MiruroProvider : MainAPI() {
         val epId = parts[0]
         val anilistId = parts.getOrNull(1)
 
-        // Loop through the video servers you found (kiwi, ally, bonk)
         val providers = listOf("kiwi", "ally", "bonk") 
         
         providers.forEach { provider ->
             listOf("sub", "dub").forEach { category ->
-                // 1. Construct the raw JSON payload just like the browser does
                 val jsonPayload = if (anilistId != null && anilistId.toIntOrNull() != null) {
                     """{"path":"sources","method":"GET","query":{"episodeId":"$epId","provider":"$provider","category":"$category","anilistId":$anilistId},"body":null,"version":"0.2.0"}"""
                 } else {
                     """{"path":"sources","method":"GET","query":{"episodeId":"$epId","provider":"$provider","category":"$category"},"body":null,"version":"0.2.0"}"""
                 }
                 
-                // 2. Base64 Encode the JSON safely
-                val encodedPayload = android.util.Base64.encodeToString(jsonPayload.toByteArray(), android.util.Base64.NO_WRAP)
+                val encodedPayload = Base64.encodeToString(jsonPayload.toByteArray(), Base64.NO_WRAP)
                 val apiUrl = "$mainUrl/api/secure/pipe?e=$encodedPayload"
 
-                // 3. Hit the API and aggressively scrape any URL it returns
                 try {
+                    // Do NOT use WebViewResolver here, we just want the raw JSON from the internal API
                     val response = app.get(apiUrl).text
                     
-                    // The API returns a JSON with "sources" arrays. We use a Regex to yank the direct URLs out.
                     val urls = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(response).map { it.groupValues[1] }.toList()
                     
                     urls.forEach { parsedUrl ->
-                        val fixedUrl = parsedUrl.replace("\\/", "/") // Clean any JSON escaped slashes
+                        val fixedUrl = parsedUrl.replace("\\/", "/")
                         if (fixedUrl.startsWith("http")) {
                             loadExtractor(fixedUrl, data, subtitleCallback, callback)
                             found = true
                         }
                     }
                 } catch (e: Exception) {
-                    // Silently ignore if a specific provider or dub category fails
+                    // Silently ignore failures for missing providers
                 }
             }
         }
