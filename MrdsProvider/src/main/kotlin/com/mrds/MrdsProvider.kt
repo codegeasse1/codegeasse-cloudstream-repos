@@ -3,6 +3,8 @@ package com.mrds
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Element
 
 class MrdsProvider : MainAPI() {
@@ -32,7 +34,7 @@ class MrdsProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
         val title = this.text().substringBefore(" • ").trim()
-        
+
         val style = this.selectFirst(".blog-background")?.attr("style") ?: ""
         val posterMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
         val posterUrl = posterMatch?.replace("&quot;", "") ?: this.selectFirst("img")?.attr("src")
@@ -57,12 +59,12 @@ class MrdsProvider : MainAPI() {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
-        
+
         val style = document.selectFirst(".blog-background")?.attr("style") ?: ""
         val posterMatch = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
-        
+
         val poster = posterMatch?.replace("&quot;", "")
-            ?: document.selectFirst("img[src^=data:image]")?.attr("src") 
+            ?: document.selectFirst("img[src^=data:image]")?.attr("src")
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
         val synopsis = document.selectFirst(".post-content p, article p")?.text()
@@ -74,7 +76,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Compatible ExtractorLink Constructor)
+    // LOAD LINKS (uses newExtractorLink builder, not deprecated constructor)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -84,28 +86,29 @@ class MrdsProvider : MainAPI() {
     ): Boolean {
         var found = false
         val html = app.get(data).text
-        
+
         val cdnRegex = Regex("""https?://[^\s"'<>]+?dscxru\.cn[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-        
+
         cdnRegex.findAll(html).forEach { match ->
             var cleanUrl = match.value.replace("\\/", "/")
             cleanUrl = cleanUrl.replace("&amp;", "&")
-            
+
             if (cleanUrl.isNotBlank()) {
                 callback(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "MRDS Server",
                         name = "MRDS Server",
                         url = cleanUrl,
-                        referer = "$mainUrl/",
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = true
-                    )
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                        this.isM3u8 = true
+                    }
                 )
                 found = true
             }
         }
-        
+
         return found
     }
 }
