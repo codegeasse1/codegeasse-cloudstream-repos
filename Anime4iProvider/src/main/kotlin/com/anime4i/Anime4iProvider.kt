@@ -73,13 +73,22 @@ class Anime4iProvider : MainAPI() {
 
         val title = document.selectFirst("h1")?.text()?.trim() ?: ""
         
-        // Tighter selectors to avoid the site banner, and applying the same robust extraction as toSearchResult
-        val posterElement = document.selectFirst(".thumb img, .infox .imgbox img, .ts-post-image, img[itemprop=image]")
+        // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
+        val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
+        
         val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
             ?: posterElement?.attr("data-src")?.ifBlank { null }
             ?: posterElement?.attr("src")
         
-        val poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
+        var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
+
+        // FALLBACK: If the main selector fails, try og:image, but explicitly reject default site banners and logos
+        if (poster.isNullOrBlank()) {
+            val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
+            if (ogImage != null && !ogImage.contains("logo", true) && !ogImage.contains("banner", true)) {
+                poster = fixUrlNull(ogImage)
+            }
+        }
         
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis")?.text()
         val genres = document.select("a[href*=/genres/]").map { it.text() }
