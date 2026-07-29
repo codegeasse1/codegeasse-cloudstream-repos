@@ -21,10 +21,36 @@ class MrdsProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
+      // ---------------------------------------------------------------
+    // REMOTE TRANSLATION TOGGLE
+    // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
+    //   {"translate": true}
+    // Edit that file from your phone anytime — no rebuild needed.
+    // Cached for the lifetime of this provider instance (until the
+    // app fully restarts / plugin reloads).
+    // ---------------------------------------------------------------
+    private var cachedTranslateFlag: Boolean? = null
+
+    private suspend fun isTranslationEnabled(): Boolean {
+        cachedTranslateFlag?.let { return it }
+        val flag = try {
+            val json = app.get(
+                "https://gist.githubusercontent.com/codegeasse1/02333c773cbd933b02e1779e6a1222fe/raw/2bc338c7f4ffe2049c3a783dae83d083aaed2012/config.json"
+            ).text
+            Regex(""""translate"\s*:\s*(true|false)""").find(json)
+                ?.groupValues?.get(1)?.toBoolean() ?: true
+        } catch (e: Exception) {
+            true // fallback default if the fetch fails
+        }
+        cachedTranslateFlag = flag
+        return flag
+    }
+
     // ---------------------------------------------------------------
     // GOOGLE TRANSLATE HELPER (Free Endpoint)
     // ---------------------------------------------------------------
     private suspend fun translateToEnglish(text: String?): String? {
+        if (!isTranslationEnabled()) return text
         if (text.isNullOrBlank()) return text
         return try {
             val encodedText = URLEncoder.encode(text, "UTF-8")
@@ -42,9 +68,7 @@ class MrdsProvider : MainAPI() {
         } catch (e: Exception) {
             text
         }
-    }
-
-    // ---------------------------------------------------------------
+    } ---------------------------------------------------------------
     // NATIVE AES IMAGE DECRYPTION
     // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
