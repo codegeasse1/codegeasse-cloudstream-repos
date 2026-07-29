@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
-import java.util.EnumSet
 
 class AnimeXinProvider : MainAPI() {
     override var mainUrl = "https://animexin.dev"
@@ -59,25 +58,45 @@ class AnimeXinProvider : MainAPI() {
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
-            // Fix for the DubStatus MutableSet assignment error
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
-                EnumSet.of(DubStatus.Dubbed)
+                mutableSetOf(DubStatus.Dubbed)
             } else {
-                EnumSet.of(DubStatus.Subbed)
+                mutableSetOf(DubStatus.Subbed)
             }
         }
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (Multi-page fetch up to 100 items)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/?s=$query"
-        val document = app.get(url).document
-        
-        return document.select("article.bs, .listupd .bsx").mapNotNull { element ->
-            element.toSearchResult()
+        val searchResults = mutableListOf<SearchResponse>()
+        val targetLimit = 100
+        var page = 1
+
+        while (searchResults.size < targetLimit) {
+            val url = if (page == 1) {
+                "$mainUrl/?s=$query"
+            } else {
+                "$mainUrl/page/$page/?s=$query"
+            }
+
+            try {
+                val document = app.get(url).document
+                val items = document.select("article.bs, .listupd .bsx").mapNotNull { element ->
+                    element.toSearchResult()
+                }
+
+                if (items.isEmpty()) break
+
+                searchResults.addAll(items)
+                page++
+            } catch (e: Exception) {
+                break
+            }
         }
+
+        return searchResults.take(targetLimit)
     }
 
     // ---------------------------------------------------------------
@@ -108,7 +127,6 @@ class AnimeXinProvider : MainAPI() {
             
             val epNum = Regex("""(?i)episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
             
-            // Fix for the Episode constructor deprecation error
             episodes.add(newEpisode(epUrl) {
                 this.name = epTitle
                 this.posterUrl = epThumb
@@ -123,7 +141,6 @@ class AnimeXinProvider : MainAPI() {
             val epNum = ep.selectFirst(".epl-num")?.text()?.toIntOrNull()
             val epTitle = ep.selectFirst(".epl-title")?.text() ?: "Episode $epNum"
             
-            // Fix for the Episode constructor deprecation error
             episodes.add(newEpisode(epUrl) {
                 this.name = epTitle
                 this.episode = epNum
@@ -131,7 +148,6 @@ class AnimeXinProvider : MainAPI() {
         }
 
         if (episodes.isEmpty()) {
-            // Fix for the Episode constructor deprecation error
             episodes.add(newEpisode(url) {
                 this.name = title
             })
