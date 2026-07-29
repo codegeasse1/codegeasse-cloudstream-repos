@@ -12,6 +12,8 @@ import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 
 class MrdsProvider : MainAPI() {
     override var mainUrl = "https://mrds.com"
@@ -31,21 +33,28 @@ class MrdsProvider : MainAPI() {
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
             
             // Explicitly set User-Agent so Google doesn't block the request
-            val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")).text
+            val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")).text
             
             var translated = ""
-            // Safely extract all translated segments from the JSON array
-            val regex = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)",""")
-            val matches = regex.findAll(response.substringBefore("]],null,"))
-            
-            matches.forEach { match ->
-                translated += match.groupValues[1]
-                    .replace("\\\"", "\"")
-                    .replace("\\n", "\n")
-                    .replace("\\r", "")
+            // Safely parse the JSON array response without catastrophic regex backtracking
+            if (response.startsWith("[[[\"")) {
+                val translationBlock = response.substringAfter("[[[").substringBefore("]],")
+                val segments = translationBlock.split("],[")
+                
+                for (segment in segments) {
+                    val match = Regex("""^"((?:[^"\\]|\\.)*)"""").find(segment)
+                    if (match != null) {
+                        translated += match.groupValues[1]
+                    }
+                }
             }
             
-            if (translated.isNotBlank() && translated != "null") translated else text
+            val finalStr = translated
+                .replace("\\\"", "\"")
+                .replace("\\n", "\n")
+                .replace("\\r", "")
+                
+            if (finalStr.isNotBlank() && finalStr != "null") finalStr else text
         } catch (e: Exception) {
             text // Fallback to original text if offline or blocked
         }
@@ -55,9 +64,10 @@ class MrdsProvider : MainAPI() {
     private suspend fun translateList(items: List<SearchResponse>): List<SearchResponse> {
         if (items.isEmpty()) return items
         
-        val combinedTitles = items.joinToString(" || ") { it.name }
+        // Bundle all titles together separated by ~
+        val combinedTitles = items.joinToString(" ~ ") { it.name }
         val translatedCombined = translateText(combinedTitles, "en") ?: combinedTitles
-        val translatedTitles = translatedCombined.split(Regex("""\s*\|\|\s*"""))
+        val translatedTitles = translatedCombined.split(Regex("""\s*~\s*"""))
         
         return items.mapIndexed { index, res ->
             val newTitle = translatedTitles.getOrNull(index)?.trim() ?: res.name
@@ -85,7 +95,6 @@ class MrdsProvider : MainAPI() {
             val ext = url.substringAfterLast(".", "jpeg").substringBefore("?")
             "data:image/$ext;base64," + Base64.encodeToString(decryptedBytes, Base64.NO_WRAP)
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
@@ -106,12 +115,12 @@ class MrdsProvider : MainAPI() {
             element.toSearchResult()
         }
         
-        // Translate the homepage feed into English instantly
+        // Translate the entire homepage feed into English instantly
         return newHomePageResponse(request.name, translateList(homeItems))
     }
 
     // ---------------------------------------------------------------
-    // ITEM PARSING
+    // ITEM PARSING (No translation here to save time)
     // ---------------------------------------------------------------
     private suspend fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
@@ -139,7 +148,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Dual Query + Auto English/Chinese Translation)
+    // CONCURRENT SEARCH (Dual Query + Auto English/Chinese Translation)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
@@ -147,21 +156,22 @@ class MrdsProvider : MainAPI() {
         // 1. Translate the English query (e.g., "mengyao") to Chinese (e.g., "梦瑶")
         val chineseQuery = translateText(query, "zh-CN") ?: query
 
-        // 2. Set up Dual-Search URLs
-        val urlsToSearch = mutableSetOf<String>()
-        urlsToSearch.add("$mainUrl/?s=${URLEncoder.encode(chineseQuery, "UTF-8")}")
-        
-        // If translation is different, search the exact English text too just in case
-        if (chineseQuery != query) {
-            urlsToSearch.add("$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}")
-        }
-
-        // 3. Fetch search results
-        urlsToSearch.forEach { url ->
-            val doc = app.get(url).document
-            doc.select("article:has(.post-card) a").forEach { element ->
-                element.toSearchResult()?.let { results.add(it) }
+        // 2. Fetch both Chinese and English searches simultaneously
+        coroutineScope {
+            val chineseTask = async {
+                val encodedChinese = URLEncoder.encode(chineseQuery, "UTF-8")
+                app.get("$mainUrl/?s=$encodedChinese").document.select("article:has(.post-card) a").mapNotNull { it.toSearchResult() }
             }
+            
+            val englishTask = if (chineseQuery != query) {
+                async {
+                    val encodedOrig = URLEncoder.encode(query, "UTF-8")
+                    app.get("$mainUrl/?s=$encodedOrig").document.select("article:has(.post-card) a").mapNotNull { it.toSearchResult() }
+                }
+            } else null
+
+            results.addAll(chineseTask.await())
+            englishTask?.await()?.let { results.addAll(it) }
         }
 
         // Remove duplicates and apply Batch Translation so the UI stays English
@@ -170,13 +180,24 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page - Concurrent Translation)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
-        val title = translateText(rawTitle, "en") ?: "Video"
+        val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
+        
+        // Translate title and plot simultaneously to load twice as fast
+        var title = rawTitle
+        var synopsis = rawSynopsis
+        coroutineScope {
+            val titleTask = async { translateText(rawTitle, "en") }
+            val synTask = async { translateText(rawSynopsis, "en") }
+            title = titleTask.await() ?: rawTitle
+            synopsis = synTask.await() ?: rawSynopsis
+        }
+        
         val pageHtml = document.outerHtml()
 
         val contentImg = document.selectFirst(".post-content img, article p img")
@@ -199,9 +220,6 @@ class MrdsProvider : MainAPI() {
         if (poster != null && poster.contains("pic.xustgq.cn")) {
             poster = decryptImageUrl(poster) ?: poster
         }
-
-        val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
-        val synopsis = translateText(rawSynopsis, "en")
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
