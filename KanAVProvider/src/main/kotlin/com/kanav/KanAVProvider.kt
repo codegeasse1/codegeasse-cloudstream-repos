@@ -18,6 +18,9 @@ class KanAVProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW, TvType.Others)
 
+    // Cache to map English tags → original Chinese (filled in load)
+    private val tagTranslationMap = mutableMapOf<String, String>()
+
     // ---------------------------------------------------------------
     // GOOGLE TRANSLATE HELPER
     // ---------------------------------------------------------------
@@ -82,12 +85,16 @@ class KanAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (automatically translates English → Chinese)
+    // SEARCH – uses the tagTranslationMap to redirect English → Chinese
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        // Convert English query to Chinese so that the site returns correct results
-        val chineseQuery = translateText(query, false) ?: query
-        val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(chineseQuery, "UTF-8")}"
+        // If the user clicked a tag, we might have a cached Chinese equivalent
+        val actualQuery = tagTranslationMap[query] ?: run {
+            // Otherwise, translate the whole query from English to Chinese
+            translateText(query, false) ?: query
+        }
+
+        val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(actualQuery, "UTF-8")}"
         val document = app.get(url).document
 
         return document.select(".video-item").mapNotNull { element ->
@@ -96,7 +103,7 @@ class KanAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) – now shows English tags that are clickable
+    // LOAD (Detail Page) – populates the tagTranslationMap
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -108,35 +115,42 @@ class KanAVProvider : MainAPI() {
         val posterUrl = fixUrlNull(posterElement?.attr("data-original")?.ifBlank { posterElement.attr("src") })
 
         // Collect all clickable tag links (categories + tags + actors)
-        val tagElements = document.select(
+        val tagLinks = document.select(
             ".video-countext-categories a, .video-countext-tags a"
         ).filter {
-            it.attr("href") != "#" // exclude dummy date link
+            it.attr("href") != "#" && it.attr("href").isNotBlank()
         }
 
-        // Translate the combined Chinese tags to English for display
-        val rawTags = tagElements.map { it.text().trim() }
+        // Build list of original Chinese tags
+        val chineseTags = tagLinks.map { it.text().trim() }
             .filter { it.isNotBlank() }
             .distinct()
 
-        val tags = if (rawTags.isNotEmpty()) {
-            // Join, translate as one batch, then split back (avoids repeated API calls)
-            val joined = rawTags.joinToString(" ~ ")
+        // Translate them to English in one batch (for display)
+        val englishTags = if (chineseTags.isNotEmpty()) {
+            val joined = chineseTags.joinToString(" ~ ")
             val translated = translateText(joined, true) ?: joined
             translated.split(" ~ ").map { it.trim() }
         } else {
             emptyList()
         }
 
+        // Populate the mapping: English tag → original Chinese
+        // This is used by search() to redirect the click
+        tagTranslationMap.clear()
+        chineseTags.zip(englishTags).forEach { (cn, en) ->
+            tagTranslationMap[en] = cn
+        }
+
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = posterUrl
             this.plot = title
-            this.tags = tags
+            this.tags = englishTags   // display English, click uses search() above
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (MacCMS player_aaaa Decoder – FIXED)
+    // LOAD LINKS (MacCMS player_aaaa Decoder – already working)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -149,12 +163,10 @@ class KanAVProvider : MainAPI() {
         val pageHtml = document.html()
 
         try {
-            // Extract player_aaaa JSON object
             val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
             val match = jsonRegex.find(pageHtml)
             if (match != null) {
                 val jsonString = match.groupValues[1]
-                // Get encrypt type and encoded URL
                 val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
                 val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
 
@@ -163,16 +175,12 @@ class KanAVProvider : MainAPI() {
                     val encryptType = encryptMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
                     val realUrl = when (encryptType) {
-                        1 -> {
-                            // encrypt=1: only Base64 decode
-                            String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
-                        }
+                        1 -> String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
                         2 -> {
-                            // encrypt=2: Base64 decode → then URL decode
                             val base64Decoded = String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
                             URLDecoder.decode(base64Decoded, "UTF-8")
                         }
-                        else -> encodedUrl // fallback
+                        else -> encodedUrl
                     }
 
                     if (realUrl.contains(".m3u8")) {
@@ -195,7 +203,6 @@ class KanAVProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // Fallback: search for direct .m3u8 links anywhere in the HTML
         if (!found) {
             val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
             cdnRegex.findAll(pageHtml).forEach { match ->
