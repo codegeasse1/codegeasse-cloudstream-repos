@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
@@ -27,19 +28,21 @@ class ChikiAnimationProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data
-                  else request.data.replace("?", "page/$page/?")
+        else request.data.replace("?", "page/$page/?")
         val document = app.get(url).document
         val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val linkEl   = this.selectFirst("a") ?: return null
-        val rawHref  = fixUrlNull(linkEl.attr("href")) ?: return null
+        val linkEl = this.selectFirst("a") ?: return null
+        val rawHref = fixUrlNull(linkEl.attr("href")) ?: return null
         val href = rawHref
             .replace(Regex("-(episode|ep)-\\d+-[a-zA-Z0-9-]+/?$"), "")
-            .let { if (it.contains("/anime/")) it
-                   else "$mainUrl/anime/${it.substringAfterLast("/")}" }
+            .let {
+                if (it.contains("/anime/")) it
+                else "$mainUrl/anime/${it.substringAfterLast("/")}"
+            }
 
         val title = linkEl.attr("title").ifBlank {
             this.selectFirst("div.tt")?.text()
@@ -47,8 +50,8 @@ class ChikiAnimationProvider : MainAPI() {
 
         val rawPoster =
             this.selectFirst("img")?.attr("data-lazy-src")?.ifBlank { null }
-            ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
-            ?: this.selectFirst("img")?.attr("src")
+                ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
+                ?: this.selectFirst("img")?.attr("src")
 
         val posterUrl = fixUrlNull(
             rawPoster?.substringBefore("?")
@@ -72,12 +75,12 @@ class ChikiAnimationProvider : MainAPI() {
 
         val posterElement = document.selectFirst(
             ".bigcontent .thumb img, .bixbox .thumb img, " +
-            "article .thumb img, .infox .imgbox img, .ts-post-image"
+                    "article .thumb img, .infox .imgbox img, .ts-post-image"
         )
         val rawPoster =
             posterElement?.attr("data-lazy-src")?.ifBlank { null }
-            ?: posterElement?.attr("data-src")?.ifBlank { null }
-            ?: posterElement?.attr("src")
+                ?: posterElement?.attr("data-src")?.ifBlank { null }
+                ?: posterElement?.attr("src")
 
         var poster = fixUrlNull(
             rawPoster?.substringBefore("?")
@@ -100,7 +103,7 @@ class ChikiAnimationProvider : MainAPI() {
         ): List<Episode> {
             return doc.select(
                 "div.eplister ul li, div.episodelist ul li, " +
-                "ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li"
+                        "ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li"
             ).mapNotNull { li ->
                 val epLink = li.selectFirst("a")
                 val epHref: String = when {
@@ -111,19 +114,19 @@ class ChikiAnimationProvider : MainAPI() {
                 }
 
                 val epTitle = (
-                    epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()
-                ).trim()
+                        epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()
+                        ).trim()
 
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 val epNum: Int? =
                     Regex("(?i)episode\\s*(\\d+)").find(epNumText)
                         ?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)
-                        ?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
+                        ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)
+                            ?.groupValues?.get(1)?.toIntOrNull()
+                        ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
 
                 newEpisode(epHref) {
-                    this.name    = epTitle.ifBlank { "Episode $epNum" }
+                    this.name = epTitle.ifBlank { "Episode $epNum" }
                     this.episode = epNum
                 }
             }.distinctBy { it.data }.reversed()
@@ -137,8 +140,8 @@ class ChikiAnimationProvider : MainAPI() {
                 ?.attr("href")
             val anyEpLink = document.select("a[href]").firstOrNull {
                 (it.attr("href").contains("-episode-") ||
-                 it.attr("href").contains("-ep-")) &&
-                 it.attr("href").contains(mainUrl)
+                        it.attr("href").contains("-ep-")) &&
+                        it.attr("href").contains(mainUrl)
             }?.attr("href")
 
             fixUrlNull(firstEpLink ?: anyEpLink)?.let { fallback ->
@@ -148,8 +151,8 @@ class ChikiAnimationProvider : MainAPI() {
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
-            this.plot      = synopsis
-            this.tags      = genres
+            this.plot = synopsis
+            this.tags = genres
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -168,139 +171,115 @@ class ChikiAnimationProvider : MainAPI() {
         val response = app.get(
             data,
             headers = mapOf(
-                "User-Agent"      to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                                     "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                                     "Chrome/124.0.0.0 Safari/537.36",
-                "Accept"          to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language" to "en-US,en;q=0.5",
-                "Referer"         to mainUrl
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                        "Chrome/124.0.0.0 Safari/537.36",
+                "Referer" to mainUrl
             )
         )
         val document = response.document
         val pageHtml = response.text
 
-        // ── DEBUG ─────────────────────────────────────────────────
-        Log.d(TAG, "HTML length: ${pageHtml.length}")
-        Log.d(TAG, pageHtml.take(3000))
-
-        document.select("iframe").forEachIndexed { i, el ->
-            Log.d(TAG, "iframe[$i]: ${el.attributes()}")
-        }
-        document.select("script").forEach { s ->
-            val c = s.html()
-            if (c.contains("embed", true) || c.contains("dailymotion", true) ||
-                c.contains("player", true) || c.contains("video", true)) {
-                Log.d(TAG, "[SCRIPT]: ${c.take(600)}")
-            }
-        }
-        Log.d(TAG, "pembed      : ${document.selectFirst("#pembed")?.html()?.take(400)}")
-        Log.d(TAG, "embed_holder: ${document.selectFirst("#embed_holder")?.html()?.take(400)}")
-
-        // ── Collect embed URLs ────────────────────────────────────
         val embedUrls = mutableSetOf<String>()
 
         fun addUrl(raw: String) {
             val u = raw.trim()
             when {
                 u.startsWith("http") -> embedUrls.add(u)
-                u.startsWith("//")   -> embedUrls.add("https:$u")
+                u.startsWith("//") -> embedUrls.add("https:$u")
             }
         }
 
-        // A. data-* attributes on every element
-        document.allElements.forEach { el ->
-            listOf("data-src","data-lazy-src","data-original",
-                   "data-embed","data-default-embed","data-url",
-                   "data-video","data-link").forEach { attr ->
-                val v = el.attr(attr)
-                if (v.isNotBlank()) {
-                    Log.d(TAG, "[data-attr] ${el.tagName()} $attr=$v")
-                    addUrl(v)
+        // 1. Extract from <option> values (Server dropdown selector)
+        document.select("option").forEach { option ->
+            val value = option.attr("value").trim()
+            if (value.isNotBlank()) {
+                // Try Base64 Decoding first
+                val decoded = runCatching {
+                    String(Base64.decode(value, Base64.DEFAULT))
+                }.getOrNull() ?: value
+
+                // Regex search for iframe src inside option html/value
+                Regex("""(?:src|href)=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                    .findAll(decoded).forEach { m -> addUrl(m.groupValues[1]) }
+
+                if (value.startsWith("http") || value.startsWith("//")) {
+                    addUrl(value)
                 }
             }
         }
 
-        // B. iframes
+        // 2. Extract from <iframe> elements (src, data-src, etc.)
         document.select("iframe").forEach { iframe ->
-            listOf("src","data-src","data-lazy-src","data-original").forEach { attr ->
+            listOf("src", "data-src", "data-lazy-src", "data-original").forEach { attr ->
                 val v = iframe.attr(attr)
-                if (v.isNotBlank()) {
-                    Log.d(TAG, "[iframe $attr]: $v")
-                    addUrl(v)
-                }
+                if (v.isNotBlank()) addUrl(v)
             }
         }
 
-        // C. Base64 encoded embed
-        document.select("[data-default-embed]").forEach { el ->
-            val encoded = el.attr("data-default-embed")
-            if (encoded.isNotBlank()) {
-                runCatching {
-                    val decoded = String(Base64.decode(encoded, Base64.DEFAULT))
-                    Log.d(TAG, "[base64]: $decoded")
-                    Regex("""(?:src|href)=["']([^"']+)["']""")
-                        .findAll(decoded).forEach { m -> addUrl(m.groupValues[1]) }
-                }
-            }
-        }
-
-        // D. Raw HTML — iframe src
-        Regex("""<iframe[^>]+src=["']([^"'<>]+)["']""")
-            .findAll(pageHtml).forEach { m ->
-                Log.d(TAG, "[raw src]: ${m.groupValues[1]}")
-                addUrl(m.groupValues[1])
-            }
-
-        // E. Raw HTML — iframe data-src
-        Regex("""<iframe[^>]+data-src=["']([^"'<>]+)["']""")
-            .findAll(pageHtml).forEach { m ->
-                Log.d(TAG, "[raw data-src]: ${m.groupValues[1]}")
-                addUrl(m.groupValues[1])
-            }
-
-        // F. JS variable scan
-        Regex(
-            """(?:src|url|embed|link|video)\s*[:=]\s*["']""" +
-            """(https?://[^"']+(?:dailymotion|streamtape|dood|""" +
-            """filemoon|mp4upload|ok\.ru|drive\.google)[^"']*)["']""",
-            RegexOption.IGNORE_CASE
-        ).findAll(pageHtml).forEach { m ->
-            Log.d(TAG, "[JS var]: ${m.groupValues[1]}")
-            addUrl(m.groupValues[1])
-        }
+        // 3. Extract from raw regex matched iframes
+        Regex("""<iframe[^>]+(?:src|data-src)=["']([^"'<>]+)["']""", RegexOption.IGNORE_CASE)
+            .findAll(pageHtml).forEach { m -> addUrl(m.groupValues[1]) }
 
         Log.d(TAG, "Collected ${embedUrls.size} embed URL(s):")
-        embedUrls.forEach { Log.d(TAG, "  -> $it") }
+        embedUrls.forEach { Log.d(TAG, " -> $it") }
 
-        // ── Extract from each URL ─────────────────────────────────
         var found = false
 
         for (raw in embedUrls) {
-            val url2 = fixUrlNull(raw) ?: continue
-            Log.d(TAG, "Trying: $url2")
-            try {
-                val finalUrl = when {
-                    // geo.dailymotion.com → standard embed
-                    url2.contains("geo.dailymotion.com") -> {
-                        val id = Regex("""video=([a-zA-Z0-9]+)""")
-                            .find(url2)?.groupValues?.get(1)
-                        if (id != null) {
-                            "https://www.dailymotion.com/embed/video/$id"
-                        } else null
-                    }
-                    else -> url2
+            val url = fixUrlNull(raw) ?: continue
+            Log.d(TAG, "Processing embed URL: $url")
+
+            // Check if URL is Dailymotion
+            if (url.contains("dailymotion.com")) {
+                val videoId = Regex("""(?:video/|video=)([a-zA-Z0-9]+)""")
+                    .find(url)?.groupValues?.get(1)
+
+                if (videoId != null) {
+                    val dmSuccess = invokeDailymotion(videoId, callback)
+                    if (dmSuccess) found = true
                 }
-                if (finalUrl != null) {
-                    Log.d(TAG, "  loadExtractor -> $finalUrl")
-                    loadExtractor(finalUrl, data, subtitleCallback, callback)
+            } else {
+                // Pass non-Dailymotion embeds to standard Cloudstream extractors
+                try {
+                    loadExtractor(url, data, subtitleCallback, callback)
                     found = true
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error loading extractor for $url: ${e.message}")
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "  Error: ${e.message}")
             }
         }
 
-        Log.d(TAG, "=== done, found=$found ===")
         return found
+    }
+
+    // Direct Dailymotion M3U8 Extractor via Metadata API
+    private suspend fun invokeDailymotion(
+        videoId: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val metadataUrl = "https://www.dailymotion.com/player/metadata/video/$videoId"
+            val response = app.get(metadataUrl).text
+
+            // Extract the master m3u8 playlist URL from metadata JSON
+            val m3u8Url = Regex(""""url"\s*:\s*"(https://[^"]+\.m3u8[^"]*)"""")
+                .find(response)?.groupValues?.get(1)
+                ?.replace("\\/", "/")
+
+            if (!m3u8Url.isNullOrEmpty()) {
+                M3u8Helper.generateM3u8(
+                    source = name,
+                    streamUrl = m3u8Url,
+                    referer = "https://www.dailymotion.com/"
+                ).forEach(callback)
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Dailymotion extraction failed: ${e.message}")
+            false
+        }
     }
 }
