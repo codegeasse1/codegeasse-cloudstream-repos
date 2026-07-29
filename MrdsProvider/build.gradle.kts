@@ -4,7 +4,7 @@ cloudstream {
     description = "MRDS Video Provider"
     authors = listOf("Codegeasse")
     status = 1
-    tvTypes = listOf("Others", "Movie")
+    tvTypes = listOf("NSFW")
     iconUrl = "https://www.google.com/s2/favicons?domain=mrds.com&sz=%size%"
 }
 
