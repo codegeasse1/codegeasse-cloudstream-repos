@@ -10,7 +10,7 @@ import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class TaiAVProvider : MainAPI() {
+public class TaiAVProvider : MainAPI() {
     override var mainUrl = "https://m.taiav.com"
     override var name = "TaiAV"
     override val hasMainPage = true
@@ -157,7 +157,6 @@ class TaiAVProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // Fallback 1: m3u8
         if (!found) {
             val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
             cdnRegex.findAll(pageHtml).forEach { match ->
@@ -179,7 +178,6 @@ class TaiAVProvider : MainAPI() {
             }
         }
 
-        // Fallback 2: .ts to .m3u8 conversion
         if (!found) {
             val tsRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.ts[^\s"'<>]*""")
             tsRegex.findAll(pageHtml).forEach { match ->
