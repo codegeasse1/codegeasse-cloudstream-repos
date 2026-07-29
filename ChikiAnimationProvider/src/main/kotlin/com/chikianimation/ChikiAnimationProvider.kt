@@ -71,22 +71,9 @@ class ChikiAnimationProvider : MainAPI() {
 
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
         
-        // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
-        val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
-        
-        val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
-            ?: posterElement?.attr("data-src")?.ifBlank { null }
-            ?: posterElement?.attr("src")
-        
-        var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
-
-        // FALLBACK: If the main selector fails, try og:image, but explicitly reject default site banners and logos
-        if (poster.isNullOrBlank()) {
-            val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
-            if (ogImage != null && !ogImage.contains("logo", true) && !ogImage.contains("banner", true)) {
-                poster = fixUrlNull(ogImage)
-            }
-        }
+        // REVERTED to old simple selector logic
+        val rawPoster = document.selectFirst(".limit img, .infox img, img[itemprop=image], .thumb img")?.attr("src")
+        val poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
         
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis, .desc")?.text()
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
@@ -142,7 +129,7 @@ class ChikiAnimationProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Using your clean, working logic)
+    // LOAD LINKS (Reverted to your working old code)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -153,7 +140,6 @@ class ChikiAnimationProvider : MainAPI() {
         val document = app.get(data).document
         var found = false
 
-        // 1. Scrape Base64 Dropdowns and Hidden Embeds
         val embedDiv = document.selectFirst("#pembed[data-default-embed]")
         val encoded = embedDiv?.attr("data-default-embed")
 
@@ -172,17 +158,12 @@ class ChikiAnimationProvider : MainAPI() {
             }
         }
 
-        // 2. Safely grab iframes directly from the DOM, prioritizing lazy-loaded attributes
-        document.select("iframe").forEach { iframe ->
-            val src = iframe.attr("src")
-                .ifBlank { iframe.attr("data-src") }
-                .ifBlank { iframe.attr("data-lazy-src") }
-                
-            if (src.isNotBlank() && !src.contains("javascript:")) {
-                loadExtractor(fixUrlNull(src) ?: src, data, subtitleCallback, callback)
+        document.select("iframe[src*=dailymotion], iframe.dmp_iframe, div.agn-player-stage iframe")
+            .forEach { iframe ->
+                val src = fixUrlNull(iframe.attr("src")) ?: return@forEach
+                loadExtractor(src, data, subtitleCallback, callback)
                 found = true
             }
-        }
 
         return found
     }
