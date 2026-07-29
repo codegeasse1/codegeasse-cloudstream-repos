@@ -22,47 +22,26 @@ class MrdsProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
-    // SAFE GOOGLE TRANSLATE HELPER
+    // GOOGLE TRANSLATE HELPER (Free Endpoint)
     // ---------------------------------------------------------------
-    private suspend fun translateText(text: String?): String? {
+    private suspend fun translateToEnglish(text: String?): String? {
         if (text.isNullOrBlank()) return text
         return try {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=$encodedText"
-            
-            // The User-Agent prevents Google from blocking the translation
-            val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")).text
-            
-            var translated = ""
-            if (response.startsWith("[[[\"")) {
-                val translationBlock = response.substringAfter("[[[").substringBefore("]],")
-                val segments = translationBlock.split("],[")
-                for (segment in segments) {
-                    val match = Regex("""^"((?:[^"\\]|\\.)*)"""").find(segment)
-                    if (match != null) translated += match.groupValues[1]
-                }
-            }
-            
-            val finalStr = translated.replace("\\\"", "\"").replace("\\n", "\n").replace("\\r", "")
-            if (finalStr.isNotBlank() && finalStr != "null") finalStr else text
-        } catch (e: Exception) {
-            text 
-        }
-    }
+            val response = app.get(url).text
 
-    // BATCH TRANSLATION: Translates a whole page of results in 1 fast API call to prevent timeouts
-    private suspend fun translateList(items: List<SearchResponse>): List<SearchResponse> {
-        if (items.isEmpty()) return items
-        
-        val combinedTitles = items.joinToString(" ~ ") { it.name }
-        val translatedCombined = translateText(combinedTitles) ?: combinedTitles
-        val translatedTitles = translatedCombined.split(Regex("""\s*~\s*"""))
-        
-        return items.mapIndexed { index, res ->
-            val newTitle = translatedTitles.getOrNull(index)?.trim() ?: res.name
-            newMovieSearchResponse(newTitle, res.url, TvType.Movie) {
-                this.posterUrl = res.posterUrl
-            }
+            // Extract all translated sentence segments from the Google Translate JSON array
+            val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
+            val translated = matches.map { 
+                it.groupValues[1]
+                    .replace("\\\"", "\"")
+                    .replace("\\n", "\n") 
+            }.joinToString("")
+
+            if (translated.isNotBlank()) translated else text
+        } catch (e: Exception) {
+            text
         }
     }
 
@@ -102,20 +81,20 @@ class MrdsProvider : MainAPI() {
         val document = app.get(url).document
 
         val homeItems = document.select("article:has(.post-card) a").mapNotNull { element ->
-            element.toSearchResult() // Removed the slow individual translation
+            element.toSearchResultAsync()
         }
         
-        // Translates the whole homepage instantly
-        return newHomePageResponse(request.name, translateList(homeItems))
+        return newHomePageResponse(request.name, homeItems)
     }
 
     // ---------------------------------------------------------------
-    // SEARCH & HOMEPAGE ITEM PARSING (No translation here to save time)
+    // SEARCH & HOMEPAGE ITEM PARSING
     // ---------------------------------------------------------------
-    private suspend fun Element.toSearchResult(): SearchResponse? {
+    private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
-        val title = this.selectFirst(".post-card-title")?.text()?.trim()
+        val rawTitle = this.selectFirst(".post-card-title")?.text()?.trim()
             ?: this.text().substringBefore(" • ").trim()
+        val title = translateToEnglish(rawTitle) ?: rawTitle
         val cardHtml = this.outerHtml()
 
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
@@ -139,29 +118,27 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Simple Search with UI Translation)
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         
-        val searchItems = document.select("article:has(.post-card) a").mapNotNull { element ->
-            element.toSearchResult()
+        return document.select("article:has(.post-card) a").mapNotNull { element ->
+            element.toSearchResultAsync()
         }
-        
-        // Translate the search results to English before displaying
-        return translateList(searchItems)
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page - Translated Title & Plot)
+    // LOAD (Detail Page - Inside Thumbnail Fix + Translated Title & Plot)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
-        val title = translateText(rawTitle) ?: "Video"
+        val title = translateToEnglish(rawTitle) ?: "Video"
         val pageHtml = document.outerHtml()
 
+        // 1. Prioritize the actual post image inside the content block
         val contentImg = document.selectFirst(".post-content img, article p img")
         var poster = contentImg?.let { 
             it.attr("z-image-loader-url").ifBlank { 
@@ -171,20 +148,23 @@ class MrdsProvider : MainAPI() {
             } 
         }
         
+        // 2. Fallback to script banner if no content image exists
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
 
+        // 3. Final fallback to og:image
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
 
+        // Decrypt the detail page poster if it is hosted on the encrypted CDN
         if (poster != null && poster.contains("pic.xustgq.cn")) {
             poster = decryptImageUrl(poster) ?: poster
         }
 
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
-        val synopsis = translateText(rawSynopsis)
+        val synopsis = translateToEnglish(rawSynopsis)
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
