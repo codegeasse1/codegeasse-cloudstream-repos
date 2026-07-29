@@ -409,6 +409,25 @@ class ChikiAnimationProvider : MainAPI() {
         return found
     }
 
+    private suspend fun addDailymotionM3u8(
+        m3u8Url: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var added = false
+        val cleanUrl = m3u8Url.replace("\\/", "/")
+        runCatching {
+            M3u8Helper.generateM3u8(
+                source = "Dailymotion",
+                streamUrl = cleanUrl,
+                referer = "https://www.dailymotion.com/"
+            ).forEach { link ->
+                callback(link)
+                added = true
+            }
+        }
+        return added
+    }
+
     // Robust Multi-tier Dailymotion Resolver
     private suspend fun invokeDailymotion(
         videoId: String,
@@ -421,28 +440,12 @@ class ChikiAnimationProvider : MainAPI() {
             "Referer" to "https://www.dailymotion.com/"
         )
 
-        fun addM3u8(m3u8Url: String): Boolean {
-            var added = false
-            val cleanUrl = m3u8Url.replace("\\/", "/")
-            runCatching {
-                M3u8Helper.generateM3u8(
-                    source = "Dailymotion",
-                    streamUrl = cleanUrl,
-                    referer = "https://www.dailymotion.com/"
-                ).forEach { link ->
-                    callback(link)
-                    added = true
-                }
-            }
-            return added
-        }
-
         // 1. Metadata API
         runCatching {
             val metaUrl = "https://www.dailymotion.com/player/metadata/video/$videoId"
             val json = app.get(metaUrl, headers = headers).text
             Regex("""https?:\\?/\\?/[^"]+\.m3u8[^"]*""").findAll(json).forEach { match ->
-                if (addM3u8(match.value)) found = true
+                if (addDailymotionM3u8(match.value, callback)) found = true
             }
         }
         if (found) return true
@@ -452,7 +455,7 @@ class ChikiAnimationProvider : MainAPI() {
             val geoMetaUrl = "https://geo.dailymotion.com/player/metadata/video/$videoId"
             val json = app.get(geoMetaUrl, headers = headers).text
             Regex("""https?:\\?/\\?/[^"]+\.m3u8[^"]*""").findAll(json).forEach { match ->
-                if (addM3u8(match.value)) found = true
+                if (addDailymotionM3u8(match.value, callback)) found = true
             }
         }
         if (found) return true
@@ -462,14 +465,14 @@ class ChikiAnimationProvider : MainAPI() {
             val embedUrl = "https://www.dailymotion.com/embed/video/$videoId"
             val html = app.get(embedUrl, headers = headers).text
             Regex("""https?:\\?/\\?/[^"]+\.m3u8[^"]*""").findAll(html).forEach { match ->
-                if (addM3u8(match.value)) found = true
+                if (addDailymotionM3u8(match.value, callback)) found = true
             }
         }
         if (found) return true
 
         // 4. Cloudstream Extractor Fallback
         runCatching {
-            loadExtractor("https://www.dailymotion.com/embed/video/$videoId", subtitleCallback, callback)
+            loadExtractor("https://www.dailymotion.com/embed/video/$videoId", "https://www.dailymotion.com/", subtitleCallback, callback)
             found = true
         }
 
