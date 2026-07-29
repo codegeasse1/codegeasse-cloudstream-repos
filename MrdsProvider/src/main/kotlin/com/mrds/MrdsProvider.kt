@@ -118,37 +118,14 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Fetch ALL pages infinitely until results are exhausted)
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchResults = mutableListOf<SearchResponse>()
-        var page = 1
-
-        while (true) {
-            val url = if (page == 1) {
-                "$mainUrl/?s=$query"
-            } else {
-                "$mainUrl/page/$page/?s=$query"
-            }
-
-            try {
-                val document = app.get(url).document
-                val items = document.select("article:has(.post-card) a").mapNotNull { element ->
-                    element.toSearchResultAsync()
-                }
-
-                // Stop loop if the current page has no videos (end of search results)
-                if (items.isEmpty()) break
-
-                searchResults.addAll(items)
-                page++
-            } catch (e: Exception) {
-                // Stop loop if a page fails to load or returns 404
-                break
-            }
+        val document = app.get("$mainUrl/?s=$query").document
+        
+        return document.select("article:has(.post-card) a").mapNotNull { element ->
+            element.toSearchResultAsync()
         }
-
-        return searchResults
     }
 
     // ---------------------------------------------------------------
