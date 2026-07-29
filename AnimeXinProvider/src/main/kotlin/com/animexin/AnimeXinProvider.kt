@@ -59,9 +59,9 @@ class AnimeXinProvider : MainAPI() {
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
-                enumValues<DubStatus>().toMutableSet()
+                mutableSetOf(DubStatus.Dub)
             } else {
-                null
+                mutableSetOf(DubStatus.Sub)
             }
         }
     }
@@ -79,12 +79,11 @@ class AnimeXinProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Handles both Series pages and direct Episode pages)
+    // LOAD
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        // Try to safely extract the series title, falling back to episode title if needed
         val title = document.selectFirst(".infolimit h2[itemprop=partOfSeries], .infolimit h2, .infox h1.entry-title")?.text() 
             ?: document.selectFirst("h1.entry-title")?.text()?.replace(Regex("Episode.*"), "")?.trim() 
             ?: "Unknown Series"
@@ -98,14 +97,13 @@ class AnimeXinProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        // 1. If loaded from an Episode page, extract list from the sidebar
+        // 1. Sidebar episode list
         document.select(".episodelist ul li").forEach { ep ->
             val aTag = ep.selectFirst("a") ?: return@forEach
             val epUrl = fixUrlNull(aTag.attr("href")) ?: return@forEach
             val epTitle = ep.selectFirst(".playinfo h3")?.text() ?: ""
             val epThumb = fixUrlNull(ep.selectFirst(".thumbnel img")?.attr("src"))
             
-            // Extract episode number
             val epNum = Regex("""(?i)episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
             
             episodes.add(newEpisode(epUrl) {
@@ -115,7 +113,7 @@ class AnimeXinProvider : MainAPI() {
             })
         }
 
-        // 2. If loaded from a Series page, extract list from the episode lister
+        // 2. Series page episode list
         document.select(".eplister ul li").forEach { ep ->
             val aTag = ep.selectFirst("a") ?: return@forEach
             val epUrl = fixUrlNull(aTag.attr("href")) ?: return@forEach
@@ -133,7 +131,6 @@ class AnimeXinProvider : MainAPI() {
                 this.name = title
             })
         } else {
-            // Reverses the list so episode 1 plays first 
             episodes.reverse() 
         }
 
@@ -145,7 +142,7 @@ class AnimeXinProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Decodes Base64 Server Options)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -156,7 +153,6 @@ class AnimeXinProvider : MainAPI() {
         var found = false
         val document = app.get(data).document
 
-        // 1. Decodes the Base64 iframes hiding inside the server selection dropdown
         document.select("select.mirror option").forEach { opt ->
             val encodedValue = opt.attr("value")
             
@@ -174,7 +170,6 @@ class AnimeXinProvider : MainAPI() {
             }
         }
 
-        // 2. Fallback check for any direct iframes natively embedded in the player block
         document.select(".player-embed iframe, #embed_holder iframe").forEach { iframe ->
             val iframeSrc = fixUrlNull(iframe.attr("src"))
             if (iframeSrc != null) {
