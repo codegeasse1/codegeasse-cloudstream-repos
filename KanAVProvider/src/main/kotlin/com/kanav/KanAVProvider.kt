@@ -14,11 +14,10 @@ class KanAVProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    // Using NSFW or Others type since this is an adult video site
     override val supportedTypes = setOf(TvType.NSFW, TvType.Others)
 
     // ---------------------------------------------------------------
-    // YOUR VERIFIED GOOGLE TRANSLATE HELPER
+    // GOOGLE TRANSLATE HELPER
     // ---------------------------------------------------------------
     private suspend fun translateToEnglish(text: String?): String? {
         if (text.isNullOrBlank()) return text
@@ -27,7 +26,6 @@ class KanAVProvider : MainAPI() {
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=$encodedText"
             val response = app.get(url).text
 
-            // Extract all translated sentence segments from the Google Translate JSON array
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
             val translated = matches.map { 
                 it.groupValues[1]
@@ -83,7 +81,6 @@ class KanAVProvider : MainAPI() {
     // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        // Standard MacCMS search URL structure
         val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(query, "UTF-8")}"
         val document = app.get(url).document
         
@@ -101,18 +98,17 @@ class KanAVProvider : MainAPI() {
         val rawTitle = document.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val title = translateToEnglish(rawTitle) ?: rawTitle
 
-        // Based on screenshot 263, the poster is inside an img with class "countext-img"
         val posterElement = document.selectFirst("img.countext-img, .video-box-ather img")
         val posterUrl = fixUrlNull(posterElement?.attr("data-original")?.ifBlank { posterElement.attr("src") })
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = posterUrl
-            this.plot = title // Site rarely has descriptions, title acts as plot
+            this.plot = title
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Extracts from standard HTML and MacCMS Iframes)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -124,7 +120,6 @@ class KanAVProvider : MainAPI() {
         val document = app.get(data).document
         val pageHtml = document.html()
 
-        // Regex to catch native .m3u8 files in the source or MacCMS JSON configuration
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
         // 1. Search the main page HTML
@@ -136,16 +131,17 @@ class KanAVProvider : MainAPI() {
                         source = name,
                         name = "$name Server",
                         url = cleanUrl,
-                        referer = "$mainUrl/",
-                        quality = Qualities.Unknown.value,
                         type = ExtractorLinkType.M3U8
-                    )
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
                 found = true
             }
         }
 
-        // 2. Search inside embedded iframes (Based on screenshot 262 showing dplayer-dm.html)
+        // 2. Search inside embedded iframes
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
@@ -161,10 +157,11 @@ class KanAVProvider : MainAPI() {
                                         source = name,
                                         name = "$name Iframe",
                                         url = cleanUrl,
-                                        referer = iframeUrl,
-                                        quality = Qualities.Unknown.value,
                                         type = ExtractorLinkType.M3U8
-                                    )
+                                    ) {
+                                        this.referer = iframeUrl
+                                        this.quality = Qualities.Unknown.value
+                                    }
                                 )
                                 found = true
                             }
