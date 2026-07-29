@@ -27,14 +27,14 @@ class KanAVProvider : MainAPI() {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val targetLang = if (toEnglish) "en" else "zh-CN"
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
-            
+
             val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0")).text
 
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map { 
+            val translated = matches.map {
                 it.groupValues[1]
                     .replace("\\\"", "\"")
-                    .replace("\\n", "\n") 
+                    .replace("\\n", "\n")
             }.joinToString("")
 
             if (translated.isNotBlank()) translated else text
@@ -58,7 +58,7 @@ class KanAVProvider : MainAPI() {
         val homeItems = document.select(".video-item").mapNotNull { element ->
             element.toSearchResultAsync()
         }
-        
+
         return newHomePageResponse(request.name, homeItems)
     }
 
@@ -68,7 +68,7 @@ class KanAVProvider : MainAPI() {
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val aTag = this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
-        
+
         val img = this.selectFirst("img")
         val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".entry-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
@@ -82,20 +82,21 @@ class KanAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (automatically translates English → Chinese)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
+        // Convert English query to Chinese so that the site returns correct results
         val chineseQuery = translateText(query, false) ?: query
         val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(chineseQuery, "UTF-8")}"
         val document = app.get(url).document
-        
+
         return document.select(".video-item").mapNotNull { element ->
             element.toSearchResultAsync()
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page) – now shows English tags that are clickable
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -106,15 +107,23 @@ class KanAVProvider : MainAPI() {
         val posterElement = document.selectFirst("img.countext-img, .video-box-ather img")
         val posterUrl = fixUrlNull(posterElement?.attr("data-original")?.ifBlank { posterElement.attr("src") })
 
-        val tagElements = document.select(".video-countext-categories a, .video-countext-tags a").filter { 
-            it.attr("href") != "#" 
+        // Collect all clickable tag links (categories + tags + actors)
+        val tagElements = document.select(
+            ".video-countext-categories a, .video-countext-tags a"
+        ).filter {
+            it.attr("href") != "#" // exclude dummy date link
         }
-        val rawTags = tagElements.map { it.text().trim() }.filter { it.isNotBlank() }
-        
-        val tagsList = if (rawTags.isNotEmpty()) {
-            val combinedTags = rawTags.joinToString(" ~ ")
-            val translatedCombinedTags = translateText(combinedTags, true) ?: combinedTags
-            translatedCombinedTags.split(" ~ ").map { it.trim() }
+
+        // Translate the combined Chinese tags to English for display
+        val rawTags = tagElements.map { it.text().trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val tags = if (rawTags.isNotEmpty()) {
+            // Join, translate as one batch, then split back (avoids repeated API calls)
+            val joined = rawTags.joinToString(" ~ ")
+            val translated = translateText(joined, true) ?: joined
+            translated.split(" ~ ").map { it.trim() }
         } else {
             emptyList()
         }
@@ -122,7 +131,7 @@ class KanAVProvider : MainAPI() {
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = posterUrl
             this.plot = title
-            this.tags = tagsList
+            this.tags = tags
         }
     }
 
