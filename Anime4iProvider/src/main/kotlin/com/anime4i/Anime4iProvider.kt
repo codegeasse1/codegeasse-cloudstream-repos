@@ -72,7 +72,15 @@ class Anime4iProvider : MainAPI() {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1")?.text()?.trim() ?: ""
-        val poster = fixUrlNull(document.selectFirst(".limit img, .infox img, img[itemprop=image]")?.attr("src")?.substringBefore("?"))
+        
+        // Tighter selectors to avoid the site banner, and applying the same robust extraction as toSearchResult
+        val posterElement = document.selectFirst(".thumb img, .infox .imgbox img, .ts-post-image, img[itemprop=image]")
+        val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
+            ?: posterElement?.attr("data-src")?.ifBlank { null }
+            ?: posterElement?.attr("src")
+        
+        val poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
+        
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis")?.text()
         val genres = document.select("a[href*=/genres/]").map { it.text() }
 
