@@ -1,24 +1,24 @@
 package com.taiav
 
-import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
-import org.json.JSONObject
-import java.net.URLDecoder
 import java.net.URLEncoder
 
 class TaiAVProvider : MainAPI() {
-    override var mainUrl = "https://m.taiav.com"
+    override var mainUrl = "https://taiav.com"
     override var name = "TaiAV"
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW, TvType.Others)
 
+    // ---------------------------------------------------------------
+    // GOOGLE TRANSLATE HELPER
+    // ---------------------------------------------------------------
     private suspend fun translateText(text: String?, toEnglish: Boolean = true): String? {
         if (text.isNullOrBlank()) return text
         return try {
@@ -41,13 +41,17 @@ class TaiAVProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // MAIN PAGE
+    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
-        "$mainUrl/en" to "Popular Videos",
-        "$mainUrl/cn" to "Chinese Videos"
+        "$mainUrl/cn/hots" to "Hot Videos",
+        "$mainUrl/cn/discover" to "Discover Categories"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else request.data.replace(".html", "/page/$page.html")
+        // TaiAV uses simple ?page= query parameters
+        val url = if (page == 1) request.data else "${request.data}?page=$page"
         val document = app.get(url).document
 
         val homeItems = document.select("div.movie-card").mapNotNull { element ->
@@ -56,12 +60,15 @@ class TaiAVProvider : MainAPI() {
         return newHomePageResponse(request.name, homeItems)
     }
 
+    // ---------------------------------------------------------------
+    // ITEM PARSING
+    // ---------------------------------------------------------------
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val aTag = this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
         
         val img = this.selectFirst("img")
-        val rawTitle = img?.attr("alt")?.ifBlank { aTag.text() }?.trim() ?: ""
+        val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".movie-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
 
         val posterUrl = fixUrlNull(img?.attr("src"))
@@ -71,9 +78,13 @@ class TaiAVProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // SEARCH
+    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
-        val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(chineseQuery, "UTF-8")}"
+        // Correct TaiAV search endpoint
+        val url = "$mainUrl/cn/search?q=${URLEncoder.encode(chineseQuery, "UTF-8")}"
         val document = app.get(url).document
         
         return document.select("div.movie-card").mapNotNull { element ->
@@ -81,29 +92,24 @@ class TaiAVProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD
+    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
+        val pageHtml = document.html()
 
-        val rawTitle = document.selectFirst("h1.uk-h4.uk-text-break")?.text() ?: "Video"
+        val rawTitle = document.selectFirst("h1.uk-h4")?.text() ?: "Video"
         val title = translateText(rawTitle, true) ?: rawTitle
 
-        // Fixed poster extraction: use background-image from player-poster div
-        val posterElement = document.selectFirst("div.player-poster")
-        var posterUrl: String? = null
-        if (posterElement != null) {
-            val style = posterElement.attr("style")
-            val regex = Regex("""url\(["']?([^"')]+)["']?\)""")
-            posterUrl = regex.find(style)?.groupValues?.get(1)
-            if (posterUrl != null) {
-                posterUrl = fixUrlNull(posterUrl)
-            }
-        }
-        // Fallback: try data-poster attribute (might be empty)
+        // Most reliable way to get the poster on TaiAV is from the player JS config or JSON-LD
+        var posterUrl = Regex("""poster:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         if (posterUrl.isNullOrBlank()) {
-            posterUrl = fixUrlNull(posterElement?.attr("data-poster"))
+            posterUrl = Regex(""""thumbnailUrl"\s*:\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
         }
+        posterUrl = fixUrlNull(posterUrl)
 
-        val tagElements = document.select(".tags a")
+        val tagElements = document.select("a[href*=/cn/tag/]")
         val rawTags = tagElements.map { it.text().trim() }.filter { it.isNotBlank() }
         
         val tagsList = if (rawTags.isNotEmpty()) {
@@ -121,6 +127,9 @@ class TaiAVProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD LINKS (TaiAV API Extractor)
+    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -129,31 +138,35 @@ class TaiAVProvider : MainAPI() {
     ): Boolean {
         var found = false
 
-        // 1. Primary method: call the site's own API to get the m3u8 link
-        val idRegex = Regex("""/movie/([a-f0-9]+)""")
-        val movieId = idRegex.find(data)?.groupValues?.get(1)
-        if (movieId != null) {
+        // Extract the exact movieId from the URL
+        val movieId = data.substringAfterLast("/").substringBefore("?")
+        
+        if (movieId.isNotBlank()) {
             try {
                 val apiUrl = "$mainUrl/api/getmovie?type=1280&id=$movieId"
+                
                 val jsonResponse = app.get(
                     apiUrl,
                     headers = mapOf(
                         "User-Agent" to "Mozilla/5.0",
+                        "X-Requested-With" to "XMLHttpRequest", // Mandatory for TaiAV API
+                        "Accept" to "application/json",
                         "Referer" to data
                     )
                 ).text
 
-                val json = JSONObject(jsonResponse)
-                val m3u8 = json.optString("m3u8", "")
-                if (m3u8.isNotBlank()) {
+                // Safe regex extraction instead of JSONObject (prevents library crashes)
+                val m3u8Url = Regex(""""m3u8"\s*:\s*"([^"]+)"""").find(jsonResponse)?.groupValues?.get(1)
+                
+                if (!m3u8Url.isNullOrBlank()) {
                     callback(
                         newExtractorLink(
                             source = name,
-                            name = "$name Player",
-                            url = m3u8,
+                            name = "$name Server",
+                            url = m3u8Url.replace("\\/", "/"),
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "$mainUrl/"
+                            this.referer = "$mainUrl/" // CDNs often require the mainUrl referer
                             this.quality = Qualities.Unknown.value
                         }
                     )
@@ -161,98 +174,6 @@ class TaiAVProvider : MainAPI() {
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-            }
-        }
-
-        // 2. Fallback: original HTML scraping logic (kept for safety)
-        if (!found) {
-            val document = app.get(data).document
-            val pageHtml = document.html()
-
-            try {
-                val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
-                val match = jsonRegex.find(pageHtml)
-                if (match != null) {
-                    val jsonString = match.groupValues[1]
-                    val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
-                    val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
-
-                    if (urlMatch != null) {
-                        val encodedUrl = urlMatch.groupValues[1]
-                        val encryptType = encryptMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-
-                        val realUrl = when (encryptType) {
-                            1 -> String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
-                            2 -> {
-                                val base64Decoded = String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
-                                URLDecoder.decode(base64Decoded, "UTF-8")
-                            }
-                            else -> encodedUrl
-                        }
-
-                        if (realUrl.contains(".m3u8")) {
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$name Player",
-                                    url = realUrl,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = "$mainUrl/"
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            found = true
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-
-            if (!found) {
-                val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-                cdnRegex.findAll(pageHtml).forEach { match ->
-                    val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                    if (cleanUrl.isNotBlank()) {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "$name Server (m3u8)",
-                                url = cleanUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        found = true
-                    }
-                }
-            }
-
-            if (!found) {
-                val tsRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.ts[^\s"'<>]*""")
-                tsRegex.findAll(pageHtml).forEach { match ->
-                    var cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                    if (cleanUrl.isNotBlank()) {
-                        val m3u8Url = cleanUrl.replace(Regex("\\.ts.*"), ".m3u8")
-                        if (m3u8Url != cleanUrl) {
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$name CDN (m3u8 converted)",
-                                    url = m3u8Url,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = "$mainUrl/"
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            found = true
-                        }
-                    }
-                }
             }
         }
 
