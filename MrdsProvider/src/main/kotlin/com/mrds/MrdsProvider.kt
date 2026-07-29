@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
+import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -19,6 +20,30 @@ class MrdsProvider : MainAPI() {
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
+
+    // ---------------------------------------------------------------
+    // GOOGLE TRANSLATE HELPER (Free Endpoint)
+    // ---------------------------------------------------------------
+    private suspend fun translateToEnglish(text: String?): String? {
+        if (text.isNullOrBlank()) return text
+        return try {
+            val encodedText = URLEncoder.encode(text, "UTF-8")
+            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=$encodedText"
+            val response = app.get(url).text
+
+            // Extract all translated sentence segments from the Google Translate JSON array
+            val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
+            val translated = matches.map { 
+                it.groupValues[1]
+                    .replace("\\\"", "\"")
+                    .replace("\\n", "\n") 
+            }.joinToString("")
+
+            if (translated.isNotBlank()) translated else text
+        } catch (e: Exception) {
+            text
+        }
+    }
 
     // ---------------------------------------------------------------
     // NATIVE AES IMAGE DECRYPTION
@@ -67,8 +92,9 @@ class MrdsProvider : MainAPI() {
     // ---------------------------------------------------------------
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
-        val title = this.selectFirst(".post-card-title")?.text()?.trim()
+        val rawTitle = this.selectFirst(".post-card-title")?.text()?.trim()
             ?: this.text().substringBefore(" • ").trim()
+        val title = translateToEnglish(rawTitle) ?: rawTitle
         val cardHtml = this.outerHtml()
 
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
@@ -103,12 +129,13 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page - Inside Thumbnail Fix)
+    // LOAD (Detail Page - Inside Thumbnail Fix + Translated Title & Plot)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
+        val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
+        val title = translateToEnglish(rawTitle) ?: "Video"
         val pageHtml = document.outerHtml()
 
         // 1. Prioritize the actual post image inside the content block
@@ -136,7 +163,8 @@ class MrdsProvider : MainAPI() {
             poster = decryptImageUrl(poster) ?: poster
         }
 
-        val synopsis = document.selectFirst(".post-content p, article p")?.text()
+        val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
+        val synopsis = translateToEnglish(rawSynopsis)
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
