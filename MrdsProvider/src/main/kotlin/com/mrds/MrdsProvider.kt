@@ -17,7 +17,7 @@ class MrdsProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
-    // MAIN PAGE (Direct HTTP request - No WebView hanging)
+    // MAIN PAGE
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -28,28 +28,30 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        val home = document.select("a:has(.post-card)").mapNotNull { it.toSearchResult() }
+        // Target the wrapping <a> tag or the <article> tag directly
+        val home = document.select("article:has(.post-card) a").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
     // ---------------------------------------------------------------
-    // SEARCH & HOMEPAGE ITEM PARSING (Extracts direct image URLs)
+    // SEARCH & HOMEPAGE ITEM PARSING (Targeting the Script Tag)
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
-        val title = this.text().substringBefore(" • ").trim()
+        
+        // Grab the title from the h2 tag if available, fallback to standard text
+        val title = this.selectFirst(".post-card-title")?.text()?.trim() 
+            ?: this.text().substringBefore(" • ").trim()
 
         val cardHtml = this.outerHtml()
 
-        // 1. Search for any direct HTTP image URL inside the card attributes (like data-xkrkllgl)
-        val httpImgMatch = Regex("""https?://[^\s"'<>\\]+?\.(?:jpg|jpeg|png|webp)""", RegexOption.IGNORE_CASE)
-            .find(cardHtml)?.value
+        // MAGIC BULLET: Extract the URL directly from the loadBannerDirect('URL', ...) script
+        val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
 
-        // 2. Fallback to base64 image string if no HTTP URL was found
-        val base64Match = Regex("""data:image/[^;]+;base64,[a-zA-Z0-9+/=]+""")
-            .find(cardHtml)?.value
+        // Fallback for normal img tags if they ever stop using the script
+        val fallbackImg = this.selectFirst("img:not([src^=data:image])")?.attr("src")
 
-        val posterUrl = httpImgMatch ?: base64Match
+        val posterUrl = scriptImgMatch ?: fallbackImg
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
@@ -61,7 +63,7 @@ class MrdsProvider : MainAPI() {
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
-        return document.select("a:has(.post-card)").mapNotNull { it.toSearchResult() }
+        return document.select("article:has(.post-card) a").mapNotNull { it.toSearchResult() }
     }
 
     // ---------------------------------------------------------------
@@ -71,13 +73,15 @@ class MrdsProvider : MainAPI() {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
-
         val pageHtml = document.outerHtml()
 
-        // Extract poster using direct HTTP image match
-        val poster = Regex("""https?://[^\s"'<>\\]+?\.(?:jpg|jpeg|png|webp)""", RegexOption.IGNORE_CASE)
-            .find(pageHtml)?.value
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+        // 1. Try OpenGraph meta tag first (usually best quality)
+        var poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+
+        // 2. Try grabbing it from the inline script again if meta is missing
+        if (poster.isNullOrBlank() || poster.startsWith("data:")) {
+            poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
+        }
 
         val synopsis = document.selectFirst(".post-content p, article p")?.text()
 
