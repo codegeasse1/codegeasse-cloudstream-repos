@@ -106,7 +106,7 @@ class PppPornProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
+   // ---------------------------------------------------------------
     // LOAD LINKS (KVS Scraper)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
@@ -125,7 +125,8 @@ class PppPornProvider : MainAPI() {
         cdnRegex.findAll(pageHtml).forEach { match ->
             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
             
-            if (cleanUrl.isNotBlank()) {
+            // THE FIX: Ignore image URLs that happen to have .m3u8 or .mp4 in their name
+            if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png") && !cleanUrl.endsWith(".webp")) {
                 val isM3u8 = cleanUrl.contains(".m3u8")
                 
                 callback(
@@ -153,7 +154,8 @@ class PppPornProvider : MainAPI() {
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
                         cdnRegex.findAll(iframeHtml).forEach { match ->
                             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                            if (cleanUrl.isNotBlank()) {
+                            
+                            if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png")) {
                                 callback(
                                     newExtractorLink(
                                         source = name,
