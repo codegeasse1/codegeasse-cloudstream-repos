@@ -14,9 +14,6 @@ class ChikiAnimationProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/anime/?status=&type=&order=update" to "Latest Release",
         "$mainUrl/anime/?status=&type=&order=popular" to "Popular",
@@ -26,16 +23,13 @@ class ChikiAnimationProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else request.data.replace("?", "page/$page/?")
         val document = app.get(url).document
-
         val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("a") ?: return null
-
         val rawHref = fixUrlNull(linkEl.attr("href")) ?: return null
-        // Strip "-episode-X" or "-ep-X" suffixes from the URL to get the main series page
         val href = rawHref.replace(Regex("-(episode|ep)-\\d+-[a-zA-Z0-9-]+/?$"), "")
             .let { if (it.contains("/anime/")) it else "$mainUrl/anime/${it.substringAfterLast("/")}" }
 
@@ -47,7 +41,6 @@ class ChikiAnimationProvider : MainAPI() {
             ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
             ?: this.selectFirst("img")?.attr("src")
 
-        // Strip Jetpack CDN proxy and resize query params
         val posterUrl = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -55,32 +48,24 @@ class ChikiAnimationProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         return document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD (anime detail page + episode list)
-    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
         
-        // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
+        // Strict selectors to ensure it grabs the anime poster instead of the site banner
         val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
-        
         val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
             ?: posterElement?.attr("data-src")?.ifBlank { null }
             ?: posterElement?.attr("src")
         
         var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
 
-        // FALLBACK: If the main selector fails, try og:image, but explicitly reject default site banners and logos
         if (poster.isNullOrBlank()) {
             val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
             if (ogImage != null && !ogImage.contains("logo", true) && !ogImage.contains("banner", true)) {
@@ -102,8 +87,6 @@ class ChikiAnimationProvider : MainAPI() {
                 if (epHref == null) return@mapNotNull null
                 
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
-                
-                // Extract episode number
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
@@ -117,8 +100,6 @@ class ChikiAnimationProvider : MainAPI() {
         }
 
         var episodes = parseEpisodeGrid(document, url)
-        
-        // Fallback: Check for any episode link if the series page hides the list
         if (episodes.isEmpty()) {
             val firstEpLink = document.selectFirst(".epcurfirst a, .epcurlast a, .inepcx a, .bxcl a, a:matchesOwn((?i)watch)")?.attr("href")
             val anyEpLink = document.select("a[href]").firstOrNull { 
@@ -126,7 +107,6 @@ class ChikiAnimationProvider : MainAPI() {
             }?.attr("href")
             
             val fallbackHref = fixUrlNull(firstEpLink ?: anyEpLink)
-            
             if (fallbackHref != null) {
                 val epDocument = app.get(fallbackHref).document
                 episodes = parseEpisodeGrid(epDocument, fallbackHref)
@@ -141,9 +121,6 @@ class ChikiAnimationProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS (video extraction)
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
