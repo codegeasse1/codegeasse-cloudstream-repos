@@ -30,19 +30,40 @@ class MrdsProvider : MainAPI() {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
             
-            // Explicitly set a User-Agent so Google Translate doesn't block the request
+            // Explicitly set User-Agent so Google doesn't block the request
             val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")).text
             
-            // Clean Regex to reliably grab the first translated string
-            val match = Regex("""\[\[\["([^"]+)"""").find(response)
-            val translated = match?.groupValues?.get(1)
-                ?.replace("\\n", "")
-                ?.replace("\\\"", "\"")
-                ?.trim()
+            var translated = ""
+            // Safely extract all translated segments from the JSON array
+            val regex = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)",""")
+            val matches = regex.findAll(response.substringBefore("]],null,"))
             
-            if (!translated.isNullOrBlank()) translated else text
+            matches.forEach { match ->
+                translated += match.groupValues[1]
+                    .replace("\\\"", "\"")
+                    .replace("\\n", "\n")
+                    .replace("\\r", "")
+            }
+            
+            if (translated.isNotBlank() && translated != "null") translated else text
         } catch (e: Exception) {
             text // Fallback to original text if offline or blocked
+        }
+    }
+
+    // BATCH TRANSLATION: Translates a list of results in 1 single fast API call to prevent CloudStream timeouts
+    private suspend fun translateList(items: List<SearchResponse>): List<SearchResponse> {
+        if (items.isEmpty()) return items
+        
+        val combinedTitles = items.joinToString(" || ") { it.name }
+        val translatedCombined = translateText(combinedTitles, "en") ?: combinedTitles
+        val translatedTitles = translatedCombined.split(Regex("""\s*\|\|\s*"""))
+        
+        return items.mapIndexed { index, res ->
+            val newTitle = translatedTitles.getOrNull(index)?.trim() ?: res.name
+            newMovieSearchResponse(newTitle, res.url, TvType.Movie) {
+                this.posterUrl = res.posterUrl
+            }
         }
     }
 
@@ -82,22 +103,19 @@ class MrdsProvider : MainAPI() {
         val document = app.get(url).document
 
         val homeItems = document.select("article:has(.post-card) a").mapNotNull { element ->
-            element.toSearchResultAsync()
+            element.toSearchResult()
         }
         
-        return newHomePageResponse(request.name, homeItems)
+        // Translate the homepage feed into English instantly
+        return newHomePageResponse(request.name, translateList(homeItems))
     }
 
     // ---------------------------------------------------------------
-    // SEARCH & HOMEPAGE ITEM PARSING
+    // ITEM PARSING
     // ---------------------------------------------------------------
-    private suspend fun Element.toSearchResultAsync(): SearchResponse? {
+    private suspend fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
-        val rawTitle = this.selectFirst(".post-card-title")?.text()?.trim()
-            ?: this.text().substringBefore(" • ").trim()
-            
-        // Auto-translate titles to English
-        val title = translateText(rawTitle, "en") ?: rawTitle
+        val title = this.selectFirst(".post-card-title")?.text()?.trim() ?: this.text().substringBefore(" • ").trim()
         val cardHtml = this.outerHtml()
 
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
@@ -121,36 +139,34 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Auto Translation + Dual Query)
+    // SEARCH (Dual Query + Auto English/Chinese Translation)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
 
-        // 1. Translate the English query to Chinese (zh-CN)
+        // 1. Translate the English query (e.g., "mengyao") to Chinese (e.g., "梦瑶")
         val chineseQuery = translateText(query, "zh-CN") ?: query
 
-        // 2. Search using the Chinese translated term (URL encoded safely)
-        val encodedChinese = URLEncoder.encode(chineseQuery, "UTF-8")
-        val chineseDoc = app.get("$mainUrl/?s=$encodedChinese").document
+        // 2. Set up Dual-Search URLs
+        val urlsToSearch = mutableSetOf<String>()
+        urlsToSearch.add("$mainUrl/?s=${URLEncoder.encode(chineseQuery, "UTF-8")}")
         
-        val chineseResults = chineseDoc.select("article:has(.post-card) a").mapNotNull { element ->
-            element.toSearchResultAsync()
-        }
-        results.addAll(chineseResults)
-
-        // 3. Dual-Query: If the translation is different, search the exact English text too
+        // If translation is different, search the exact English text too just in case
         if (chineseQuery != query) {
-            val encodedOrig = URLEncoder.encode(query, "UTF-8")
-            val origDoc = app.get("$mainUrl/?s=$encodedOrig").document
-            
-            val origResults = origDoc.select("article:has(.post-card) a").mapNotNull { element ->
-                element.toSearchResultAsync()
-            }
-            results.addAll(origResults)
+            urlsToSearch.add("$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}")
         }
 
-        // Return unique results (combines Chinese search hits and English search hits)
-        return results.distinctBy { it.url }
+        // 3. Fetch search results
+        urlsToSearch.forEach { url ->
+            val doc = app.get(url).document
+            doc.select("article:has(.post-card) a").forEach { element ->
+                element.toSearchResult()?.let { results.add(it) }
+            }
+        }
+
+        // Remove duplicates and apply Batch Translation so the UI stays English
+        val uniqueResults = results.distinctBy { it.url }
+        return translateList(uniqueResults)
     }
 
     // ---------------------------------------------------------------
