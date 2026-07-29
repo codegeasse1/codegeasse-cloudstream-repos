@@ -127,7 +127,7 @@ class KanAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (MacCMS player_aaaa JSON Decoder)
+    // LOAD LINKS (MacCMS player_aaaa Decoder – FIXED)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -140,25 +140,38 @@ class KanAVProvider : MainAPI() {
         val pageHtml = document.html()
 
         try {
-            // 1. Extract the hidden player_aaaa JSON configuration object from the page script
-            val playerJsonRegex = Regex("""var\s+player_aaaa\s*=\s*(\\{.*?\\}|\\\{.*?\\\})""", RegexOption.DOT_MATCHES_ALL)
-            val match = playerJsonRegex.find(pageHtml) ?: Regex("""player_aaaa\s*=\s*(\{.*?\});""").find(pageHtml)
-            
+            // Extract player_aaaa JSON object
+            val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
+            val match = jsonRegex.find(pageHtml)
             if (match != null) {
                 val jsonString = match.groupValues[1]
-                // Grab the "url" property inside the JSON
+                // Get encrypt type and encoded URL
+                val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
                 val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
+
                 if (urlMatch != null) {
                     val encodedUrl = urlMatch.groupValues[1]
-                    // MacCMS urls are typically URL-encoded twice or Base64 encoded
-                    val decodedUrl = URLDecoder.decode(URLDecoder.decode(encodedUrl, "UTF-8"), "UTF-8")
-                    
-                    if (decodedUrl.contains(".m3u8")) {
+                    val encryptType = encryptMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+                    val realUrl = when (encryptType) {
+                        1 -> {
+                            // encrypt=1: only Base64 decode
+                            String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
+                        }
+                        2 -> {
+                            // encrypt=2: Base64 decode → then URL decode
+                            val base64Decoded = String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
+                            URLDecoder.decode(base64Decoded, "UTF-8")
+                        }
+                        else -> encodedUrl // fallback
+                    }
+
+                    if (realUrl.contains(".m3u8")) {
                         callback(
                             newExtractorLink(
                                 source = name,
                                 name = "$name Player",
-                                url = decodedUrl,
+                                url = realUrl,
                                 type = ExtractorLinkType.M3U8
                             ) {
                                 this.referer = "$mainUrl/"
@@ -173,7 +186,7 @@ class KanAVProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // 2. Fallback Regex for direct .m3u8 strings found anywhere in the HTML
+        // Fallback: search for direct .m3u8 links anywhere in the HTML
         if (!found) {
             val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
             cdnRegex.findAll(pageHtml).forEach { match ->
