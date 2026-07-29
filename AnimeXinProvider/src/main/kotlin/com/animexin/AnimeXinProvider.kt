@@ -15,9 +15,6 @@ class AnimeXinProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AsianDrama)
 
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Latest Release",
         "$mainUrl/anime/?status=&type=&order=popular" to "Popular Series",
@@ -34,30 +31,28 @@ class AnimeXinProvider : MainAPI() {
                 "${request.data}page/$page/"
             }
         }
-        
+
         val document = app.get(url).document
         val homeItems = document.select("article.bs, .listupd .bsx").mapNotNull { element ->
             element.toSearchResult()
         }
-        
+
         return newHomePageResponse(request.name, homeItems)
     }
 
-    // ---------------------------------------------------------------
-    // ITEM PARSING
-    // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val aTag = this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
-        
+
         val title = this.selectFirst(".tt h2, .tt, .eggtitle")?.text()?.trim() ?: return null
-        
+
         val img = this.selectFirst("img")
         val rawPoster = img?.attr("data-lazy-src")?.ifBlank { img.attr("src") }
         val posterUrl = fixUrlNull(rawPoster)
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
+            // Fixed: use mutableSetOf as expected by the property type
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
                 mutableSetOf(DubStatus.Dubbed)
             } else {
@@ -66,9 +61,6 @@ class AnimeXinProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH (Multi-page fetch up to 100 items)
-    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val searchResults = mutableListOf<SearchResponse>()
         val targetLimit = 100
@@ -99,20 +91,17 @@ class AnimeXinProvider : MainAPI() {
         return searchResults.take(targetLimit)
     }
 
-    // ---------------------------------------------------------------
-    // LOAD
-    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title = document.selectFirst(".infolimit h2[itemprop=partOfSeries], .infolimit h2, .infox h1.entry-title")?.text() 
-            ?: document.selectFirst("h1.entry-title")?.text()?.replace(Regex("Episode.*"), "")?.trim() 
+        val title = document.selectFirst(".infolimit h2[itemprop=partOfSeries], .infolimit h2, .infox h1.entry-title")?.text()
+            ?: document.selectFirst("h1.entry-title")?.text()?.replace(Regex("Episode.*"), "")?.trim()
             ?: "Unknown Series"
 
-        val poster = document.selectFirst(".thumb img, .ts-post-image")?.let { 
-            it.attr("data-lazy-src").ifBlank { it.attr("src") } 
+        val poster = document.selectFirst(".thumb img, .ts-post-image")?.let {
+            it.attr("data-lazy-src").ifBlank { it.attr("src") }
         }
-        
+
         val plot = document.selectFirst(".entry-content, .desc")?.text()
         val tags = document.select(".genxed a").map { it.text() }
 
@@ -124,9 +113,9 @@ class AnimeXinProvider : MainAPI() {
             val epUrl = fixUrlNull(aTag.attr("href")) ?: return@forEach
             val epTitle = ep.selectFirst(".playinfo h3")?.text() ?: ""
             val epThumb = fixUrlNull(ep.selectFirst(".thumbnel img")?.attr("src"))
-            
+
             val epNum = Regex("""(?i)episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
-            
+
             episodes.add(newEpisode(epUrl) {
                 this.name = epTitle
                 this.posterUrl = epThumb
@@ -140,7 +129,7 @@ class AnimeXinProvider : MainAPI() {
             val epUrl = fixUrlNull(aTag.attr("href")) ?: return@forEach
             val epNum = ep.selectFirst(".epl-num")?.text()?.toIntOrNull()
             val epTitle = ep.selectFirst(".epl-title")?.text() ?: "Episode $epNum"
-            
+
             episodes.add(newEpisode(epUrl) {
                 this.name = epTitle
                 this.episode = epNum
@@ -152,7 +141,7 @@ class AnimeXinProvider : MainAPI() {
                 this.name = title
             })
         } else {
-            episodes.reverse() 
+            episodes.reverse()
         }
 
         return newTvSeriesLoadResponse(title, url, TvType.Anime, episodes.distinctBy { it.data }) {
@@ -162,9 +151,6 @@ class AnimeXinProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -176,12 +162,12 @@ class AnimeXinProvider : MainAPI() {
 
         document.select("select.mirror option").forEach { opt ->
             val encodedValue = opt.attr("value")
-            
+
             if (encodedValue.isNotBlank()) {
                 try {
                     val decodedHtml = String(Base64.decode(encodedValue, Base64.DEFAULT), Charsets.UTF_8)
                     val iframeSrc = fixUrlNull(Jsoup.parse(decodedHtml).select("iframe").attr("src"))
-                    
+
                     if (iframeSrc != null) {
                         found = loadExtractor(iframeSrc, data, subtitleCallback, callback) || found
                     }
