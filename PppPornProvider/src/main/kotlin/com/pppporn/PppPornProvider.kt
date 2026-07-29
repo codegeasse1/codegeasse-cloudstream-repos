@@ -30,7 +30,7 @@ class PppPornProvider : MainAPI() {
         val elements = document.select("div.item, div.video-item, div.post, div.model, li.item")
 
         val homeItems = elements.mapNotNull { element ->
-            element.toSearchResult()   // keeps the old single‑item wrapper (fine for main page)
+            element.toSearchResult()
         }
 
         return newHomePageResponse(request.name, homeItems)
@@ -81,7 +81,6 @@ class PppPornProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
-        // Helper to fetch one page
         suspend fun fetchPage(page: Int): List<MovieSearchData> {
             val url = if (page == 1)
                 "$mainUrl/search/?q=$encodedQuery"
@@ -95,7 +94,7 @@ class PppPornProvider : MainAPI() {
         val firstPage = fetchPage(1)
 
         return listOf(
-            newMovieSearchResponse(
+            MovieSearchResponse(
                 name = name,
                 results = firstPage,
                 nextPage = if (firstPage.isEmpty()) null else { page ->
@@ -113,13 +112,13 @@ class PppPornProvider : MainAPI() {
         val document = app.get(url).document
         val pageHtml = document.html()
 
-        val title = document.selectFirst("h1")?.text() 
-            ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim() 
+        val title = document.selectFirst("h1")?.text()
+            ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: "Video"
 
         // 1. Try standard OpenGraph meta image
         var posterUrl = document.selectFirst("meta[property=og:image]")?.attr("content")
-        
+
         // 2. Try the Plyr.io background-image style
         if (posterUrl.isNullOrBlank()) {
             val plyrStyle = document.selectFirst(".plyr__poster")?.attr("style")
@@ -130,7 +129,7 @@ class PppPornProvider : MainAPI() {
 
         // 3. Fallback to HTML5 video tag or standard KVS flashvars
         if (posterUrl.isNullOrBlank()) {
-            posterUrl = Regex("""poster="([^"]+)"""").find(pageHtml)?.groupValues?.get(1) 
+            posterUrl = Regex("""poster="([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
                 ?: Regex("""preview_url:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
 
@@ -158,13 +157,13 @@ class PppPornProvider : MainAPI() {
 
         // 1. Broad Regex to catch any standard or escaped CDN links
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*""")
-        
+
         cdnRegex.findAll(pageHtml).forEach { match ->
             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-            
+
             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png") && !cleanUrl.endsWith(".webp")) {
                 val isM3u8 = cleanUrl.contains(".m3u8")
-                
+
                 callback(
                     newExtractorLink(
                         source = name,
@@ -190,7 +189,7 @@ class PppPornProvider : MainAPI() {
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
                         cdnRegex.findAll(iframeHtml).forEach { match ->
                             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                            
+
                             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png")) {
                                 callback(
                                     newExtractorLink(
