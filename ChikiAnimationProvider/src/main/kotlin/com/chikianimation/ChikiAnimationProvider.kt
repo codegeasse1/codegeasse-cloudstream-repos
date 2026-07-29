@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Element
 
 class ChikiAnimationProvider : MainAPI() {
@@ -111,7 +112,7 @@ class ChikiAnimationProvider : MainAPI() {
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
 
                 newEpisode(epHref) {
-                    this.name = epTitle.ifBlank { "Episode $num" }
+                    this.name = epTitle.ifBlank { "Episode $epNum" }
                     this.episode = epNum
                 }
             }.distinctBy { it.data }.reversed()
@@ -143,7 +144,7 @@ class ChikiAnimationProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Custom Extractor Method included)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -170,7 +171,7 @@ class ChikiAnimationProvider : MainAPI() {
 
                 if (!m3u8Url.isNullOrBlank()) {
                     callback(
-                        ExtractorLink(
+                        newExtractorLink(
                             source = "Dailymotion",
                             name = "Dailymotion (Ad-Free)",
                             url = m3u8Url,
