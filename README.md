@@ -1,4 +1,4 @@
-# Anime4i CloudStream Repository
+# Codegeasse CloudStream Repository
 
 To install this repository:
 1. Open CloudStream and go to **Settings** > **Extensions** > **Add Repository**
