@@ -71,22 +71,8 @@ class ChikiAnimationProvider : MainAPI() {
 
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
         
-        // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
-        val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
-        
-        val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
-            ?: posterElement?.attr("data-src")?.ifBlank { null }
-            ?: posterElement?.attr("src")
-        
-        var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
-
-        // FALLBACK: If the main selector fails, try og:image, but explicitly reject default site banners and logos
-        if (poster.isNullOrBlank()) {
-            val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
-            if (ogImage != null && !ogImage.contains("logo", true) && !ogImage.contains("banner", true)) {
-                poster = fixUrlNull(ogImage)
-            }
-        }
+        val rawPoster = document.selectFirst(".limit img, .infox img, img[itemprop=image], .thumb img")?.attr("src")
+        val poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
         
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis, .desc")?.text()
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
@@ -142,7 +128,7 @@ class ChikiAnimationProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (video extraction)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -153,82 +139,50 @@ class ChikiAnimationProvider : MainAPI() {
         val document = app.get(data).document
         var found = false
 
-        // Helper function to process and fix URLs before calling Cloudstream Extractors
-        suspend fun invokeExtractor(url: String): Boolean {
-            var cleanUrl = url.trim()
-            if (cleanUrl.startsWith("//")) {
-                cleanUrl = "https:$cleanUrl"
+        suspend fun processUrl(rawUrl: String) {
+            val url = fixUrlNull(rawUrl) ?: return
+            var finalUrl = url
+            
+            // Instantly extract ID from geo.dailymotion links
+            if (url.contains("geo.dailymotion.com")) {
+                val vid = Regex("video=([a-zA-Z0-9]+)").find(url)?.groupValues?.get(1)
+                if (vid != null) finalUrl = "https://www.dailymotion.com/video/$vid"
+            } 
+            else if (url.contains("dailymotion.com/crawler/video/")) {
+                val vid = url.substringAfterLast("/")
+                if (vid.isNotBlank()) finalUrl = "https://www.dailymotion.com/video/$vid"
             }
 
-            // Normalizes geo-Dailymotion player URLs into format supported by standard Dailymotion extractor
-            if (cleanUrl.contains("geo.dailymotion.com")) {
-                val videoId = Regex("""video=([a-zA-Z0-9]+)""").find(cleanUrl)?.groupValues?.get(1)
-                if (videoId != null) {
-                    cleanUrl = "https://www.dailymotion.com/embed/video/$videoId"
-                }
-            }
-
-            // Reject empty, invalid, or recursion-prone schemas
-            if (cleanUrl.isBlank() || cleanUrl.startsWith("data:") || cleanUrl.contains("about:blank")) {
-                return false
-            }
-
-            return try {
-                loadExtractor(cleanUrl, data, subtitleCallback, callback)
-            } catch (e: Exception) {
-                false
+            if (finalUrl.contains("dailymotion.com/video/")) {
+                loadExtractor(finalUrl, data, subtitleCallback, callback)
+                found = true
+            } else {
+                // If it's a normal iframe (like standard mp4 or another host), extract it normally
+                loadExtractor(finalUrl, data, subtitleCallback, callback)
+                found = true
             }
         }
 
-        // 1. Scrape Base64 Dropdowns and Hidden Embeds
-        val embedDiv = document.selectFirst("#pembed[data-default-embed]")
-        val encoded = embedDiv?.attr("data-default-embed")
+        // 1. Scrape SEO Meta Tags
+        document.select("meta[itemprop=embedUrl], meta[itemprop=contentUrl]").forEach { element ->
+            processUrl(element.attr("content"))
+        }
 
-        if (!encoded.isNullOrBlank()) {
-            val decodedHtml = try {
-                String(Base64.decode(encoded, Base64.DEFAULT))
-            } catch (e: Exception) {
-                null
-            }
-            val iframeSrc = decodedHtml?.let {
-                Regex("""src=["']([^"']+)["']""").find(it)?.groupValues?.get(1)
-            }
-            if (!iframeSrc.isNullOrBlank()) {
-                if (invokeExtractor(iframeSrc)) found = true
+        // 2. Scrape Base64 Dropdowns and Hidden Embeds
+        document.select("select option[value], [data-default-embed], [data-embed]").forEach { element ->
+            val value = element.attr("value").ifBlank { element.attr("data-default-embed") }.ifBlank { element.attr("data-embed") }
+            if (value.isNotBlank()) {
+                try {
+                    val decoded = String(Base64.decode(value, Base64.DEFAULT))
+                    val src = Regex("src=[\"']([^\"']+)[\"']").find(decoded)?.groupValues?.get(1)
+                    if (src != null) processUrl(src)
+                } catch (e: Exception) {}
             }
         }
 
-        // 2. Safely grab iframes directly from the DOM, avoiding lazy-loaded placeholder traps
-        document.select("iframe").forEach { iframe ->
-            val src = iframe.attr("data-src").takeIf { it.isNotBlank() }
-                ?: iframe.attr("src").takeIf { it.isNotBlank() }
-                ?: iframe.attr("data-lazy-src").takeIf { it.isNotBlank() }
-
-            if (!src.isNullOrBlank()) {
-                if (invokeExtractor(src)) found = true
-            }
-        }
-
-        // 3. Optional: Scan for other server buttons / links often found in this WP theme
-        document.select("[data-embed], [data-link], [data-video]").forEach { element ->
-            val rawData = element.attr("data-embed").ifBlank { element.attr("data-link") }.ifBlank { element.attr("data-video") }
-            if (rawData.isNotBlank()) {
-                val decoded = if (!rawData.startsWith("http") && !rawData.contains("/") && rawData.length > 10) {
-                    try { String(Base64.decode(rawData, Base64.DEFAULT)) } catch (e: Exception) { "" }
-                } else {
-                    rawData
-                }
-
-                val extractedUrl = if (decoded.contains("iframe")) {
-                    Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1) ?: decoded
-                } else {
-                    decoded
-                }
-
-                if (extractedUrl.isNotBlank()) {
-                    if (invokeExtractor(extractedUrl)) found = true
-                }
-            }
+        // 3. Scrape visible iframes
+        document.select("iframe[src]").forEach { iframe ->
+            processUrl(iframe.attr("src"))
         }
 
         return found
