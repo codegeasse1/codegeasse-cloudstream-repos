@@ -18,22 +18,48 @@ class TaiAVProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.NSFW, TvType.Others)
 
     // ---------------------------------------------------------------
+    // REMOTE TRANSLATION TOGGLE
+    // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
+    //   {"translate": true}
+    // Edit that file from your phone anytime — no rebuild needed.
+    // Cached for the lifetime of this provider instance (until the
+    // app fully restarts / plugin reloads).
+    // ---------------------------------------------------------------
+    private var cachedTranslateFlag: Boolean? = null
+
+    private suspend fun isTranslationEnabled(): Boolean {
+        cachedTranslateFlag?.let { return it }
+        val flag = try {
+            val json = app.get(
+                "https://gist.githubusercontent.com/codegeasse1/02333c773cbd933b02e1779e6a1222fe/raw/2bc338c7f4ffe2049c3a783dae83d083aaed2012/config.json"
+            ).text
+            Regex(""""translate"\s*:\s*(true|false)""").find(json)
+                ?.groupValues?.get(1)?.toBoolean() ?: true
+        } catch (e: Exception) {
+            true // fallback default if the fetch fails
+        }
+        cachedTranslateFlag = flag
+        return flag
+    }
+
+    // ---------------------------------------------------------------
     // GOOGLE TRANSLATE HELPER
     // ---------------------------------------------------------------
     private suspend fun translateText(text: String?, toEnglish: Boolean = true): String? {
+        if (!isTranslationEnabled()) return text
         if (text.isNullOrBlank()) return text
         return try {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val targetLang = if (toEnglish) "en" else "zh-CN"
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
-
+            
             val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0")).text
 
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map {
+            val translated = matches.map { 
                 it.groupValues[1]
                     .replace("\\\"", "\"")
-                    .replace("\\n", "\n")
+                    .replace("\\n", "\n") 
             }.joinToString("")
 
             if (translated.isNotBlank()) translated else text
