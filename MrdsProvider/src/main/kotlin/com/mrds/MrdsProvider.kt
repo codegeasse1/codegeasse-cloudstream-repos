@@ -22,46 +22,27 @@ class MrdsProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
-    // GOOGLE TRANSLATE HELPERS (Free Endpoints)
+    // BULLETPROOF GOOGLE TRANSLATE HELPER
     // ---------------------------------------------------------------
-    private suspend fun translateToEnglish(text: String?): String? {
+    private suspend fun translateText(text: String?, targetLang: String): String? {
         if (text.isNullOrBlank()) return text
         return try {
             val encodedText = URLEncoder.encode(text, "UTF-8")
-            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=$encodedText"
-            val response = app.get(url).text
-
-            val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map { 
-                it.groupValues[1]
-                    .replace("\\\"", "\"")
-                    .replace("\\n", "\n") 
-            }.joinToString("")
-
-            if (translated.isNotBlank()) translated else text
+            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
+            
+            // Explicitly set a User-Agent so Google Translate doesn't block the request
+            val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")).text
+            
+            // Clean Regex to reliably grab the first translated string
+            val match = Regex("""\[\[\["([^"]+)"""").find(response)
+            val translated = match?.groupValues?.get(1)
+                ?.replace("\\n", "")
+                ?.replace("\\\"", "\"")
+                ?.trim()
+            
+            if (!translated.isNullOrBlank()) translated else text
         } catch (e: Exception) {
-            text
-        }
-    }
-
-    private suspend fun translateToChinese(text: String?): String? {
-        if (text.isNullOrBlank()) return text
-        return try {
-            val encodedText = URLEncoder.encode(text, "UTF-8")
-            // Target Chinese Simplified (zh-CN)
-            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=$encodedText"
-            val response = app.get(url).text
-
-            val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map { 
-                it.groupValues[1]
-                    .replace("\\\"", "\"")
-                    .replace("\\n", "\n") 
-            }.joinToString("")
-
-            if (translated.isNotBlank()) translated else text
-        } catch (e: Exception) {
-            text
+            text // Fallback to original text if offline or blocked
         }
     }
 
@@ -114,7 +95,9 @@ class MrdsProvider : MainAPI() {
         val href = fixUrlNull(this.attr("href")) ?: return null
         val rawTitle = this.selectFirst(".post-card-title")?.text()?.trim()
             ?: this.text().substringBefore(" • ").trim()
-        val title = translateToEnglish(rawTitle) ?: rawTitle
+            
+        // Auto-translate titles to English
+        val title = translateText(rawTitle, "en") ?: rawTitle
         val cardHtml = this.outerHtml()
 
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
@@ -138,45 +121,48 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Auto English -> Chinese Translation + Dual Query)
+    // SEARCH (Auto Translation + Dual Query)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
 
-        // 1. Translate the user query to Chinese
-        val chineseQuery = translateToChinese(query) ?: query
+        // 1. Translate the English query to Chinese (zh-CN)
+        val chineseQuery = translateText(query, "zh-CN") ?: query
 
-        // 2. Search using the Chinese translated term
-        val chineseDoc = app.get("$mainUrl/?s=$chineseQuery").document
+        // 2. Search using the Chinese translated term (URL encoded safely)
+        val encodedChinese = URLEncoder.encode(chineseQuery, "UTF-8")
+        val chineseDoc = app.get("$mainUrl/?s=$encodedChinese").document
+        
         val chineseResults = chineseDoc.select("article:has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
         results.addAll(chineseResults)
 
-        // 3. If the translated query is different from the original, search the original query as well
+        // 3. Dual-Query: If the translation is different, search the exact English text too
         if (chineseQuery != query) {
-            val origDoc = app.get("$mainUrl/?s=$query").document
+            val encodedOrig = URLEncoder.encode(query, "UTF-8")
+            val origDoc = app.get("$mainUrl/?s=$encodedOrig").document
+            
             val origResults = origDoc.select("article:has(.post-card) a").mapNotNull { element ->
                 element.toSearchResultAsync()
             }
             results.addAll(origResults)
         }
 
-        // Return unique results based on page URL
+        // Return unique results (combines Chinese search hits and English search hits)
         return results.distinctBy { it.url }
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page - Inside Thumbnail Fix + Translated Title & Plot)
+    // LOAD (Detail Page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
-        val title = translateToEnglish(rawTitle) ?: "Video"
+        val title = translateText(rawTitle, "en") ?: "Video"
         val pageHtml = document.outerHtml()
 
-        // 1. Prioritize the actual post image inside the content block
         val contentImg = document.selectFirst(".post-content img, article p img")
         var poster = contentImg?.let { 
             it.attr("z-image-loader-url").ifBlank { 
@@ -186,23 +172,20 @@ class MrdsProvider : MainAPI() {
             } 
         }
         
-        // 2. Fallback to script banner if no content image exists
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
 
-        // 3. Final fallback to og:image
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
 
-        // Decrypt the detail page poster if it is hosted on the encrypted CDN
         if (poster != null && poster.contains("pic.xustgq.cn")) {
             poster = decryptImageUrl(poster) ?: poster
         }
 
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
-        val synopsis = translateToEnglish(rawSynopsis)
+        val synopsis = translateText(rawSynopsis, "en")
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
