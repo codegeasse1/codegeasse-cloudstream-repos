@@ -22,7 +22,7 @@ class MrdsProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
-    // GOOGLE TRANSLATE HELPER (Free Endpoint)
+    // GOOGLE TRANSLATE HELPERS (Free Endpoints)
     // ---------------------------------------------------------------
     private suspend fun translateToEnglish(text: String?): String? {
         if (text.isNullOrBlank()) return text
@@ -31,7 +31,27 @@ class MrdsProvider : MainAPI() {
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=$encodedText"
             val response = app.get(url).text
 
-            // Extract all translated sentence segments from the Google Translate JSON array
+            val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
+            val translated = matches.map { 
+                it.groupValues[1]
+                    .replace("\\\"", "\"")
+                    .replace("\\n", "\n") 
+            }.joinToString("")
+
+            if (translated.isNotBlank()) translated else text
+        } catch (e: Exception) {
+            text
+        }
+    }
+
+    private suspend fun translateToChinese(text: String?): String? {
+        if (text.isNullOrBlank()) return text
+        return try {
+            val encodedText = URLEncoder.encode(text, "UTF-8")
+            // Target Chinese Simplified (zh-CN)
+            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=$encodedText"
+            val response = app.get(url).text
+
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
             val translated = matches.map { 
                 it.groupValues[1]
@@ -118,14 +138,32 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (Auto English -> Chinese Translation + Dual Query)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        
-        return document.select("article:has(.post-card) a").mapNotNull { element ->
+        val results = mutableListOf<SearchResponse>()
+
+        // 1. Translate the user query to Chinese
+        val chineseQuery = translateToChinese(query) ?: query
+
+        // 2. Search using the Chinese translated term
+        val chineseDoc = app.get("$mainUrl/?s=$chineseQuery").document
+        val chineseResults = chineseDoc.select("article:has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
+        results.addAll(chineseResults)
+
+        // 3. If the translated query is different from the original, search the original query as well
+        if (chineseQuery != query) {
+            val origDoc = app.get("$mainUrl/?s=$query").document
+            val origResults = origDoc.select("article:has(.post-card) a").mapNotNull { element ->
+                element.toSearchResultAsync()
+            }
+            results.addAll(origResults)
+        }
+
+        // Return unique results based on page URL
+        return results.distinctBy { it.url }
     }
 
     // ---------------------------------------------------------------
