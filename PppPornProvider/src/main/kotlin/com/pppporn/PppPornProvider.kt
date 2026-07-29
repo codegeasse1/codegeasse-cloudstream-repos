@@ -55,9 +55,9 @@ class PppPornProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // NEW helper: Element → MovieSearchData (for paginated lists)
+    // HELPER: build a single SearchData from an Element
     // ---------------------------------------------------------------
-    private fun Element.toSearchData(): MovieSearchData? {
+    private fun Element.toSearchData(): SearchData? {
         val aTag = this.selectFirst("a[href*=/videos/], a[href*=/video/]") ?: this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
 
@@ -67,12 +67,7 @@ class PppPornProvider : MainAPI() {
         val rawPoster = img?.attr("data-original")?.ifBlank { img.attr("data-src") }?.ifBlank { img.attr("src") }
         val posterUrl = fixUrlNull(rawPoster)
 
-        return MovieSearchData(
-            name = title,
-            url = href,
-            posterUrl = posterUrl,
-            type = TvType.NSFW
-        )
+        return newMovieSearchResult(title, href, posterUrl)
     }
 
     // ---------------------------------------------------------------
@@ -81,7 +76,7 @@ class PppPornProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
-        suspend fun fetchPage(page: Int): List<MovieSearchData> {
+        suspend fun fetchPage(page: Int): List<SearchData> {
             val url = if (page == 1)
                 "$mainUrl/search/?q=$encodedQuery"
             else
@@ -95,11 +90,11 @@ class PppPornProvider : MainAPI() {
 
         return listOf(
             MovieSearchResponse(
-                name = name,
-                results = firstPage,
-                nextPage = if (firstPage.isEmpty()) null else { page ->
-                    val results = fetchPage(page)
-                    if (results.isEmpty()) null else results
+                name,                              // 1st parameter (name)
+                firstPage,                         // 2nd parameter (results)
+                if (firstPage.isEmpty()) null      // 3rd parameter (nextPage)
+                else { page ->
+                    fetchPage(page).ifEmpty { null }
                 }
             )
         )
