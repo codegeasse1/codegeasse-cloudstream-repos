@@ -15,7 +15,7 @@ cloudstream {
 }
 
 android {
-    namespace = "com.kanav"
+    namespace = "com.taiav"       // <-- Updated namespace
     compileSdk = 33
     defaultConfig {
         minSdk = 21
