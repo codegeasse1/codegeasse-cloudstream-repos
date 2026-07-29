@@ -26,14 +26,14 @@ class TaiAVProvider : MainAPI() {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val targetLang = if (toEnglish) "en" else "zh-CN"
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
-            
+
             val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0")).text
 
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map { 
+            val translated = matches.map {
                 it.groupValues[1]
                     .replace("\\\"", "\"")
-                    .replace("\\n", "\n") 
+                    .replace("\\n", "\n")
             }.joinToString("")
 
             if (translated.isNotBlank()) translated else text
@@ -66,7 +66,7 @@ class TaiAVProvider : MainAPI() {
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val aTag = this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
-        
+
         val img = this.selectFirst("img")
         val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".movie-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
@@ -80,15 +80,32 @@ class TaiAVProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // SEARCH
+    // Confirmed via devtools: /search?q=...&page=N is a plain
+    // page-number param, so we just loop pages and merge results.
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
-        val url = "$mainUrl/cn/search?q=${URLEncoder.encode(chineseQuery, "UTF-8")}"
-        val document = app.get(url).document
-        
-        return document.select("div.movie-card").mapNotNull { element ->
-            element.toSearchResultAsync()
+        val encodedQuery = URLEncoder.encode(chineseQuery, "UTF-8")
+        val maxPages = 5
+
+        suspend fun fetchPage(page: Int): List<SearchResponse> {
+            val url = if (page == 1)
+                "$mainUrl/cn/search?q=$encodedQuery"
+            else
+                "$mainUrl/cn/search?q=$encodedQuery&page=$page"
+            val document = app.get(url).document
+            return document.select("div.movie-card").mapNotNull { element ->
+                element.toSearchResultAsync()
+            }
         }
+
+        val results = mutableListOf<SearchResponse>()
+        for (page in 1..maxPages) {
+            val pageResults = fetchPage(page)
+            if (pageResults.isEmpty()) break
+            results.addAll(pageResults)
+        }
+        return results
     }
 
     // ---------------------------------------------------------------
@@ -109,7 +126,7 @@ class TaiAVProvider : MainAPI() {
 
         val tagElements = document.select("a[href*=/cn/tag/]")
         val rawTags = tagElements.map { it.text().trim() }.filter { it.isNotBlank() }
-        
+
         val tagsList = if (rawTags.isNotEmpty()) {
             val combinedTags = rawTags.joinToString(" ~ ")
             val translatedCombinedTags = translateText(combinedTags, true) ?: combinedTags
@@ -138,11 +155,11 @@ class TaiAVProvider : MainAPI() {
 
         // Extract the exact movieId from the URL
         val movieId = data.substringAfterLast("/").substringBefore("?")
-        
+
         if (movieId.isNotBlank()) {
             try {
                 val apiUrl = "$mainUrl/api/getmovie?type=1280&id=$movieId"
-                
+
                 val response = app.get(
                     apiUrl,
                     headers = mapOf(
@@ -156,9 +173,9 @@ class TaiAVProvider : MainAPI() {
                 // 1. Grab the JSON Response and extract the URL safely
                 val json = JSONObject(response.text)
                 val m3u8UrlRaw = json.optString("m3u8", "")
-                
+
                 if (m3u8UrlRaw.isNotBlank()) {
-                    
+
                     // 2. Format the URL to ensure it has a valid protocol
                     val fixedM3u8Url = when {
                         m3u8UrlRaw.startsWith("//") -> "https:$m3u8UrlRaw"
