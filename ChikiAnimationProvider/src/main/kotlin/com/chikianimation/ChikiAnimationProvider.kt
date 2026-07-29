@@ -1,4 +1,4 @@
-package com.luciferdonghua
+package com.chikianimation
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
@@ -6,9 +6,9 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
-class LuciferDonghuaProvider : MainAPI() {
-    override var mainUrl = "https://luciferdonghua.in"
-    override var name = "LuciferDonghua"
+class ChikiAnimationProvider : MainAPI() {
+    override var mainUrl = "https://chikianimation.online"
+    override var name = "ChikiAnimation"
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
@@ -35,8 +35,8 @@ class LuciferDonghuaProvider : MainAPI() {
         val linkEl = this.selectFirst("a") ?: return null
 
         val rawHref = fixUrlNull(linkEl.attr("href")) ?: return null
-        // Strip the "-episode-X-lucifer-donghua" suffix to recover the main series page
-        val href = rawHref.replace(Regex("-episode-\\d+-[a-zA-Z0-9-]+/?$"), "")
+        // Strip "-episode-X" or "-ep-X" suffixes from the URL to get the main series page
+        val href = rawHref.replace(Regex("-(episode|ep)-\\d+-[a-zA-Z0-9-]+/?$"), "")
             .let { if (it.contains("/anime/")) it else "$mainUrl/anime/${it.substringAfterLast("/")}" }
 
         val title = linkEl.attr("title").ifBlank {
@@ -47,7 +47,7 @@ class LuciferDonghuaProvider : MainAPI() {
             ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
             ?: this.selectFirst("img")?.attr("src")
 
-        // Strip Jetpack CDN proxy (i0.wp.com / i3.wp.com) and resize query params
+        // Strip Jetpack CDN proxy and resize query params
         val posterUrl = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -69,7 +69,7 @@ class LuciferDonghuaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)episode\\s*\\d+.*"), "") ?: ""
+        val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
         
         // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
         val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
@@ -95,7 +95,6 @@ class LuciferDonghuaProvider : MainAPI() {
             val elements = doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li")
             return elements.mapNotNull { li ->
                 val epLink = li.selectFirst("a")
-                // If there is no link, but the item is marked as "selected", we are already on that episode's URL
                 val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) 
                              else if (li.hasClass("selected") || li.hasAttr("selected") || li.select("div.playinfo").isNotEmpty()) currentUrl 
                              else return@mapNotNull null
@@ -119,11 +118,11 @@ class LuciferDonghuaProvider : MainAPI() {
 
         var episodes = parseEpisodeGrid(document, url)
         
-        // Fallback: If the series page has no episode list, find ANY episode link on the page and scrape the list from there
+        // Fallback: Check for any episode link if the series page hides the list
         if (episodes.isEmpty()) {
             val firstEpLink = document.selectFirst(".epcurfirst a, .epcurlast a, .inepcx a, .bxcl a, a:matchesOwn((?i)watch)")?.attr("href")
             val anyEpLink = document.select("a[href]").firstOrNull { 
-                it.attr("href").contains("-episode-") && it.attr("href").contains(mainUrl)
+                (it.attr("href").contains("-episode-") || it.attr("href").contains("-ep-")) && it.attr("href").contains(mainUrl)
             }?.attr("href")
             
             val fallbackHref = fixUrlNull(firstEpLink ?: anyEpLink)
@@ -152,11 +151,10 @@ class LuciferDonghuaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
+        var found = false
 
         val embedDiv = document.selectFirst("#pembed[data-default-embed]")
         val encoded = embedDiv?.attr("data-default-embed")
-
-        var found = false
 
         if (!encoded.isNullOrBlank()) {
             val decodedHtml = try {
