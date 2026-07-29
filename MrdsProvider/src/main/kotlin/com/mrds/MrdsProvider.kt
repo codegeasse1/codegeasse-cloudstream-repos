@@ -25,20 +25,16 @@ class MrdsProvider : MainAPI() {
     // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
         return try {
-            // Fetch the raw encrypted binary blob
             val response = app.get(url, headers = mapOf("Referer" to "$mainUrl/"))
             val cipherBytes = response.okhttpResponse.body?.bytes() ?: return null
 
-            // The keys you found in the JS, converted from ASCII char codes
             val key = SecretKeySpec("f5d965df75336270".toByteArray(), "AES")
             val iv = IvParameterSpec("97b60394abc2fbe1".toByteArray())
 
-            // Decrypt the blob back into a valid JPEG
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, key, iv)
             val decryptedBytes = cipher.doFinal(cipherBytes)
 
-            // Convert decrypted bytes to Base64 so CloudStream can render it
             val ext = url.substringAfterLast(".", "jpeg").substringBefore("?")
             "data:image/$ext;base64," + Base64.encodeToString(decryptedBytes, Base64.NO_WRAP)
         } catch (e: Exception) {
@@ -59,7 +55,6 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Safely extract and decrypt thumbnails
         val homeItems = document.select("article:has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
@@ -76,7 +71,6 @@ class MrdsProvider : MainAPI() {
             ?: this.text().substringBefore(" • ").trim()
         val cardHtml = this.outerHtml()
 
-        // Extract the URL from the JS loadBannerDirect script or fallback attributes
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
         val fallbackImg = this.selectFirst("img")?.let { 
             it.attr("z-image-loader-url").ifBlank { 
@@ -87,7 +81,6 @@ class MrdsProvider : MainAPI() {
         }
         val rawPosterUrl = scriptImgMatch ?: fallbackImg
 
-        // If the image is hosted on their encrypted CDN, decrypt it natively!
         var finalPosterUrl = rawPosterUrl
         if (rawPosterUrl != null && rawPosterUrl.contains("pic.xustgq.cn")) {
             finalPosterUrl = decryptImageUrl(rawPosterUrl) ?: rawPosterUrl
@@ -110,7 +103,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD
+    // LOAD (Detail Page - Inside Thumbnail Fix)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -118,13 +111,27 @@ class MrdsProvider : MainAPI() {
         val title = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val pageHtml = document.outerHtml()
 
-        var poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        // 1. Prioritize the actual post image inside the content block
+        val contentImg = document.selectFirst(".post-content img, article p img")
+        var poster = contentImg?.let { 
+            it.attr("z-image-loader-url").ifBlank { 
+                it.attr("x-image-loader-url").ifBlank { 
+                    it.attr("data-xkrkllgl").ifBlank { it.attr("src") } 
+                } 
+            } 
+        }
         
+        // 2. Fallback to script banner if no content image exists
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
 
-        // Decrypt the detail page poster if necessary
+        // 3. Final fallback to og:image
+        if (poster.isNullOrBlank() || poster.startsWith("data:")) {
+            poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        }
+
+        // Decrypt the detail page poster if it is hosted on the encrypted CDN
         if (poster != null && poster.contains("pic.xustgq.cn")) {
             poster = decryptImageUrl(poster) ?: poster
         }
