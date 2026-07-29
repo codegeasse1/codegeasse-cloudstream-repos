@@ -1,10 +1,7 @@
 package com.pppporn
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
@@ -31,21 +28,21 @@ class PppPornProvider : MainAPI() {
         val document = app.get(url).document
 
         val elements = document.select("div.item, div.video-item, div.post, div.model, li.item")
-        
+
         val homeItems = elements.mapNotNull { element ->
-            element.toSearchResult()
+            element.toSearchResult()   // keeps the old single‑item wrapper (fine for main page)
         }
-        
+
         return newHomePageResponse(request.name, homeItems)
     }
 
     // ---------------------------------------------------------------
-    // ITEM PARSING
+    // ITEM PARSING (single result – used by main page)
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val aTag = this.selectFirst("a[href*=/videos/], a[href*=/video/]") ?: this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
-        
+
         val img = this.selectFirst("img")
         val title = img?.attr("alt")?.ifBlank { img.attr("title") }?.ifBlank { this.text() }?.trim() ?: "Video"
 
@@ -58,15 +55,55 @@ class PppPornProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // NEW helper: Element → MovieSearchData (for paginated lists)
+    // ---------------------------------------------------------------
+    private fun Element.toSearchData(): MovieSearchData? {
+        val aTag = this.selectFirst("a[href*=/videos/], a[href*=/video/]") ?: this.selectFirst("a") ?: return null
+        val href = fixUrlNull(aTag.attr("href")) ?: return null
+
+        val img = this.selectFirst("img")
+        val title = img?.attr("alt")?.ifBlank { img.attr("title") }?.ifBlank { this.text() }?.trim() ?: "Video"
+
+        val rawPoster = img?.attr("data-original")?.ifBlank { img.attr("data-src") }?.ifBlank { img.attr("src") }
+        val posterUrl = fixUrlNull(rawPoster)
+
+        return MovieSearchData(
+            name = title,
+            url = href,
+            posterUrl = posterUrl,
+            type = TvType.NSFW
+        )
+    }
+
+    // ---------------------------------------------------------------
+    // SEARCH (PAGINATED)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search/?q=${URLEncoder.encode(query, "UTF-8")}"
-        val document = app.get(url).document
-        
-        return document.select("div.item, div.video-item, div.post, div.model, li.item").mapNotNull { element ->
-            element.toSearchResult()
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+
+        // Helper to fetch one page
+        suspend fun fetchPage(page: Int): List<MovieSearchData> {
+            val url = if (page == 1)
+                "$mainUrl/search/?q=$encodedQuery"
+            else
+                "$mainUrl/search/?q=$encodedQuery&page=$page"
+            val document = app.get(url).document
+            return document.select("div.item, div.video-item, div.post, div.model, li.item")
+                .mapNotNull { it.toSearchData() }
         }
+
+        val firstPage = fetchPage(1)
+
+        return listOf(
+            newMovieSearchResponse(
+                name = name,
+                results = firstPage,
+                nextPage = if (firstPage.isEmpty()) null else { page ->
+                    val results = fetchPage(page)
+                    if (results.isEmpty()) null else results
+                }
+            )
+        )
     }
 
     // ---------------------------------------------------------------
@@ -106,7 +143,7 @@ class PppPornProvider : MainAPI() {
         }
     }
 
-   // ---------------------------------------------------------------
+    // ---------------------------------------------------------------
     // LOAD LINKS (KVS Scraper)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
@@ -125,7 +162,6 @@ class PppPornProvider : MainAPI() {
         cdnRegex.findAll(pageHtml).forEach { match ->
             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
             
-            // THE FIX: Ignore image URLs that happen to have .m3u8 or .mp4 in their name
             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png") && !cleanUrl.endsWith(".webp")) {
                 val isM3u8 = cleanUrl.contains(".m3u8")
                 
@@ -170,9 +206,7 @@ class PppPornProvider : MainAPI() {
                                 found = true
                             }
                         }
-                    } catch (e: Exception) {
-                        // Ignore dead iframes
-                    }
+                    } catch (_: Exception) { }
                 }
             }
         }
