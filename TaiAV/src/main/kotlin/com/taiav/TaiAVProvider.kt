@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
+import org.json.JSONObject
 import java.net.URLEncoder
 
 class TaiAVProvider : MainAPI() {
@@ -50,7 +51,6 @@ class TaiAVProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // TaiAV uses simple ?page= query parameters
         val url = if (page == 1) request.data else "${request.data}?page=$page"
         val document = app.get(url).document
 
@@ -83,7 +83,6 @@ class TaiAVProvider : MainAPI() {
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
-        // Correct TaiAV search endpoint
         val url = "$mainUrl/cn/search?q=${URLEncoder.encode(chineseQuery, "UTF-8")}"
         val document = app.get(url).document
         
@@ -102,7 +101,6 @@ class TaiAVProvider : MainAPI() {
         val rawTitle = document.selectFirst("h1.uk-h4")?.text() ?: "Video"
         val title = translateText(rawTitle, true) ?: rawTitle
 
-        // Most reliable way to get the poster on TaiAV is from the player JS config or JSON-LD
         var posterUrl = Regex("""poster:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         if (posterUrl.isNullOrBlank()) {
             posterUrl = Regex(""""thumbnailUrl"\s*:\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
@@ -128,7 +126,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (TaiAV API Extractor)
+    // LOAD LINKS (TaiAV Cookie & Key Injector)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -145,28 +143,54 @@ class TaiAVProvider : MainAPI() {
             try {
                 val apiUrl = "$mainUrl/api/getmovie?type=1280&id=$movieId"
                 
-                val jsonResponse = app.get(
+                val response = app.get(
                     apiUrl,
                     headers = mapOf(
-                        "User-Agent" to "Mozilla/5.0",
-                        "X-Requested-With" to "XMLHttpRequest", // Mandatory for TaiAV API
-                        "Accept" to "application/json",
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Accept" to "application/json, text/javascript, */*; q=0.01",
                         "Referer" to data
                     )
-                ).text
+                )
 
-                // Safe regex extraction instead of JSONObject (prevents library crashes)
-                val m3u8Url = Regex(""""m3u8"\s*:\s*"([^"]+)"""").find(jsonResponse)?.groupValues?.get(1)
+                // 1. Grab the JSON Response and extract the URL safely
+                val json = JSONObject(response.text)
+                val m3u8UrlRaw = json.optString("m3u8", "")
                 
-                if (!m3u8Url.isNullOrBlank()) {
+                if (m3u8UrlRaw.isNotBlank()) {
+                    
+                    // 2. Format the URL to ensure it has a valid protocol
+                    val fixedM3u8Url = when {
+                        m3u8UrlRaw.startsWith("//") -> "https:$m3u8UrlRaw"
+                        m3u8UrlRaw.startsWith("/") -> "$mainUrl$m3u8UrlRaw"
+                        else -> m3u8UrlRaw
+                    }
+
+                    // 3. Dynamically grab the exact host for the Origin header (e.g., m.taiav.com)
+                    val videoOrigin = try {
+                        val uri = java.net.URI(fixedM3u8Url)
+                        "${uri.scheme}://${uri.host}"
+                    } catch (e: Exception) {
+                        mainUrl
+                    }
+
+                    // 4. CRITICAL: Extract session cookies to authenticate the `ts.key` decryption download
+                    val cookies = app.cookies(mainUrl).entries.joinToString("; ") { "${it.key}=${it.value}" }
+
                     callback(
                         newExtractorLink(
                             source = name,
-                            name = "$name Server",
-                            url = m3u8Url.replace("\\/", "/"),
+                            name = "$name HD",
+                            url = fixedM3u8Url,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "$mainUrl/" // CDNs often require the mainUrl referer
+                            // Inject strict headers directly into CloudStream's ExoPlayer
+                            this.headers = mapOf(
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                "Origin" to videoOrigin,
+                                "Referer" to "$videoOrigin/",
+                                "Cookie" to cookies 
+                            )
                             this.quality = Qualities.Unknown.value
                         }
                     )
