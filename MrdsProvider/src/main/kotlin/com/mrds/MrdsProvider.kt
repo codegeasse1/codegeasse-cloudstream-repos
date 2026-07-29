@@ -31,7 +31,6 @@ class MrdsProvider : MainAPI() {
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=$encodedText"
             val response = app.get(url).text
 
-            // Extract all translated sentence segments from the Google Translate JSON array
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
             val translated = matches.map { 
                 it.groupValues[1]
@@ -119,13 +118,35 @@ class MrdsProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // SEARCH
+    // Confirmed via devtools: search pagination is path-based, NOT
+    // ?s= + /page/N/ like the blog listing. Real pattern is:
+    //   /search/<term>/       (page 1)
+    //   /search/<term>/2/     (page 2)
+    //   /search/<term>/3/     (page 3)
+    // Loop pages 1..8, merge results, stop early on an empty page.
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        
-        return document.select("article:has(.post-card) a").mapNotNull { element ->
-            element.toSearchResultAsync()
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val maxPages = 8
+
+        suspend fun fetchPage(page: Int): List<SearchResponse> {
+            val url = if (page == 1)
+                "$mainUrl/search/$encodedQuery/"
+            else
+                "$mainUrl/search/$encodedQuery/$page/"
+            val document = app.get(url).document
+            return document.select("article:has(.post-card) a").mapNotNull { element ->
+                element.toSearchResultAsync()
+            }
         }
+
+        val results = mutableListOf<SearchResponse>()
+        for (page in 1..maxPages) {
+            val pageResults = fetchPage(page)
+            if (pageResults.isEmpty()) break
+            results.addAll(pageResults)
+        }
+        return results
     }
 
     // ---------------------------------------------------------------
@@ -138,7 +159,6 @@ class MrdsProvider : MainAPI() {
         val title = translateToEnglish(rawTitle) ?: "Video"
         val pageHtml = document.outerHtml()
 
-        // 1. Prioritize the actual post image inside the content block
         val contentImg = document.selectFirst(".post-content img, article p img")
         var poster = contentImg?.let { 
             it.attr("z-image-loader-url").ifBlank { 
@@ -148,17 +168,14 @@ class MrdsProvider : MainAPI() {
             } 
         }
         
-        // 2. Fallback to script banner if no content image exists
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
 
-        // 3. Final fallback to og:image
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
 
-        // Decrypt the detail page poster if it is hosted on the encrypted CDN
         if (poster != null && poster.contains("pic.xustgq.cn")) {
             poster = decryptImageUrl(poster) ?: poster
         }
