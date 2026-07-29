@@ -14,9 +14,6 @@ class LuciferDonghuaProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/anime/?status=&type=&order=update" to "Latest Release",
         "$mainUrl/anime/?status=&type=&order=popular" to "Popular",
@@ -26,16 +23,13 @@ class LuciferDonghuaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else request.data.replace("?", "page/$page/?")
         val document = app.get(url).document
-
         val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("a") ?: return null
-
         val rawHref = fixUrlNull(linkEl.attr("href")) ?: return null
-        // Strip the "-episode-X-lucifer-donghua" suffix to recover the main series page
         val href = rawHref.replace(Regex("-episode-\\d+-[a-zA-Z0-9-]+/?$"), "")
             .let { if (it.contains("/anime/")) it else "$mainUrl/anime/${it.substringAfterLast("/")}" }
 
@@ -47,7 +41,6 @@ class LuciferDonghuaProvider : MainAPI() {
             ?: this.selectFirst("img")?.attr("data-src")?.ifBlank { null }
             ?: this.selectFirst("img")?.attr("src")
 
-        // Strip Jetpack CDN proxy (i0.wp.com / i3.wp.com) and resize query params
         val posterUrl = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
@@ -55,32 +48,24 @@ class LuciferDonghuaProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         return document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD (anime detail page + episode list)
-    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)episode\\s*\\d+.*"), "") ?: ""
         
-        // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
+        // Strict selectors to ensure it grabs the anime poster instead of the site banner
         val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
-        
         val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
             ?: posterElement?.attr("data-src")?.ifBlank { null }
             ?: posterElement?.attr("src")
         
         var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
 
-        // FALLBACK: If the main selector fails, try og:image, but explicitly reject default site banners and logos
         if (poster.isNullOrBlank()) {
             val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
             if (ogImage != null && !ogImage.contains("logo", true) && !ogImage.contains("banner", true)) {
@@ -95,7 +80,6 @@ class LuciferDonghuaProvider : MainAPI() {
             val elements = doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li")
             return elements.mapNotNull { li ->
                 val epLink = li.selectFirst("a")
-                // If there is no link, but the item is marked as "selected", we are already on that episode's URL
                 val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) 
                              else if (li.hasClass("selected") || li.hasAttr("selected") || li.select("div.playinfo").isNotEmpty()) currentUrl 
                              else return@mapNotNull null
@@ -103,8 +87,6 @@ class LuciferDonghuaProvider : MainAPI() {
                 if (epHref == null) return@mapNotNull null
                 
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
-                
-                // Extract episode number
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
@@ -118,8 +100,6 @@ class LuciferDonghuaProvider : MainAPI() {
         }
 
         var episodes = parseEpisodeGrid(document, url)
-        
-        // Fallback: If the series page has no episode list, find ANY episode link on the page and scrape the list from there
         if (episodes.isEmpty()) {
             val firstEpLink = document.selectFirst(".epcurfirst a, .epcurlast a, .inepcx a, .bxcl a, a:matchesOwn((?i)watch)")?.attr("href")
             val anyEpLink = document.select("a[href]").firstOrNull { 
@@ -127,7 +107,6 @@ class LuciferDonghuaProvider : MainAPI() {
             }?.attr("href")
             
             val fallbackHref = fixUrlNull(firstEpLink ?: anyEpLink)
-            
             if (fallbackHref != null) {
                 val epDocument = app.get(fallbackHref).document
                 episodes = parseEpisodeGrid(epDocument, fallbackHref)
@@ -142,9 +121,6 @@ class LuciferDonghuaProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS (video extraction)
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -152,33 +128,47 @@ class LuciferDonghuaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-
-        val embedDiv = document.selectFirst("#pembed[data-default-embed]")
-        val encoded = embedDiv?.attr("data-default-embed")
-
         var found = false
 
-        if (!encoded.isNullOrBlank()) {
-            val decodedHtml = try {
-                String(Base64.decode(encoded, Base64.DEFAULT))
-            } catch (e: Exception) {
-                null
+        suspend fun processUrl(rawUrl: String) {
+            val url = fixUrlNull(rawUrl) ?: return
+            var finalUrl = url
+            
+            if (url.contains("geo.dailymotion.com")) {
+                val vid = Regex("video=([a-zA-Z0-9]+)").find(url)?.groupValues?.get(1)
+                if (vid != null) finalUrl = "https://www.dailymotion.com/video/$vid"
+            } else if (url.contains("dailymotion.com/crawler/video/")) {
+                val vid = url.substringAfterLast("/")
+                if (vid.isNotBlank()) finalUrl = "https://www.dailymotion.com/video/$vid"
             }
-            val iframeSrc = decodedHtml?.let {
-                Regex("src=\"([^\"]+)\"").find(it)?.groupValues?.get(1)
-            }
-            if (!iframeSrc.isNullOrBlank()) {
-                loadExtractor(iframeSrc, data, subtitleCallback, callback)
+
+            if (finalUrl.contains("dailymotion.com/video/")) {
+                loadExtractor(finalUrl, data, subtitleCallback, callback)
+                found = true
+            } else {
+                loadExtractor(finalUrl, data, subtitleCallback, callback)
                 found = true
             }
         }
 
-        document.select("iframe[src*=dailymotion], iframe.dmp_iframe, div.agn-player-stage iframe")
-            .forEach { iframe ->
-                val src = fixUrlNull(iframe.attr("src")) ?: return@forEach
-                loadExtractor(src, data, subtitleCallback, callback)
-                found = true
+        document.select("meta[itemprop=embedUrl], meta[itemprop=contentUrl]").forEach { element ->
+            processUrl(element.attr("content"))
+        }
+
+        document.select("select option[value], [data-default-embed], [data-embed]").forEach { element ->
+            val value = element.attr("value").ifBlank { element.attr("data-default-embed") }.ifBlank { element.attr("data-embed") }
+            if (value.isNotBlank()) {
+                try {
+                    val decoded = String(Base64.decode(value, Base64.DEFAULT))
+                    val src = Regex("src=[\"']([^\"']+)[\"']").find(decoded)?.groupValues?.get(1)
+                    if (src != null) processUrl(src)
+                } catch (e: Exception) {}
             }
+        }
+
+        document.select("iframe[src]").forEach { iframe ->
+            processUrl(iframe.attr("src"))
+        }
 
         return found
     }
