@@ -7,10 +7,11 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
+import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-public class TaiAVProvider : MainAPI() {
+class TaiAVProvider : MainAPI() {
     override var mainUrl = "https://m.taiav.com"
     override var name = "TaiAV"
     override val hasMainPage = true
@@ -86,7 +87,21 @@ public class TaiAVProvider : MainAPI() {
         val rawTitle = document.selectFirst("h1.uk-h4.uk-text-break")?.text() ?: "Video"
         val title = translateText(rawTitle, true) ?: rawTitle
 
-        val posterUrl = fixUrlNull(document.selectFirst("div.player-poster")?.attr("data-poster"))
+        // Fixed poster extraction: use background-image from player-poster div
+        val posterElement = document.selectFirst("div.player-poster")
+        var posterUrl: String? = null
+        if (posterElement != null) {
+            val style = posterElement.attr("style")
+            val regex = Regex("""url\(["']?([^"')]+)["']?\)""")
+            posterUrl = regex.find(style)?.groupValues?.get(1)
+            if (posterUrl != null) {
+                posterUrl = fixUrlNull(posterUrl)
+            }
+        }
+        // Fallback: try data-poster attribute (might be empty)
+        if (posterUrl.isNullOrBlank()) {
+            posterUrl = fixUrlNull(posterElement?.attr("data-poster"))
+        }
 
         val tagElements = document.select(".tags a")
         val rawTags = tagElements.map { it.text().trim() }.filter { it.isNotBlank() }
@@ -113,60 +128,29 @@ public class TaiAVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val document = app.get(data).document
-        val pageHtml = document.html()
 
-        try {
-            val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
-            val match = jsonRegex.find(pageHtml)
-            if (match != null) {
-                val jsonString = match.groupValues[1]
-                val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
-                val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
+        // 1. Primary method: call the site's own API to get the m3u8 link
+        val idRegex = Regex("""/movie/([a-f0-9]+)""")
+        val movieId = idRegex.find(data)?.groupValues?.get(1)
+        if (movieId != null) {
+            try {
+                val apiUrl = "$mainUrl/api/getmovie?type=1280&id=$movieId"
+                val jsonResponse = app.get(
+                    apiUrl,
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0",
+                        "Referer" to data
+                    )
+                ).text
 
-                if (urlMatch != null) {
-                    val encodedUrl = urlMatch.groupValues[1]
-                    val encryptType = encryptMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-
-                    val realUrl = when (encryptType) {
-                        1 -> String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
-                        2 -> {
-                            val base64Decoded = String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
-                            URLDecoder.decode(base64Decoded, "UTF-8")
-                        }
-                        else -> encodedUrl
-                    }
-
-                    if (realUrl.contains(".m3u8")) {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "$name Player",
-                                url = realUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        found = true
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        if (!found) {
-            val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            cdnRegex.findAll(pageHtml).forEach { match ->
-                val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                if (cleanUrl.isNotBlank()) {
+                val json = JSONObject(jsonResponse)
+                val m3u8 = json.optString("m3u8", "")
+                if (m3u8.isNotBlank()) {
                     callback(
                         newExtractorLink(
                             source = name,
-                            name = "$name Server (m3u8)",
-                            url = cleanUrl,
+                            name = "$name Player",
+                            url = m3u8,
                             type = ExtractorLinkType.M3U8
                         ) {
                             this.referer = "$mainUrl/"
@@ -175,21 +159,67 @@ public class TaiAVProvider : MainAPI() {
                     )
                     found = true
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
+        // 2. Fallback: original HTML scraping logic (kept for safety)
         if (!found) {
-            val tsRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.ts[^\s"'<>]*""")
-            tsRegex.findAll(pageHtml).forEach { match ->
-                var cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                if (cleanUrl.isNotBlank()) {
-                    val m3u8Url = cleanUrl.replace(Regex("\\.ts.*"), ".m3u8")
-                    if (m3u8Url != cleanUrl) {
+            val document = app.get(data).document
+            val pageHtml = document.html()
+
+            try {
+                val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
+                val match = jsonRegex.find(pageHtml)
+                if (match != null) {
+                    val jsonString = match.groupValues[1]
+                    val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
+                    val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
+
+                    if (urlMatch != null) {
+                        val encodedUrl = urlMatch.groupValues[1]
+                        val encryptType = encryptMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+                        val realUrl = when (encryptType) {
+                            1 -> String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
+                            2 -> {
+                                val base64Decoded = String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
+                                URLDecoder.decode(base64Decoded, "UTF-8")
+                            }
+                            else -> encodedUrl
+                        }
+
+                        if (realUrl.contains(".m3u8")) {
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "$name Player",
+                                    url = realUrl,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = "$mainUrl/"
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            found = true
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            if (!found) {
+                val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+                cdnRegex.findAll(pageHtml).forEach { match ->
+                    val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+                    if (cleanUrl.isNotBlank()) {
                         callback(
                             newExtractorLink(
                                 source = name,
-                                name = "$name CDN (m3u8 converted)",
-                                url = m3u8Url,
+                                name = "$name Server (m3u8)",
+                                url = cleanUrl,
                                 type = ExtractorLinkType.M3U8
                             ) {
                                 this.referer = "$mainUrl/"
@@ -197,6 +227,30 @@ public class TaiAVProvider : MainAPI() {
                             }
                         )
                         found = true
+                    }
+                }
+            }
+
+            if (!found) {
+                val tsRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.ts[^\s"'<>]*""")
+                tsRegex.findAll(pageHtml).forEach { match ->
+                    var cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+                    if (cleanUrl.isNotBlank()) {
+                        val m3u8Url = cleanUrl.replace(Regex("\\.ts.*"), ".m3u8")
+                        if (m3u8Url != cleanUrl) {
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "$name CDN (m3u8 converted)",
+                                    url = m3u8Url,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = "$mainUrl/"
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            found = true
+                        }
                     }
                 }
             }
