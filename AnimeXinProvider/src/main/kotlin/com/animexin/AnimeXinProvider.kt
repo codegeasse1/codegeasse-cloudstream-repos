@@ -59,9 +59,9 @@ class AnimeXinProvider : MainAPI() {
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
-                mutableSetOf(DubStatus.Dub)
+                mutableSetOf(DubStatus.Dubbed)
             } else {
-                mutableSetOf(DubStatus.Sub)
+                mutableSetOf(DubStatus.Subbed)
             }
         }
     }
