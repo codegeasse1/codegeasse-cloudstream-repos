@@ -21,7 +21,7 @@ class MrdsProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
-      // ---------------------------------------------------------------
+    // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
     // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
     //   {"translate": true}
@@ -68,7 +68,9 @@ class MrdsProvider : MainAPI() {
         } catch (e: Exception) {
             text
         }
-    } ---------------------------------------------------------------
+    }
+
+    // ---------------------------------------------------------------
     // NATIVE AES IMAGE DECRYPTION
     // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
