@@ -32,7 +32,7 @@ class KanAVProvider : MainAPI() {
         cachedTranslateFlag?.let { return it }
         val flag = try {
             val json = app.get(
-                "https://gist.githubusercontent.com/codegeasse1/02333c773cbd933b02e1779e6a1222fe/raw/2bc338c7f4ffe2049c3a783dae83d083aaed2012/config.json"
+                "https://gist.githubusercontent.com/codegeasse1/02333c773cbd933b02e1779e6a1222fe/raw/config.json"
             ).text
             Regex(""""translate"\s*:\s*(true|false)""").find(json)
                 ?.groupValues?.get(1)?.toBoolean() ?: true
