@@ -18,9 +18,6 @@ class KanAVProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW, TvType.Others)
 
-    // Cache to map English tags → original Chinese (filled in load)
-    private val tagTranslationMap = mutableMapOf<String, String>()
-
     // ---------------------------------------------------------------
     // GOOGLE TRANSLATE HELPER
     // ---------------------------------------------------------------
@@ -30,16 +27,13 @@ class KanAVProvider : MainAPI() {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val targetLang = if (toEnglish) "en" else "zh-CN"
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
-
             val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0")).text
-
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
             val translated = matches.map {
                 it.groupValues[1]
                     .replace("\\\"", "\"")
                     .replace("\\n", "\n")
             }.joinToString("")
-
             if (translated.isNotBlank()) translated else text
         } catch (e: Exception) {
             text
@@ -57,53 +51,31 @@ class KanAVProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else request.data.replace(".html", "/page/$page.html")
         val document = app.get(url).document
-
-        val homeItems = document.select(".video-item").mapNotNull { element ->
-            element.toSearchResultAsync()
-        }
-
+        val homeItems = document.select(".video-item").mapNotNull { it.toSearchResultAsync() }
         return newHomePageResponse(request.name, homeItems)
     }
 
-    // ---------------------------------------------------------------
-    // ITEM PARSING
-    // ---------------------------------------------------------------
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
-        val aTag = this.selectFirst("a") ?: return null
+        val aTag = selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
-
-        val img = this.selectFirst("img")
-        val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".entry-title")?.text() }?.trim() ?: ""
+        val img = selectFirst("img")
+        val rawTitle = img?.attr("alt")?.ifBlank { selectFirst(".entry-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
-
-        val rawPoster = img?.attr("data-original")?.ifBlank { img.attr("src") }
-        val posterUrl = fixUrlNull(rawPoster)
-
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
-            this.posterUrl = posterUrl
-        }
+        val posterUrl = fixUrlNull(img?.attr("data-original")?.ifBlank { img.attr("src") })
+        return newMovieSearchResponse(title, href, TvType.NSFW) { this.posterUrl = posterUrl }
     }
 
     // ---------------------------------------------------------------
-    // SEARCH – uses the tagTranslationMap to redirect English → Chinese
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        // If the user clicked a tag, we might have a cached Chinese equivalent
-        val actualQuery = tagTranslationMap[query] ?: run {
-            // Otherwise, translate the whole query from English to Chinese
-            translateText(query, false) ?: query
-        }
-
-        val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(actualQuery, "UTF-8")}"
-        val document = app.get(url).document
-
-        return document.select(".video-item").mapNotNull { element ->
-            element.toSearchResultAsync()
-        }
+        val chineseQuery = translateText(query, false) ?: query
+        val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(chineseQuery, "UTF-8")}"
+        return app.get(url).document.select(".video-item").mapNotNull { it.toSearchResultAsync() }
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) – populates the tagTranslationMap
+    // LOAD (Detail Page) – English title, Chinese clickable tags
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -114,43 +86,22 @@ class KanAVProvider : MainAPI() {
         val posterElement = document.selectFirst("img.countext-img, .video-box-ather img")
         val posterUrl = fixUrlNull(posterElement?.attr("data-original")?.ifBlank { posterElement.attr("src") })
 
-        // Collect all clickable tag links (categories + tags + actors)
-        val tagLinks = document.select(
-            ".video-countext-categories a, .video-countext-tags a"
-        ).filter {
-            it.attr("href") != "#" && it.attr("href").isNotBlank()
-        }
-
-        // Build list of original Chinese tags
-        val chineseTags = tagLinks.map { it.text().trim() }
+        // Keep Chinese tags for clickability
+        val tags = document.select(".video-countext-categories a, .video-countext-tags a")
+            .filter { it.attr("href") != "#" }
+            .map { it.text().trim() }
             .filter { it.isNotBlank() }
             .distinct()
-
-        // Translate them to English in one batch (for display)
-        val englishTags = if (chineseTags.isNotEmpty()) {
-            val joined = chineseTags.joinToString(" ~ ")
-            val translated = translateText(joined, true) ?: joined
-            translated.split(" ~ ").map { it.trim() }
-        } else {
-            emptyList()
-        }
-
-        // Populate the mapping: English tag → original Chinese
-        // This is used by search() to redirect the click
-        tagTranslationMap.clear()
-        chineseTags.zip(englishTags).forEach { (cn, en) ->
-            tagTranslationMap[en] = cn
-        }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = posterUrl
             this.plot = title
-            this.tags = englishTags   // display English, click uses search() above
+            this.tags = tags  // Chinese, but clickable!
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (MacCMS player_aaaa Decoder – already working)
+    // LOAD LINKS (MacCMS player_aaaa decoder – working)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -159,8 +110,7 @@ class KanAVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val document = app.get(data).document
-        val pageHtml = document.html()
+        val pageHtml = app.get(data).document.html()
 
         try {
             val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
@@ -169,11 +119,9 @@ class KanAVProvider : MainAPI() {
                 val jsonString = match.groupValues[1]
                 val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
                 val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
-
                 if (urlMatch != null) {
                     val encodedUrl = urlMatch.groupValues[1]
                     val encryptType = encryptMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-
                     val realUrl = when (encryptType) {
                         1 -> String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
                         2 -> {
@@ -182,43 +130,26 @@ class KanAVProvider : MainAPI() {
                         }
                         else -> encodedUrl
                     }
-
                     if (realUrl.contains(".m3u8")) {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "$name Player",
-                                url = realUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
+                        callback(newExtractorLink(name, "$name Player", realUrl, ExtractorLinkType.M3U8) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        })
                         found = true
                     }
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (_: Exception) {}
 
+        // Fallback .m3u8 in page
         if (!found) {
-            val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            cdnRegex.findAll(pageHtml).forEach { match ->
+            Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(pageHtml).forEach { match ->
                 val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
                 if (cleanUrl.isNotBlank()) {
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name Server",
-                            url = cleanUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
+                    callback(newExtractorLink(name, "$name Server", cleanUrl, ExtractorLinkType.M3U8) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                    })
                     found = true
                 }
             }
