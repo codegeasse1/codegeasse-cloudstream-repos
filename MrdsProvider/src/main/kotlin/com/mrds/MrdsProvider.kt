@@ -11,9 +11,6 @@ import org.jsoup.nodes.Element
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 
 class MrdsProvider : MainAPI() {
     override var mainUrl = "https://mrds.com"
@@ -62,18 +59,16 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Use Coroutines to fetch and decrypt all 24 thumbnails at the exact same time
-        val homeItems = coroutineScope {
-            document.select("article:has(.post-card) a").map { element ->
-                async { element.toSearchResultAsync() }
-            }.awaitAll().filterNotNull()
+        // Safely extract and decrypt thumbnails
+        val homeItems = document.select("article:has(.post-card) a").mapNotNull { element ->
+            element.toSearchResultAsync()
         }
         
         return newHomePageResponse(request.name, homeItems)
     }
 
     // ---------------------------------------------------------------
-    // SEARCH & HOMEPAGE ITEM PARSING (Async)
+    // SEARCH & HOMEPAGE ITEM PARSING
     // ---------------------------------------------------------------
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
@@ -92,7 +87,7 @@ class MrdsProvider : MainAPI() {
         }
         val rawPosterUrl = scriptImgMatch ?: fallbackImg
 
-        // If the image is hosted on their encrypted CDN, decrypt it!
+        // If the image is hosted on their encrypted CDN, decrypt it natively!
         var finalPosterUrl = rawPosterUrl
         if (rawPosterUrl != null && rawPosterUrl.contains("pic.xustgq.cn")) {
             finalPosterUrl = decryptImageUrl(rawPosterUrl) ?: rawPosterUrl
@@ -109,10 +104,8 @@ class MrdsProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         
-        return coroutineScope {
-            document.select("article:has(.post-card) a").map { element ->
-                async { element.toSearchResultAsync() }
-            }.awaitAll().filterNotNull()
+        return document.select("article:has(.post-card) a").mapNotNull { element ->
+            element.toSearchResultAsync()
         }
     }
 
