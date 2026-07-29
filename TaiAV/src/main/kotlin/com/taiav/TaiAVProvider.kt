@@ -126,7 +126,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (TaiAV Cookie & Key Injector)
+    // LOAD LINKS (TaiAV Key Injector)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -174,9 +174,6 @@ class TaiAVProvider : MainAPI() {
                         mainUrl
                     }
 
-                    // 4. CRITICAL: Extract session cookies to authenticate the `ts.key` decryption download
-                    val cookies = app.cookies(mainUrl).entries.joinToString("; ") { "${it.key}=${it.value}" }
-
                     callback(
                         newExtractorLink(
                             source = name,
@@ -185,11 +182,11 @@ class TaiAVProvider : MainAPI() {
                             type = ExtractorLinkType.M3U8
                         ) {
                             // Inject strict headers directly into CloudStream's ExoPlayer
+                            // Cookies are automatically handled by CloudStream's global cookie jar
                             this.headers = mapOf(
                                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                                 "Origin" to videoOrigin,
-                                "Referer" to "$videoOrigin/",
-                                "Cookie" to cookies 
+                                "Referer" to "$videoOrigin/"
                             )
                             this.quality = Qualities.Unknown.value
                         }
