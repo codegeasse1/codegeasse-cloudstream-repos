@@ -3,6 +3,7 @@ package com.chikianimation
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
@@ -71,8 +72,22 @@ class ChikiAnimationProvider : MainAPI() {
 
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
         
-        val rawPoster = document.selectFirst(".limit img, .infox img, img[itemprop=image], .thumb img")?.attr("src")
-        val poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
+        // TIGHTER SELECTORS: Force the scraper to look strictly inside the content/article wrapper
+        val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
+        
+        val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null }
+            ?: posterElement?.attr("data-src")?.ifBlank { null }
+            ?: posterElement?.attr("src")
+        
+        var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
+
+        // FALLBACK: If the main selector fails, try og:image, but explicitly reject default site banners and logos
+        if (poster.isNullOrBlank()) {
+            val ogImage = document.selectFirst("meta[property=og:image]")?.attr("content")
+            if (ogImage != null && !ogImage.contains("logo", true) && !ogImage.contains("banner", true)) {
+                poster = fixUrlNull(ogImage)
+            }
+        }
         
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis, .desc")?.text()
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
@@ -96,7 +111,7 @@ class ChikiAnimationProvider : MainAPI() {
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
 
                 newEpisode(epHref) {
-                    this.name = epTitle.ifBlank { "Episode $epNum" }
+                    this.name = epTitle.ifBlank { "Episode $num" }
                     this.episode = epNum
                 }
             }.distinctBy { it.data }.reversed()
@@ -128,7 +143,7 @@ class ChikiAnimationProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (video extraction)
+    // LOAD LINKS (Custom Extractor Method included)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -139,50 +154,115 @@ class ChikiAnimationProvider : MainAPI() {
         val document = app.get(data).document
         var found = false
 
-        suspend fun processUrl(rawUrl: String) {
-            val url = fixUrlNull(rawUrl) ?: return
-            var finalUrl = url
+        // Custom Inline Dailymotion Extractor
+        suspend fun extractDailymotion(url: String): Boolean {
+            val dmRegex = Regex("""(?:video/|video=|dai\.ly/|embed/video/)([a-zA-Z0-9]+)""")
+            val videoId = dmRegex.find(url)?.groupValues?.get(1) ?: return false
             
-            // Instantly extract ID from geo.dailymotion links
-            if (url.contains("geo.dailymotion.com")) {
-                val vid = Regex("video=([a-zA-Z0-9]+)").find(url)?.groupValues?.get(1)
-                if (vid != null) finalUrl = "https://www.dailymotion.com/video/$vid"
-            } 
-            else if (url.contains("dailymotion.com/crawler/video/")) {
-                val vid = url.substringAfterLast("/")
-                if (vid.isNotBlank()) finalUrl = "https://www.dailymotion.com/video/$vid"
-            }
+            val metadataUrl = "https://www.dailymotion.com/player/metadata/video/$videoId"
+            return try {
+                val response = app.get(metadataUrl, headers = mapOf("Referer" to "https://www.dailymotion.com/")).text
+                
+                // Parse out the master m3u8 playlist URL from metadata json block
+                val m3u8Url = Regex("""url"\s*:\s*"([^"]+?\.m3u8[^"]*?)"""")
+                    .find(response)?.groupValues?.get(1)
+                    ?.replace("\\/", "/") // Clean up JSON escaped slashes
 
-            if (finalUrl.contains("dailymotion.com/video/")) {
-                loadExtractor(finalUrl, data, subtitleCallback, callback)
-                found = true
-            } else {
-                // If it's a normal iframe (like standard mp4 or another host), extract it normally
-                loadExtractor(finalUrl, data, subtitleCallback, callback)
-                found = true
-            }
-        }
-
-        // 1. Scrape SEO Meta Tags
-        document.select("meta[itemprop=embedUrl], meta[itemprop=contentUrl]").forEach { element ->
-            processUrl(element.attr("content"))
-        }
-
-        // 2. Scrape Base64 Dropdowns and Hidden Embeds
-        document.select("select option[value], [data-default-embed], [data-embed]").forEach { element ->
-            val value = element.attr("value").ifBlank { element.attr("data-default-embed") }.ifBlank { element.attr("data-embed") }
-            if (value.isNotBlank()) {
-                try {
-                    val decoded = String(Base64.decode(value, Base64.DEFAULT))
-                    val src = Regex("src=[\"']([^\"']+)[\"']").find(decoded)?.groupValues?.get(1)
-                    if (src != null) processUrl(src)
-                } catch (e: Exception) {}
+                if (!m3u8Url.isNullOrBlank()) {
+                    callback(
+                        ExtractorLink(
+                            source = "Dailymotion",
+                            name = "Dailymotion (Ad-Free)",
+                            url = m3u8Url,
+                            referer = "https://www.dailymotion.com/",
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = true
+                        )
+                    )
+                    true
+                } else {
+                    false
+                }
+            } catch (e: Exception) {
+                false
             }
         }
 
-        // 3. Scrape visible iframes
-        document.select("iframe[src]").forEach { iframe ->
-            processUrl(iframe.attr("src"))
+        // Helper function to process candidate URLs and filter lazyloaded/corrupt values
+        suspend fun invokeExtractor(url: String): Boolean {
+            var cleanUrl = url.trim()
+            if (cleanUrl.startsWith("//")) {
+                cleanUrl = "https:$cleanUrl"
+            }
+
+            if (cleanUrl.isBlank() || cleanUrl.startsWith("data:") || cleanUrl.contains("about:blank")) {
+                return false
+            }
+
+            // Route all Dailymotion-related links through our internal custom extractor
+            if (cleanUrl.contains("dailymotion") || cleanUrl.contains("dai.ly")) {
+                return extractDailymotion(cleanUrl)
+            }
+
+            // Fallback to standard Cloudstream extractor core for alternate servers
+            return try {
+                loadExtractor(cleanUrl, data, subtitleCallback, callback)
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        // 1. Scrape Base64 Dropdowns and Hidden Embeds
+        val embedDiv = document.selectFirst("#pembed[data-default-embed]")
+        val encoded = embedDiv?.attr("data-default-embed")
+
+        if (!encoded.isNullOrBlank()) {
+            val decodedHtml = try {
+                String(Base64.decode(encoded, Base64.DEFAULT))
+            } catch (e: Exception) {
+                null
+            }
+            val iframeSrc = decodedHtml?.let {
+                Regex("""src=["']([^"']+)["']""").find(it)?.groupValues?.get(1)
+            }
+            if (!iframeSrc.isNullOrBlank()) {
+                if (invokeExtractor(iframeSrc)) found = true
+            }
+        }
+
+        // 2. Extract iframes directly from the DOM, parsing multi-layer lazyload attributes
+        document.select("iframe").forEach { iframe ->
+            val src = iframe.attr("data-src").takeIf { it.isNotBlank() }
+                ?: iframe.attr("src").takeIf { it.isNotBlank() }
+                ?: iframe.attr("data-lazy-src").takeIf { it.isNotBlank() }
+
+            if (!src.isNullOrBlank()) {
+                if (invokeExtractor(src)) found = true
+            }
+        }
+
+        // 3. Fallback: Parse other interactive server tabs or dropdown options
+        document.select("option, li, div, button").forEach { element ->
+            val dataAttributes = listOf("data-embed", "data-link", "data-video", "value")
+            for (attr in dataAttributes) {
+                val value = element.attr(attr).trim()
+                if (value.isBlank()) continue
+
+                val decoded = if (!value.startsWith("http") && !value.contains("/") && value.length > 10) {
+                    try { String(Base64.decode(value, Base64.DEFAULT)) } catch (e: Exception) { "" }
+                } else {
+                    value
+                }
+
+                if (decoded.contains("http") || decoded.startsWith("//")) {
+                    val cleanUrl = if (decoded.contains("iframe")) {
+                        Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1) ?: decoded
+                    } else {
+                        decoded
+                    }
+                    if (invokeExtractor(cleanUrl)) found = true
+                }
+            }
         }
 
         return found
