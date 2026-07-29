@@ -3,7 +3,9 @@ package com.animekhor
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -168,7 +170,7 @@ class AnimeKhorProvider : MainAPI() {
             if (cleanUrl.startsWith("http")) embedUrls.add(cleanUrl)
         }
 
-        // 1. Decode every single option from the dropdown mirror list (The exact source you provided)
+        // 1. Decode every single option from the dropdown mirror list
         document.select("select.mirror option[value]").forEach { element ->
             val value = element.attr("value")
             if (value.isNotBlank() && value.length > 20 && !value.contains(" ")) {
@@ -247,7 +249,16 @@ class AnimeKhorProvider : MainAPI() {
                                 M3u8Helper.generateM3u8("Multi Player", match.value, url).forEach { callback(it) }
                                 customFound = true
                             } else {
-                                callback(ExtractorLink("Multi Player", "Multi Player", match.value, url, Qualities.Unknown.value, false))
+                                callback(
+                                    ExtractorLink(
+                                        source = "Multi Player",
+                                        name = "Multi Player",
+                                        url = match.value,
+                                        referer = url,
+                                        quality = Qualities.Unknown.value,
+                                        type = ExtractorLinkType.VIDEO
+                                    )
+                                )
                                 customFound = true
                             }
                         }
