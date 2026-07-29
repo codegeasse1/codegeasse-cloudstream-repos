@@ -59,7 +59,7 @@ class AnimeXinProvider : MainAPI() {
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
-                enumValues<DubStatus>().toList()
+                enumValues<DubStatus>().toMutableSet()
             } else {
                 null
             }
@@ -108,7 +108,11 @@ class AnimeXinProvider : MainAPI() {
             // Extract episode number
             val epNum = Regex("""(?i)episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
             
-            episodes.add(Episode(epUrl, epTitle, posterUrl = epThumb, episode = epNum))
+            episodes.add(newEpisode(epUrl) {
+                this.name = epTitle
+                this.posterUrl = epThumb
+                this.episode = epNum
+            })
         }
 
         // 2. If loaded from a Series page, extract list from the episode lister
@@ -118,11 +122,16 @@ class AnimeXinProvider : MainAPI() {
             val epNum = ep.selectFirst(".epl-num")?.text()?.toIntOrNull()
             val epTitle = ep.selectFirst(".epl-title")?.text() ?: "Episode $epNum"
             
-            episodes.add(Episode(epUrl, epTitle, episode = epNum))
+            episodes.add(newEpisode(epUrl) {
+                this.name = epTitle
+                this.episode = epNum
+            })
         }
 
         if (episodes.isEmpty()) {
-            episodes.add(Episode(url, title))
+            episodes.add(newEpisode(url) {
+                this.name = title
+            })
         } else {
             // Reverses the list so episode 1 plays first 
             episodes.reverse() 
