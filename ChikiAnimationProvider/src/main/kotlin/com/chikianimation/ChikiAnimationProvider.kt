@@ -5,6 +5,7 @@ import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
@@ -171,9 +172,7 @@ class ChikiAnimationProvider : MainAPI() {
         val response = app.get(
             data,
             headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                        "Chrome/124.0.0.0 Safari/537.36",
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Referer" to mainUrl
             )
         )
@@ -182,34 +181,46 @@ class ChikiAnimationProvider : MainAPI() {
 
         val embedUrls = mutableSetOf<String>()
 
-        fun addUrl(raw: String) {
+        fun addUrl(raw: String?) {
+            if (raw.isNullOrBlank()) return
             val u = raw.trim()
             when {
-                u.startsWith("http") -> embedUrls.add(u)
+                u.startsWith("http://") || u.startsWith("https://") -> embedUrls.add(u)
                 u.startsWith("//") -> embedUrls.add("https:$u")
             }
         }
 
-        // 1. Extract from <option> values (Server dropdown selector)
+        fun processRawValue(str: String) {
+            if (str.isBlank()) return
+            addUrl(str)
+
+            // Try Base64 decoding
+            val decoded = runCatching {
+                String(Base64.decode(str, Base64.DEFAULT))
+            }.getOrNull()
+
+            val textToScan = decoded ?: str
+            Regex("""(?:src|href)=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                .findAll(textToScan).forEach { m -> addUrl(m.groupValues[1]) }
+        }
+
+        // 1. Collect embeds from <option> elements (Server dropdown)
         document.select("option").forEach { option ->
-            val value = option.attr("value").trim()
-            if (value.isNotBlank()) {
-                // Try Base64 Decoding first
-                val decoded = runCatching {
-                    String(Base64.decode(value, Base64.DEFAULT))
-                }.getOrNull() ?: value
-
-                // Regex search for iframe src inside option html/value
-                Regex("""(?:src|href)=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                    .findAll(decoded).forEach { m -> addUrl(m.groupValues[1]) }
-
-                if (value.startsWith("http") || value.startsWith("//")) {
-                    addUrl(value)
-                }
+            processRawValue(option.attr("value"))
+            listOf("data-embed", "data-src", "data-link", "data-url").forEach { attr ->
+                processRawValue(option.attr(attr))
             }
         }
 
-        // 2. Extract from <iframe> elements (src, data-src, etc.)
+        // 2. Collect embeds from data-* attributes across all elements
+        document.allElements.forEach { el ->
+            listOf("data-embed", "data-src", "data-lazy-src", "data-original", "data-url", "data-video", "data-link").forEach { attr ->
+                val v = el.attr(attr)
+                if (v.isNotBlank()) processRawValue(v)
+            }
+        }
+
+        // 3. Collect embeds from <iframe> tags
         document.select("iframe").forEach { iframe ->
             listOf("src", "data-src", "data-lazy-src", "data-original").forEach { attr ->
                 val v = iframe.attr(attr)
@@ -217,35 +228,51 @@ class ChikiAnimationProvider : MainAPI() {
             }
         }
 
-        // 3. Extract from raw regex matched iframes
+        // 4. Regex scan on full HTML body
         Regex("""<iframe[^>]+(?:src|data-src)=["']([^"'<>]+)["']""", RegexOption.IGNORE_CASE)
             .findAll(pageHtml).forEach { m -> addUrl(m.groupValues[1]) }
 
-        Log.d(TAG, "Collected ${embedUrls.size} embed URL(s):")
-        embedUrls.forEach { Log.d(TAG, " -> $it") }
+        Log.d(TAG, "Collected ${embedUrls.size} embed URL(s)")
 
         var found = false
 
         for (raw in embedUrls) {
             val url = fixUrlNull(raw) ?: continue
-            Log.d(TAG, "Processing embed URL: $url")
+            Log.d(TAG, "Processing server URL: $url")
 
-            // Check if URL is Dailymotion
-            if (url.contains("dailymotion.com")) {
-                val videoId = Regex("""(?:video/|video=)([a-zA-Z0-9]+)""")
-                    .find(url)?.groupValues?.get(1)
+            when {
+                // A. Dailymotion Server
+                url.contains("dailymotion.com") || url.contains("geo.dailymotion") -> {
+                    val videoId = Regex("""(?:video/|video=)([a-zA-Z0-9]+)""")
+                        .find(url)?.groupValues?.get(1)
 
-                if (videoId != null) {
-                    val dmSuccess = invokeDailymotion(videoId, callback)
-                    if (dmSuccess) found = true
+                    if (videoId != null) {
+                        val ok = invokeDailymotion(videoId, subtitleCallback, callback)
+                        if (ok) found = true
+                    }
                 }
-            } else {
-                // Pass non-Dailymotion embeds to standard Cloudstream extractors
-                try {
-                    loadExtractor(url, data, subtitleCallback, callback)
-                    found = true
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error loading extractor for $url: ${e.message}")
+
+                // B. Custom Multi Player Server (rpmstream, organicgoods, etc.)
+                url.contains("rpmstream") || url.contains("organicgoods") || url.contains("chiki.") -> {
+                    val ok = extractCustomPlayer(url, subtitleCallback, callback)
+                    if (ok) found = true
+                }
+
+                // C. Standard Extractors (Vidplay, Filemoon, Dood, Streamtape, etc.)
+                else -> {
+                    var extracted = false
+                    try {
+                        loadExtractor(url, data, subtitleCallback, callback)
+                        extracted = true
+                        found = true
+                    } catch (e: Exception) {
+                        extracted = false
+                    }
+
+                    if (!extracted) {
+                        val ok = extractCustomPlayer(url, subtitleCallback, callback)
+                        if (ok) found = true
+                    }
                 }
             }
         }
@@ -253,33 +280,153 @@ class ChikiAnimationProvider : MainAPI() {
         return found
     }
 
-    // Direct Dailymotion M3U8 Extractor via Metadata API
-    private suspend fun invokeDailymotion(
-        videoId: String,
+    // Custom Player Extractor (Handles rpmstream.live, organicgoods.cfd, and embedded subtitled players)
+    private suspend fun extractCustomPlayer(
+        iframeUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        return try {
-            val metadataUrl = "https://www.dailymotion.com/player/metadata/video/$videoId"
-            val response = app.get(metadataUrl).text
+        var found = false
+        try {
+            val res = app.get(
+                iframeUrl,
+                headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Referer" to mainUrl
+                )
+            )
+            val doc = res.document
+            val html = res.text
 
-            // Extract the master m3u8 playlist URL from metadata JSON
-            val m3u8Url = Regex(""""url"\s*:\s*"(https://[^"]+\.m3u8[^"]*)"""")
-                .find(response)?.groupValues?.get(1)
-                ?.replace("\\/", "/")
+            // Extract multi-language subtitles from <track> tags
+            doc.select("track").forEach { track ->
+                val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
+                val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "Subtitle" }
+                val subUrl = fixUrlNull(trackSrc, iframeUrl)
+                if (!subUrl.isNullOrBlank()) {
+                    subtitleCallback(SubtitleFile(label, subUrl))
+                }
+            }
+
+            // Extract stream from <source> tags
+            doc.select("source").forEach { source ->
+                val streamUrl = fixUrlNull(source.attr("src"), iframeUrl)
+                val type = source.attr("type")
+                if (!streamUrl.isNullOrBlank()) {
+                    if (type.contains("mpegurl", true) || streamUrl.contains(".m3u8") || streamUrl.contains(".txt") || streamUrl.contains("master")) {
+                        M3u8Helper.generateM3u8(
+                            source = "Multi Player",
+                            streamUrl = streamUrl,
+                            referer = iframeUrl
+                        ).forEach { link ->
+                            callback(link)
+                            found = true
+                        }
+                    } else {
+                        callback(
+                            ExtractorLink(
+                                source = "Multi Player",
+                                name = "Multi Player",
+                                url = streamUrl,
+                                referer = iframeUrl,
+                                quality = Qualities.Unknown.value
+                            )
+                        )
+                        found = true
+                    }
+                }
+            }
+
+            // Fallback Regex for M3U8/.TXT links embedded directly in player JS
+            if (!found) {
+                val mediaRegex = Regex("""https?://[^\s"'<>]+(?:\.m3u8|\.txt)(?:\?[^\s"'<>]*)?""")
+                mediaRegex.findAll(html).forEach { match ->
+                    val streamUrl = match.value
+                    M3u8Helper.generateM3u8(
+                        source = "Multi Player",
+                        streamUrl = streamUrl,
+                        referer = iframeUrl
+                    ).forEach { link ->
+                        callback(link)
+                        found = true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting custom player $iframeUrl: ${e.message}")
+        }
+        return found
+    }
+
+    // Dedicated Dailymotion Extractor
+    private suspend fun invokeDailymotion(
+        videoId: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+
+        // 1. Try Metadata API
+        runCatching {
+            val metaUrl = "https://www.dailymotion.com/player/metadata/video/$videoId"
+            val json = app.get(
+                metaUrl,
+                headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Referer" to "https://www.dailymotion.com/"
+                )
+            ).text
+
+            val m3u8Url = Regex("""https?:\\?/\\?/[^"]+\.m3u8[^"]*""")
+                .find(json)?.value?.replace("\\/", "/")
 
             if (!m3u8Url.isNullOrEmpty()) {
                 M3u8Helper.generateM3u8(
-                    source = name,
+                    source = "Dailymotion",
                     streamUrl = m3u8Url,
                     referer = "https://www.dailymotion.com/"
-                ).forEach(callback)
-                true
-            } else {
-                false
+                ).forEach { link ->
+                    callback(link)
+                    found = true
+                }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Dailymotion extraction failed: ${e.message}")
-            false
         }
+
+        if (found) return true
+
+        // 2. Fallback: Fetch Dailymotion Embed Page directly
+        runCatching {
+            val embedUrl = "https://www.dailymotion.com/embed/video/$videoId"
+            val html = app.get(
+                embedUrl,
+                headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            ).text
+
+            val m3u8Url = Regex("""https?:\\?/\\?/[^"]+\.m3u8[^"]*""")
+                .find(html)?.value?.replace("\\/", "/")
+
+            if (!m3u8Url.isNullOrEmpty()) {
+                M3u8Helper.generateM3u8(
+                    source = "Dailymotion",
+                    streamUrl = m3u8Url,
+                    referer = "https://www.dailymotion.com/"
+                ).forEach { link ->
+                    callback(link)
+                    found = true
+                }
+            }
+        }
+
+        if (found) return true
+
+        // 3. Final Fallback: Native Cloudstream Extractor
+        runCatching {
+            loadExtractor("https://www.dailymotion.com/embed/video/$videoId", subtitleCallback, callback)
+            found = true
+        }
+
+        return found
     }
 }
