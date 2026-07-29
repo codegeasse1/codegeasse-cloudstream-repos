@@ -16,6 +16,10 @@ class MrdsProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
+    // Image CDN (pic.xustgq.cn) enforces referrer-based hotlink protection - requests without
+    // a matching Referer header get rejected, which is why posters were loading as blank.
+    private val posterHeaders = mapOf("Referer" to "$mainUrl/")
+
     // ---------------------------------------------------------------
     // MAIN PAGE
     // ---------------------------------------------------------------
@@ -38,9 +42,9 @@ class MrdsProvider : MainAPI() {
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
-        
+
         // Grab the title from the h2 tag if available, fallback to standard text
-        val title = this.selectFirst(".post-card-title")?.text()?.trim() 
+        val title = this.selectFirst(".post-card-title")?.text()?.trim()
             ?: this.text().substringBefore(" • ").trim()
 
         val cardHtml = this.outerHtml()
@@ -55,6 +59,7 @@ class MrdsProvider : MainAPI() {
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
+            this.posterHeaders = this@MrdsProvider.posterHeaders
         }
     }
 
@@ -87,6 +92,7 @@ class MrdsProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
+            this.posterHeaders = this@MrdsProvider.posterHeaders
             this.plot = synopsis
         }
     }
