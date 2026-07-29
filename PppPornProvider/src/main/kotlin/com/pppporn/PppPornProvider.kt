@@ -13,6 +13,9 @@ class PppPornProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
+    // ---------------------------------------------------------------
+    // MAIN PAGE
+    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
         "$mainUrl/latest-updates/" to "Latest Updates",
@@ -23,11 +26,19 @@ class PppPornProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else "${request.data}${if(request.data.endsWith("/")) "" else "/"}?page=$page"
         val document = app.get(url).document
+
         val elements = document.select("div.item, div.video-item, div.post, div.model, li.item")
-        val homeItems = elements.mapNotNull { it.toSearchResult() }
+
+        val homeItems = elements.mapNotNull { element ->
+            element.toSearchResult()
+        }
+
         return newHomePageResponse(request.name, homeItems)
     }
 
+    // ---------------------------------------------------------------
+    // ITEM PARSING (single result – used by main page and search)
+    // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val aTag = this.selectFirst("a[href*=/videos/], a[href*=/video/]") ?: this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
@@ -45,21 +56,28 @@ class PppPornProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // SEARCH
-    // CloudStream's search() has NO scroll/pagination hook — that only
-    // exists for getMainPage(). So instead of true infinite scroll,
-    // we just pull a few pages of results up front and merge them.
+    // CloudStream's search() has no scroll/pagination hook, so we
+    // fetch several pages up front from the theme's own AJAX block
+    // loader (confirmed via devtools: /search/<term>/?mode=async&
+    // function=get_block&block_id=list_videos_videos_list_search_result
+    // &from_videos=N&from_albums=N) and merge them into one list.
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val maxPages = 3
 
         suspend fun fetchPage(page: Int): List<SearchResponse> {
-            val url = if (page == 1)
-                "$mainUrl/search/?q=$encodedQuery"
-            else
-                "$mainUrl/search/?q=$encodedQuery&page=$page"
-            val document = app.get(url).document
-            return document.select("div.item, div.video-item, div.post, div.model, li.item")
+            val doc = if (page == 1) {
+                app.get("$mainUrl/search/$encodedQuery/").document
+            } else {
+                val ajaxUrl = "$mainUrl/search/$encodedQuery/?mode=async&function=get_block" +
+                    "&block_id=list_videos_videos_list_search_result" +
+                    "&q=$encodedQuery&category_ids=&sort_by=" +
+                    "&from_videos=$page&from_albums=$page" +
+                    "&_=${System.currentTimeMillis()}"
+                app.get(ajaxUrl).document
+            }
+            return doc.select("div.item, div.video-item, div.post, div.model, li.item")
                 .mapNotNull { it.toSearchResult() }
         }
 
@@ -72,6 +90,9 @@ class PppPornProvider : MainAPI() {
         return results
     }
 
+    // ---------------------------------------------------------------
+    // LOAD (Detail Page with Plyr.io Extraction)
+    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val pageHtml = document.html()
@@ -103,6 +124,9 @@ class PppPornProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD LINKS (KVS Scraper)
+    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -117,8 +141,10 @@ class PppPornProvider : MainAPI() {
 
         cdnRegex.findAll(pageHtml).forEach { match ->
             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+
             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png") && !cleanUrl.endsWith(".webp")) {
                 val isM3u8 = cleanUrl.contains(".m3u8")
+
                 callback(
                     newExtractorLink(
                         source = name,
@@ -143,6 +169,7 @@ class PppPornProvider : MainAPI() {
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
                         cdnRegex.findAll(iframeHtml).forEach { match ->
                             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+
                             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png")) {
                                 callback(
                                     newExtractorLink(
