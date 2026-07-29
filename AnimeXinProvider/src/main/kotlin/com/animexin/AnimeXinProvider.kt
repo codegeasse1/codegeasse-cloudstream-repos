@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import java.util.EnumSet
 
 class AnimeXinProvider : MainAPI() {
     override var mainUrl = "https://animexin.dev"
@@ -58,10 +59,11 @@ class AnimeXinProvider : MainAPI() {
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
+            // Fix for the DubStatus MutableSet assignment error
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
-                mutableSetOf(DubStatus.Dubbed)
+                EnumSet.of(DubStatus.Dubbed)
             } else {
-                mutableSetOf(DubStatus.Subbed)
+                EnumSet.of(DubStatus.Subbed)
             }
         }
     }
@@ -106,6 +108,7 @@ class AnimeXinProvider : MainAPI() {
             
             val epNum = Regex("""(?i)episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
             
+            // Fix for the Episode constructor deprecation error
             episodes.add(newEpisode(epUrl) {
                 this.name = epTitle
                 this.posterUrl = epThumb
@@ -120,6 +123,7 @@ class AnimeXinProvider : MainAPI() {
             val epNum = ep.selectFirst(".epl-num")?.text()?.toIntOrNull()
             val epTitle = ep.selectFirst(".epl-title")?.text() ?: "Episode $epNum"
             
+            // Fix for the Episode constructor deprecation error
             episodes.add(newEpisode(epUrl) {
                 this.name = epTitle
                 this.episode = epNum
@@ -127,6 +131,7 @@ class AnimeXinProvider : MainAPI() {
         }
 
         if (episodes.isEmpty()) {
+            // Fix for the Episode constructor deprecation error
             episodes.add(newEpisode(url) {
                 this.name = title
             })
