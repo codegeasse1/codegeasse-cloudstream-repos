@@ -142,7 +142,7 @@ class ChikiAnimationProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (video extraction)
+    // LOAD LINKS (Ultimate Video Extractor)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -150,59 +150,57 @@ class ChikiAnimationProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val html = app.get(data).text
+        val document = org.jsoup.Jsoup.parse(html)
         var found = false
 
         suspend fun processUrl(rawUrl: String) {
             val url = fixUrlNull(rawUrl) ?: return
-            var finalUrl = url
             
-            // Instantly extract ID from geo.dailymotion links
-            if (url.contains("geo.dailymotion.com")) {
-                val vid = Regex("video=([a-zA-Z0-9_]+)").find(url)?.groupValues?.get(1)
-                if (vid != null) finalUrl = "https://www.dailymotion.com/video/$vid"
-            } 
-            else if (url.contains("dailymotion.com/crawler/video/")) {
-                val vid = url.substringAfterLast("/")
-                if (vid.isNotBlank()) finalUrl = "https://www.dailymotion.com/video/$vid"
+            // Aggressively match ANY Dailymotion link structure and convert to standard ID
+            val dmMatch = Regex("""dailymotion\.com/(?:video/|embed/video/|player\.html\?video=|crawler/video/)([a-zA-Z0-9_]+)""").find(url)
+            if (dmMatch != null) {
+                val vid = dmMatch.groupValues[1]
+                loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)
+                found = true
+                return
             }
 
-            if (finalUrl.contains("dailymotion.com/video/")) {
-                loadExtractor(finalUrl, data, subtitleCallback, callback)
-                found = true
-            } else {
-                // If it's a normal iframe (like standard mp4 or another host), extract it normally
-                loadExtractor(finalUrl, data, subtitleCallback, callback)
+            // Fallback for standard video hosts (Mp4upload, Streamwish, etc)
+            if (url.startsWith("http")) {
+                loadExtractor(url, data, subtitleCallback, callback)
                 found = true
             }
         }
 
-        // 1. Scrape SEO Meta Tags
-        document.select("meta[itemprop=embedUrl], meta[itemprop=contentUrl]").forEach { element ->
-            processUrl(element.attr("content"))
+        // 1. CARPET BOMB REGEX: Read the raw HTML text directly to bypass all lazy loaders and hidden scripts
+        Regex("""https?://(?:www\.|geo\.)?dailymotion\.com/(?:video/|embed/video/|player\.html\?video=|crawler/video/)[a-zA-Z0-9_]+""").findAll(html).forEach {
+            processUrl(it.value)
         }
 
-        // 2. Scrape Base64 Dropdowns and Hidden Embeds
-        document.select("select option[value], [data-default-embed], [data-embed]").forEach { element ->
-            val value = element.attr("value").ifBlank { element.attr("data-default-embed") }.ifBlank { element.attr("data-embed") }
+        // 2. Scrape Base64 Encoded attributes (Just in case the regex misses a server drop-down)
+        document.select("[data-default-embed], [data-embed], option[value]").forEach { element ->
+            val value = element.attr("data-default-embed")
+                .ifBlank { element.attr("data-embed") }
+                .ifBlank { element.attr("value") }
+                
             if (value.isNotBlank()) {
                 try {
                     val decoded = String(Base64.decode(value, Base64.DEFAULT))
-                    val src = Regex("src=[\"']([^\"']+)[\"']").find(decoded)?.groupValues?.get(1)
-                    if (src != null) processUrl(src)
-                } catch (e: Exception) {}
+                    val src = Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1) ?: decoded
+                    processUrl(src)
+                } catch (e: Exception) {
+                    processUrl(value) // If it wasn't Base64, try to process the raw string
+                }
             }
         }
 
-        // 3. Scrape ALL iframes (Handles lazy-loaded data-src trick!)
+        // 3. Scrape all iframes (Handles data-src lazy-load attributes explicitly)
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("data-src")
                 .ifBlank { iframe.attr("data-lazy-src") }
                 .ifBlank { iframe.attr("src") }
-                
-            if (src.isNotBlank()) {
-                processUrl(src)
-            }
+            processUrl(src)
         }
 
         return found
