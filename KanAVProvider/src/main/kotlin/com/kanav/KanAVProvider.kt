@@ -83,15 +83,33 @@ class KanAVProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // SEARCH
+    // Confirmed via devtools: search pagination follows the MacCMS
+    // path style, not ?wd=&page=N:
+    //   /index.php/vod/search/by/time_add/page/1/wd/<term>.html
+    //   /index.php/vod/search/by/time_add/page/2/wd/<term>.html
+    //   /index.php/vod/search/by/time_add/page/3/wd/<term>.html
+    // Loop pages 1..8, merge, stop early on an empty page.
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
-        val url = "$mainUrl/index.php/vod/search.html?wd=${URLEncoder.encode(chineseQuery, "UTF-8")}"
-        val document = app.get(url).document
-        
-        return document.select(".video-item").mapNotNull { element ->
-            element.toSearchResultAsync()
+        val encodedQuery = URLEncoder.encode(chineseQuery, "UTF-8")
+        val maxPages = 8
+
+        suspend fun fetchPage(page: Int): List<SearchResponse> {
+            val url = "$mainUrl/index.php/vod/search/by/time_add/page/$page/wd/$encodedQuery.html"
+            val document = app.get(url).document
+            return document.select(".video-item").mapNotNull { element ->
+                element.toSearchResultAsync()
+            }
         }
+
+        val results = mutableListOf<SearchResponse>()
+        for (page in 1..maxPages) {
+            val pageResults = fetchPage(page)
+            if (pageResults.isEmpty()) break
+            results.addAll(pageResults)
+        }
+        return results
     }
 
     // ---------------------------------------------------------------
@@ -140,12 +158,10 @@ class KanAVProvider : MainAPI() {
         val pageHtml = document.html()
 
         try {
-            // Extract player_aaaa JSON object
             val jsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
             val match = jsonRegex.find(pageHtml)
             if (match != null) {
                 val jsonString = match.groupValues[1]
-                // Get encrypt type and encoded URL
                 val encryptMatch = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonString)
                 val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonString)
 
@@ -155,15 +171,13 @@ class KanAVProvider : MainAPI() {
 
                     val realUrl = when (encryptType) {
                         1 -> {
-                            // encrypt=1: only Base64 decode
                             String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
                         }
                         2 -> {
-                            // encrypt=2: Base64 decode → then URL decode
                             val base64Decoded = String(Base64.decode(encodedUrl, Base64.DEFAULT), Charsets.UTF_8)
                             URLDecoder.decode(base64Decoded, "UTF-8")
                         }
-                        else -> encodedUrl // fallback
+                        else -> encodedUrl
                     }
 
                     if (realUrl.contains(".m3u8")) {
@@ -186,7 +200,6 @@ class KanAVProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // Fallback: search for direct .m3u8 links anywhere in the HTML
         if (!found) {
             val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
             cdnRegex.findAll(pageHtml).forEach { match ->
