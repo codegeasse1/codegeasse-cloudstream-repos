@@ -169,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Smart API Filtering)
+    // LOAD LINKS (Prioritizes Vidtube/MegaPlay over VibePlayer)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -184,13 +184,17 @@ class AniKageProvider : MainAPI() {
             ?: Regex("""/(\d+)""").find(cleanData)?.groupValues?.get(1)
             ?: "1"
 
-        // Fetch the episode HTML page to analyze what servers are actually rendered on it
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        val knownProviders = listOf("neko", "ken", "miko", "megg", "dib", "wave", "koto", "vibeube", "megatube", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-koto", "e-wish")
+        // Prioritized Order: Vidtube / MegaPlay / Koto / Wave / Dib come BEFORE Vibe
+        val knownProviders = listOf(
+            "megatube", "koto", "e-koto", "wave", "dib", "miko", 
+            "neko", "ken", "megg", "vibeube", "vibe", "kwik", 
+            "aniyt", "e-neko", "e-ken", "e-wish"
+        )
         
-        // Smart Filter: Only test providers that appear textually in the HTML payload
+        // Smart Filter: Only test providers that appear in the HTML payload
         val activeProviders = knownProviders.filter { provider ->
             cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
             cleanHtml.contains("provider=$provider", ignoreCase = true) ||
@@ -198,12 +202,10 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
-        // Absolute fallback if parsing fails: Check the most common ones
         if (activeProviders.isEmpty()) {
-            activeProviders.addAll(listOf("neko", "ken", "miko", "vibe", "koto"))
+            activeProviders.addAll(listOf("megatube", "koto", "neko", "ken", "miko", "vibe"))
         }
 
-        // Check for Dubs if the page mentions it, otherwise default to sub
         val langs = mutableListOf("sub")
         if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
             langs.add("dub")
@@ -218,7 +220,6 @@ class AniKageProvider : MainAPI() {
         
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
-        // Hit the endpoints (Now only 2-6 requests instead of 34, stopping timeouts!)
         for (lang in langs) {
             for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
@@ -261,7 +262,6 @@ class AniKageProvider : MainAPI() {
             }
         }
 
-        // Secondary fallback to grab any streams directly baked into the page source
         if (!found) {
             try {
                 Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).forEach { match ->
