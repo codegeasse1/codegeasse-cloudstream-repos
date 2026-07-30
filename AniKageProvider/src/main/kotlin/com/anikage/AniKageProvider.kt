@@ -169,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Prioritizes Vidtube over MegaPlay and VibePlayer)
+    // LOAD LINKS (With Anti-Alphabetical Sorter Override)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -187,13 +187,11 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        // Prioritized Order: Vidtube (vibeube) comes first, then MegaPlay (megatube)
         val knownProviders = listOf(
             "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
         
-        // Smart Filter: Only test providers that appear in the HTML payload
         val activeProviders = knownProviders.filter { provider ->
             cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
             cleanHtml.contains("provider=$provider", ignoreCase = true) ||
@@ -237,6 +235,13 @@ class AniKageProvider : MainAPI() {
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val serverName = "${provider.uppercase()} ($lang)"
                             
+                            // Inject Quality Boost for Direct Streams
+                            val sortQuality = when (provider) {
+                                "vibeube" -> Qualities.Unknown.value + 200
+                                "megatube" -> Qualities.Unknown.value + 100
+                                else -> Qualities.Unknown.value
+                            }
+                            
                             callback(
                                 newExtractorLink(
                                     source = "AniKage",
@@ -244,13 +249,38 @@ class AniKageProvider : MainAPI() {
                                     url = cleanUrl,
                                     type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    quality = Qualities.Unknown.value
-                                    headers = standardHeaders
+                                    this.quality = sortQuality
+                                    this.headers = standardHeaders
                                 }
                             )
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
-                            if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
+                            
+                            // Intercept standard extractors to manipulate the sorting weight
+                            if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
+                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
+                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
+                                
+                                val sortQuality = when {
+                                    isVidtube -> link.quality + 200
+                                    isMegaPlay -> link.quality + 100
+                                    else -> link.quality
+                                }
+
+                                callback(
+                                    newExtractorLink(
+                                        source = link.source,
+                                        name = link.name,
+                                        url = link.url,
+                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = sortQuality
+                                        this.headers = link.headers
+                                        this.extractorData = link.extractorData
+                                        this.referer = link.referer
+                                    }
+                                )
+                            }) {
                                 found = true
                             }
                         }
