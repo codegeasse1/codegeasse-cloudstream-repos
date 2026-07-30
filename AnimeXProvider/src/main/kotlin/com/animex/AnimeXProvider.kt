@@ -52,8 +52,8 @@ class AnimeXProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get("$mainUrl/home").text
         
-        // Prevents black-screens by alerting the user if Cloudflare intercept is needed
-        if (html.contains("Just a moment...") || html.contains("challenge-platform")) {
+        // Prevents black-screens by alerting the user ONLY if the actual Cloudflare block page is shown
+        if (html.contains("<title>Just a moment...</title>")) {
             throw Error("Blocked by Cloudflare. Open in WebView to bypass.")
         }
 
