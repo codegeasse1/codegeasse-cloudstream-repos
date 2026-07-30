@@ -252,8 +252,9 @@ class AniKageProvider : MainAPI() {
         val cleanHtml = html.replace("\\/", "/")
 
         val knownProviders = listOf(
-            "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
+            "megg", "kiss", "miko", "verse", "vibeube", "megatube", "koto", 
+            "e-koto", "wave", "dib", "neko", "ken", "vibe", "kwik", "aniyt", 
+            "e-neko", "e-ken", "e-wish"
         )
         
         val activeProviders = knownProviders.filter { provider ->
@@ -264,7 +265,7 @@ class AniKageProvider : MainAPI() {
         }.toMutableList()
 
         if (activeProviders.isEmpty()) {
-            activeProviders.addAll(listOf("vibeube", "megatube", "koto", "neko", "ken", "miko", "vibe"))
+            activeProviders.addAll(knownProviders)
         }
 
         val langs = mutableListOf("sub")
@@ -272,8 +273,8 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-       // Minimal headers to avoid triggering CORS/403 blocks on Cloudflare Workers
-        val standardHeaders = mapOf(
+        // MINIMAL HEADERS: Bypasses Cloudflare 2004 Error
+        val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
@@ -292,58 +293,35 @@ class AniKageProvider : MainAPI() {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
                         
-                        val isDirectM3u8 = cleanUrl.contains(".m3u") || cleanUrl.contains("/m3u8/")
+                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val serverName = "${provider.uppercase()} ($lang)"
+                            val isVidtube = provider == "vibeube"
+                            val isMegaPlay = provider == "megatube"
                             
-                            if (isDirectM3u8 || isKnownHost) {
-                                try {
-                                    val m3u8Links = M3u8Helper.generateM3u8(
-                                        source = serverName,
-                                        streamUrl = cleanUrl,
-                                        referer = "$mainUrl/",
-                                        headers = standardHeaders
-                                    )
-                                    
-                                    if (m3u8Links.isNotEmpty()) {
-                                        m3u8Links.forEach { link ->
-                                            callback(
-                                                newExtractorLink(
-                                                    source = link.source,
-                                                    name = link.name,
-                                                    url = link.url,
-                                                    type = ExtractorLinkType.M3U8
-                                                ) {
-                                                    this.quality = link.quality
-                                                    this.headers = standardHeaders
-                                                }
-                                            )
-                                        }
-                                        found = true
-                                        continue
-                                    }
-                                } catch (e: Exception) {
-                                    // Fall through
-                                }
+                            // FORCE VIDTUBE TO TOP: 1080p always beats 720p natively.
+                            val sortQuality = when {
+                                isVidtube -> Qualities.P1080.value
+                                isMegaPlay -> Qualities.P720.value
+                                else -> Qualities.P480.value
                             }
                             
                             callback(
                                 newExtractorLink(
                                     source = "AniKage",
-                                    name = "AniKage - $serverName",
+                                    name = "${provider.uppercase()} ($lang)",
                                     url = cleanUrl,
-                                    type = if (isDirectM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = standardHeaders
+                                    this.quality = sortQuality
+                                    this.headers = videoHeaders // Replaced to prevent 2004 error
                                 }
                             )
                             found = true
-                            
                         } else if (cleanUrl.startsWith("http")) {
+                            
                             val extractedLinks = mutableListOf<ExtractorLink>()
                             
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
@@ -353,7 +331,29 @@ class AniKageProvider : MainAPI() {
                             }
                             
                             for (link in extractedLinks) {
-                                callback(link)
+                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
+                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
+                                
+                                // FORCE VIDTUBE TO TOP: 1080p always beats 720p natively.
+                                val sortQuality = when {
+                                    isVidtube -> Qualities.P1080.value
+                                    isMegaPlay -> Qualities.P720.value
+                                    else -> Qualities.P480.value
+                                }
+
+                                callback(
+                                    newExtractorLink(
+                                        source = "AniKage",
+                                        name = link.name,
+                                        url = link.url,
+                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = sortQuality
+                                        this.headers = videoHeaders // Replaced to prevent 2004 error
+                                        this.extractorData = link.extractorData
+                                        this.referer = link.referer
+                                    }
+                                )
                             }
                         }
                     }
@@ -369,42 +369,17 @@ class AniKageProvider : MainAPI() {
                 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains(".m3u")
-                    
-                    if (isM3u8) {
-                        try {
-                            M3u8Helper.generateM3u8(
-                                source = "Direct Stream",
-                                streamUrl = extractedUrl,
-                                referer = "$mainUrl/",
-                                headers = standardHeaders
-                            ).forEach { link ->
-                                callback(
-                                    newExtractorLink(
-                                        source = "AniKage",
-                                        name = link.name,
-                                        url = link.url,
-                                        type = ExtractorLinkType.M3U8
-                                    ) {
-                                        this.quality = link.quality
-                                        this.headers = standardHeaders
-                                    }
-                                )
-                            }
-                            found = true
-                            continue
-                        } catch (e: Exception) {}
-                    }
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/")
                     
                     callback(
                         newExtractorLink(
                             source = "AniKage",
-                            name = "AniKage - Direct",
+                            name = "Direct",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             quality = Qualities.Unknown.value
-                            headers = standardHeaders
+                            headers = videoHeaders
                         }
                     )
                     found = true
