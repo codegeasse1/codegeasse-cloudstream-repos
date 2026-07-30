@@ -7,7 +7,6 @@ import android.content.Context
 @CloudstreamPlugin
 class AniKagePlugin: Plugin() {
     override fun load(context: Context) {
-        // Registers the main provider class
         registerMainAPI(AniKageProvider())
     }
 }
