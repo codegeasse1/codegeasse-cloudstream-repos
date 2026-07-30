@@ -1,11 +1,12 @@
 package com.n91pornaprovider
 
-import com.lagradost.cloudstream3.plugins.CloudStreamPlugin
+import android.content.Context
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
-@CloudStreamPlugin
-class NinetyOnePornaPlugin: Plugin() {
-    override fun load() {
+@CloudstreamPlugin
+class NinetyOnePornaPlugin : Plugin() {
+    override fun load(context: Context) {
         registerMainAPI(NinetyOnePornaProvider())
     }
 }
