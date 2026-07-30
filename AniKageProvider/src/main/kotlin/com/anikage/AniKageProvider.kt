@@ -169,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Queries backend API directly)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -179,100 +179,51 @@ class AniKageProvider : MainAPI() {
     ): Boolean {
         var found = false
         
-        // 1. Try standard query param format page (?ep=1)
-        var html = app.get(data).text
-        found = extractLinksFromHtml(html, data, subtitleCallback, callback)
-        
-        // 2. Try SvelteKit hidden JSON payload endpoint
-        if (!found) {
-            val jsonUrl = data.replace("?", "/__data.json?")
-            if (jsonUrl != data) {
-                val jsonData = app.get(jsonUrl).text
-                found = extractLinksFromHtml(jsonData, data, subtitleCallback, callback)
-            }
-        }
-        
-        // 3. Try standard path param format page (/1)
-        if (!found && data.contains("?ep=")) {
-            val altUrl = data.replace("?ep=", "/")
-            html = app.get(altUrl).text
-            found = extractLinksFromHtml(html, altUrl, subtitleCallback, callback)
-            
-            // 4. Try SvelteKit hidden JSON endpoint for path param format
-            if (!found) {
-                val altJsonUrl = "$altUrl/__data.json"
-                val altJsonData = app.get(altJsonUrl).text
-                found = extractLinksFromHtml(altJsonData, altUrl, subtitleCallback, callback)
-            }
-        }
-        
-        return found
-    }
+        val slug = data.substringAfter("/watch/").substringBefore("?").substringBefore("/")
+        val ep = Regex("""[?&]ep=(\d+)""").find(data)?.groupValues?.get(1)
+            ?: Regex("""/(\d+)""").find(data)?.groupValues?.get(1)
+            ?: "1"
 
-    private suspend fun extractLinksFromHtml(
-        html: String,
-        data: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        var found = false
-        // SvelteKit usually escapes JSON payload URLs; clean them before scanning
-        val cleanHtml = html.replace("\\/", "/")
+        val providers = listOf("neko", "vibe", "kwik", "aniyt")
+        val langs = listOf("sub", "dub")
 
-        // 1. Precise Match: Search strictly for valid anicore proxy URLs, NO token guessing
-        Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc)/m3u8/[a-zA-Z0-9_=-]+""").findAll(cleanHtml).forEach { match ->
-            val extractedUrl = match.value
-            callback(
-                newExtractorLink(
-                    source = "AniKage",
-                    name = "AniKage HD",
-                    url = extractedUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    quality = Qualities.Unknown.value
-                    headers = mapOf(
-                        "Origin" to mainUrl,
-                        "Referer" to "$mainUrl/",
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    )
-                }
-            )
-            found = true
-        }
-
-        // 2. Fallback Svelte variables that point directly to streaming files
-        Regex("""(?:player_url|url|link|src|iframe|serverUrl|file)"?\s*:\s*"([^"]+)"""").findAll(cleanHtml).forEach { match ->
-            val extractedUrl = match.groupValues[1]
-            if (extractedUrl.startsWith("http")) {
-                if (loadExtractor(extractedUrl, data, subtitleCallback, callback)) {
-                    found = true
-                } else if (extractedUrl.contains(".m3u8") || extractedUrl.contains(".mp4")) {
-                    val isM3u8 = extractedUrl.contains(".m3u8")
-                    callback(
-                        newExtractorLink(
-                            source = "AniKage",
-                            name = "AniKage Server",
-                            url = extractedUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            quality = Qualities.Unknown.value
-                            headers = mapOf(
-                                "Origin" to mainUrl,
-                                "Referer" to "$mainUrl/",
-                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        for (lang in langs) {
+            for (provider in providers) {
+                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+                try {
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+                    
+                    Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { match ->
+                        val cleanUrl = match.value.replace("\\/", "/")
+                        if (cleanUrl.contains("prox.anicore.tv") || cleanUrl.contains("prox.anikage.cc") || cleanUrl.contains(".m3u8") || cleanUrl.contains(".mp4")) {
+                            val isM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/")
+                            val label = "${provider.uppercase()} (${lang.uppercase()})"
+                            
+                            callback(
+                                newExtractorLink(
+                                    source = "AniKage",
+                                    name = "AniKage - $label",
+                                    url = cleanUrl,
+                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    quality = Qualities.Unknown.value
+                                    headers = mapOf(
+                                        "Origin" to mainUrl,
+                                        "Referer" to "$mainUrl/",
+                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                                    )
+                                }
                             )
+                            found = true
+                        } else if (cleanUrl.startsWith("http")) {
+                            if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
+                                found = true
+                            }
                         }
-                    )
-                    found = true
+                    }
+                } catch (e: Exception) {
+                    // Silently ignore missing provider or language combinations
                 }
-            }
-        }
-
-        // 3. Absolute Fallback: Standard embedded iframes inside HTML
-        Jsoup.parse(html).select("iframe").forEach { iframe ->
-            val src = iframe.attr("src")
-            if (src.startsWith("http") && loadExtractor(src, data, subtitleCallback, callback)) {
-                found = true
             }
         }
         
