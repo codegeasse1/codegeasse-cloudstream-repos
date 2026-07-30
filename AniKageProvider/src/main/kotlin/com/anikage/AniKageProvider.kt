@@ -1,8 +1,7 @@
 package com.anikage
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 
 class AniKageProvider : MainAPI() {
@@ -170,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Includes Custom Anicore Proxy Extraction)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -203,7 +202,7 @@ class AniKageProvider : MainAPI() {
         // 1. Direct Hit: Check for the exact anicore proxy URL format
         Regex("""(https?://(?:prox\.anicore\.tv|prox\.anikage\.cc)/m3u8/[a-zA-Z0-9_=-]+)""").findAll(scriptData).forEach { match ->
             val extractedUrl = match.groupValues[1]
-            callback(ExtractorLink("AniKage", "AniKage HD", extractedUrl, mainUrl, Qualities.Unknown.value, true))
+            callback(newExtractorLink("AniKage", "AniKage HD", extractedUrl, mainUrl, Qualities.Unknown.value, true))
             found = true
         }
 
@@ -212,7 +211,7 @@ class AniKageProvider : MainAPI() {
             Regex("""(?:source|id|file|url|token|hash)"?\s*:\s*"([a-zA-Z0-9_=-]{40,})"""").findAll(scriptData).forEach { match ->
                 val token = match.groupValues[1]
                 val constructedUrl = "https://prox.anicore.tv/m3u8/$token"
-                callback(ExtractorLink("AniKage", "AniKage HD", constructedUrl, mainUrl, Qualities.Unknown.value, true))
+                callback(newExtractorLink("AniKage", "AniKage HD", constructedUrl, mainUrl, Qualities.Unknown.value, true))
                 found = true
             }
         }
@@ -225,7 +224,7 @@ class AniKageProvider : MainAPI() {
                     if (loadExtractor(extractedUrl, data, subtitleCallback, callback)) {
                         found = true
                     } else if (extractedUrl.contains(".m3u8") || extractedUrl.contains(".mp4")) {
-                        callback(ExtractorLink("AniKage", "AniKage Server", extractedUrl, mainUrl, Qualities.Unknown.value, extractedUrl.contains(".m3u8")))
+                        callback(newExtractorLink("AniKage", "AniKage Server", extractedUrl, mainUrl, Qualities.Unknown.value, extractedUrl.contains(".m3u8")))
                         found = true
                     }
                 }
