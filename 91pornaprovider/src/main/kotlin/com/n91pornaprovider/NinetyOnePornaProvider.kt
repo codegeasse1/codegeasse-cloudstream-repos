@@ -35,11 +35,11 @@ class NinetyOnePornaProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        *homeSections.map { it.first }.toTypedArray()
+        *homeSections.map { it.first to it.second }.toTypedArray()
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val sectionUrl = homeSections.find { it.first == request.data }?.second ?: return HomePageResponse(emptyList())
+        val sectionUrl = homeSections.find { it.first == request.data }?.second ?: return newHomePageResponse(emptyList())
         val url = mainUrl + sectionUrl
         val response = app.get(url)
         val doc = Jsoup.parse(response.text)
@@ -75,7 +75,7 @@ class NinetyOnePornaProvider : MainAPI() {
             )
         }
 
-        return HomePageResponse(listOf(HomePageList(request.data, items)), hasNext = false)
+        return newHomePageResponse(listOf(HomePageList(request.data, items)))
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
