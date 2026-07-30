@@ -63,6 +63,9 @@ class AniKageProvider : MainAPI() {
         return items
     }
 
+    // ---------------------------------------------------------------
+    // MAIN PAGE
+    // ---------------------------------------------------------------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get(mainUrl).text
         val scriptData = Jsoup.parse(html).select("script").html()
@@ -86,6 +89,9 @@ class AniKageProvider : MainAPI() {
         return newHomePageResponse(homeItems)
     }
 
+    // ---------------------------------------------------------------
+    // SEARCH
+    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val html = app.get("$mainUrl/browse?search=$query").text
         val scriptData = Jsoup.parse(html).select("script").html()
@@ -120,6 +126,9 @@ class AniKageProvider : MainAPI() {
         return items
     }
 
+    // ---------------------------------------------------------------
+    // LOAD
+    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val slug = url.substringAfterLast("/")
         val html = app.get(url).text
@@ -139,18 +148,15 @@ class AniKageProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
-        // FIX: Prioritize 'currentEpisode' so it only lists episodes that are actually out.
-        // Falls back to 'totalEpisodes' only if currentEpisode isn't present (e.g. finished anime).
         val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
         val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
-        
         val availableEpisodes = if (currentEps > 0) currentEps else totalEps
 
         val episodes = mutableListOf<Episode>()
         
         val limit = if (availableEpisodes > 0) availableEpisodes else 1
         for (i in 1..limit) {
-            episodes.add(newEpisode("$mainUrl/anime/watch/$slug/$i") {
+            episodes.add(newEpisode("$mainUrl/anime/watch/$slug?ep=$i") {
                 this.name = "Episode $i"
                 this.episode = i
             })
@@ -163,30 +169,77 @@ class AniKageProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD LINKS (Includes Custom Anicore Proxy Extraction)
+    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = app.get(data).text
-        var found = false
+        var html = app.get(data).text
+        var found = extractLinksFromHtml(html, data, subtitleCallback, callback)
         
-        Regex("""player_url\s*:\s*"([^"]+)"""").findAll(html).forEach { match ->
-            val playerUrl = match.groupValues[1].replace("\\/", "/")
-            if (loadExtractor(playerUrl, data, subtitleCallback, callback)) {
+        // Fail-safe URL swap: if ?ep=1 fails, retry instantly with /1
+        if (!found && data.contains("?ep=")) {
+            val altUrl = data.replace("?ep=", "/")
+            html = app.get(altUrl).text
+            found = extractLinksFromHtml(html, altUrl, subtitleCallback, callback)
+        }
+        
+        return found
+    }
+
+    private suspend fun extractLinksFromHtml(
+        html: String,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+        val scriptData = Jsoup.parse(html).select("script").html()
+
+        // 1. Direct Hit: Check for the exact anicore proxy URL format
+        Regex("""(https?://(?:prox\.anicore\.tv|prox\.anikage\.cc)/m3u8/[a-zA-Z0-9_=-]+)""").findAll(scriptData).forEach { match ->
+            val extractedUrl = match.groupValues[1]
+            callback(ExtractorLink("AniKage", "AniKage HD", extractedUrl, mainUrl, Qualities.Unknown.value, true))
+            found = true
+        }
+
+        // 2. Token Reconstruction: Sometimes Svelte isolates the token. We grab it and rebuild the URL.
+        if (!found) {
+            Regex("""(?:source|id|file|url|token|hash)"?\s*:\s*"([a-zA-Z0-9_=-]{40,})"""").findAll(scriptData).forEach { match ->
+                val token = match.groupValues[1]
+                val constructedUrl = "https://prox.anicore.tv/m3u8/$token"
+                callback(ExtractorLink("AniKage", "AniKage HD", constructedUrl, mainUrl, Qualities.Unknown.value, true))
                 found = true
             }
         }
 
-        val document = Jsoup.parse(html)
-        document.select("iframe").forEach { iframe ->
+        // 3. General Fallback Extractors
+        if (!found) {
+            Regex("""(?:player_url|url|link|src|iframe|serverUrl|file)\s*:\s*"([^"]+)"""").findAll(scriptData).forEach { match ->
+                val extractedUrl = match.groupValues[1].replace("\\/", "/")
+                if (extractedUrl.startsWith("http")) {
+                    if (loadExtractor(extractedUrl, data, subtitleCallback, callback)) {
+                        found = true
+                    } else if (extractedUrl.contains(".m3u8") || extractedUrl.contains(".mp4")) {
+                        callback(ExtractorLink("AniKage", "AniKage Server", extractedUrl, mainUrl, Qualities.Unknown.value, extractedUrl.contains(".m3u8")))
+                        found = true
+                    }
+                }
+            }
+        }
+
+        // 4. Final safety net: Standard embedded iframes
+        Jsoup.parse(html).select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
-            if (src.isNotBlank() && loadExtractor(src, data, subtitleCallback, callback)) {
+            if (src.startsWith("http") && loadExtractor(src, data, subtitleCallback, callback)) {
                 found = true
             }
         }
-
+        
         return found
     }
 }
