@@ -177,13 +177,33 @@ class AniKageProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var html = app.get(data).text
-        var found = extractLinksFromHtml(html, data, subtitleCallback, callback)
+        var found = false
         
+        // 1. Try standard query param format page (?ep=1)
+        var html = app.get(data).text
+        found = extractLinksFromHtml(html, data, subtitleCallback, callback)
+        
+        // 2. Try SvelteKit hidden JSON payload endpoint
+        if (!found) {
+            val jsonUrl = data.replace("?", "/__data.json?")
+            if (jsonUrl != data) {
+                val jsonData = app.get(jsonUrl).text
+                found = extractLinksFromHtml(jsonData, data, subtitleCallback, callback)
+            }
+        }
+        
+        // 3. Try standard path param format page (/1)
         if (!found && data.contains("?ep=")) {
             val altUrl = data.replace("?ep=", "/")
             html = app.get(altUrl).text
             found = extractLinksFromHtml(html, altUrl, subtitleCallback, callback)
+            
+            // 4. Try SvelteKit hidden JSON endpoint for path param format
+            if (!found) {
+                val altJsonUrl = "$altUrl/__data.json"
+                val altJsonData = app.get(altJsonUrl).text
+                found = extractLinksFromHtml(altJsonData, altUrl, subtitleCallback, callback)
+            }
         }
         
         return found
@@ -196,11 +216,12 @@ class AniKageProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val scriptData = Jsoup.parse(html).select("script").html()
+        // SvelteKit usually escapes JSON payload URLs; clean them before scanning
+        val cleanHtml = html.replace("\\/", "/")
 
-        // 1. Direct Hit: Check for the exact anicore proxy URL format
-        Regex("""(https?://(?:prox\.anicore\.tv|prox\.anikage\.cc)/m3u8/[a-zA-Z0-9_=-]+)""").findAll(scriptData).forEach { match ->
-            val extractedUrl = match.groupValues[1]
+        // 1. Precise Match: Search strictly for valid anicore proxy URLs, NO token guessing
+        Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc)/m3u8/[a-zA-Z0-9_=-]+""").findAll(cleanHtml).forEach { match ->
+            val extractedUrl = match.value
             callback(
                 newExtractorLink(
                     source = "AniKage",
@@ -209,59 +230,45 @@ class AniKageProvider : MainAPI() {
                     type = ExtractorLinkType.M3U8
                 ) {
                     quality = Qualities.Unknown.value
-                    referer = mainUrl
+                    headers = mapOf(
+                        "Origin" to mainUrl,
+                        "Referer" to "$mainUrl/",
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    )
                 }
             )
             found = true
         }
 
-        // 2. Token Reconstruction: Sometimes Svelte isolates the token. We grab it and rebuild the URL.
-        if (!found) {
-            Regex("""(?:source|id|file|url|token|hash)"?\s*:\s*"([a-zA-Z0-9_=-]{40,})"""").findAll(scriptData).forEach { match ->
-                val token = match.groupValues[1]
-                val constructedUrl = "https://prox.anicore.tv/m3u8/$token"
-                callback(
-                    newExtractorLink(
-                        source = "AniKage",
-                        name = "AniKage HD",
-                        url = constructedUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        quality = Qualities.Unknown.value
-                        referer = mainUrl
-                    }
-                )
-                found = true
-            }
-        }
-
-        // 3. General Fallback Extractors
-        if (!found) {
-            Regex("""(?:player_url|url|link|src|iframe|serverUrl|file)\s*:\s*"([^"]+)"""").findAll(scriptData).forEach { match ->
-                val extractedUrl = match.groupValues[1].replace("\\/", "/")
-                if (extractedUrl.startsWith("http")) {
-                    if (loadExtractor(extractedUrl, data, subtitleCallback, callback)) {
-                        found = true
-                    } else if (extractedUrl.contains(".m3u8") || extractedUrl.contains(".mp4")) {
-                        val isM3u8 = extractedUrl.contains(".m3u8")
-                        callback(
-                            newExtractorLink(
-                                source = "AniKage",
-                                name = "AniKage Server",
-                                url = extractedUrl,
-                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                quality = Qualities.Unknown.value
-                                referer = mainUrl
-                            }
-                        )
-                        found = true
-                    }
+        // 2. Fallback Svelte variables that point directly to streaming files
+        Regex("""(?:player_url|url|link|src|iframe|serverUrl|file)"?\s*:\s*"([^"]+)"""").findAll(cleanHtml).forEach { match ->
+            val extractedUrl = match.groupValues[1]
+            if (extractedUrl.startsWith("http")) {
+                if (loadExtractor(extractedUrl, data, subtitleCallback, callback)) {
+                    found = true
+                } else if (extractedUrl.contains(".m3u8") || extractedUrl.contains(".mp4")) {
+                    val isM3u8 = extractedUrl.contains(".m3u8")
+                    callback(
+                        newExtractorLink(
+                            source = "AniKage",
+                            name = "AniKage Server",
+                            url = extractedUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            quality = Qualities.Unknown.value
+                            headers = mapOf(
+                                "Origin" to mainUrl,
+                                "Referer" to "$mainUrl/",
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            )
+                        }
+                    )
+                    found = true
                 }
             }
         }
 
-        // 4. Final safety net: Standard embedded iframes
+        // 3. Absolute Fallback: Standard embedded iframes inside HTML
         Jsoup.parse(html).select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
             if (src.startsWith("http") && loadExtractor(src, data, subtitleCallback, callback)) {
