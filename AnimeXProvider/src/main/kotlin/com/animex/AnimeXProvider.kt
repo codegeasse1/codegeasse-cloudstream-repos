@@ -49,17 +49,9 @@ class AnimeXProvider : MainAPI() {
             if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
             
-            // Fix for Serveproxy and Anilist images
             var poster = Regex("""["']?extraLarge["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
-            if (poster.isBlank()) poster = Regex("""https?://serveproxy\.com[^"'\s]+""").find(window)?.value ?: ""
-            if (poster.isBlank()) poster = Regex("""https?://s4\.anilist\.co[^"'\s]+""").find(window)?.value ?: ""
-            
-            // TMDB fallback just in case
-            if (poster.isBlank()) {
-                val relPath = Regex("""["']?poster_path["']?\s*:\s*["'](/[^"'\s]+)""").find(window)?.groupValues?.get(1)
-                if (relPath != null) poster = "https://image.tmdb.org/t/p/original$relPath"
-            }
+            if (poster.isBlank()) poster = Regex("""https?://(?:serveproxy\.com|s4\.anilist\.co)[^"'\s]+""").find(window)?.value ?: ""
             
             val url = "$mainUrl/anime/$slug"
             if (items.none { it.url == url }) {
@@ -79,7 +71,6 @@ class AnimeXProvider : MainAPI() {
         val scriptData = Jsoup.parse(html).select("script").html()
         
         val homeItems = mutableListOf<HomePageList>()
-        
         val sections = listOf(
             "trendingAnime" to "Trending",
             "seasonalAnime" to "Popular This Season",
@@ -122,13 +113,7 @@ class AnimeXProvider : MainAPI() {
             
             var poster = Regex("""["']?extraLarge["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
-            if (poster.isBlank()) poster = Regex("""https?://serveproxy\.com[^"'\s]+""").find(window)?.value ?: ""
-            if (poster.isBlank()) poster = Regex("""https?://s4\.anilist\.co[^"'\s]+""").find(window)?.value ?: ""
-            
-            if (poster.isBlank()) {
-                val relPath = Regex("""["']?poster_path["']?\s*:\s*["'](/[^"'\s]+)""").find(window)?.groupValues?.get(1)
-                if (relPath != null) poster = "https://image.tmdb.org/t/p/original$relPath"
-            }
+            if (poster.isBlank()) poster = Regex("""https?://(?:serveproxy\.com|s4\.anilist\.co)[^"'\s]+""").find(window)?.value ?: ""
             
             val url = "$mainUrl/anime/$slug"
             if (items.none { it.url == url }) {
@@ -162,16 +147,12 @@ class AnimeXProvider : MainAPI() {
             if (title.isBlank()) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
         }
         
-        // 2. Poster & Banner Images (Handles Serveproxy and TMDB headers)
+        // 2. Posters & Banner (Supports Anilist/Serveproxy and TMDB headers)
         var poster = Regex("""["']?extraLarge["']?\s*:\s*["']([^"']+)""").find(cleanBlock)?.groupValues?.get(1) ?: ""
-        if (poster.isBlank()) poster = Regex("""https?://serveproxy\.com[^"'\s]+""").find(cleanBlock)?.value ?: ""
+        if (poster.isBlank()) poster = Regex("""https?://(?:serveproxy\.com|s4\.anilist\.co)[^"'\s]+""").find(cleanBlock)?.value ?: ""
         if (poster.isBlank()) poster = document.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
         
         var banner = Regex("""["']?bannerImage["']?\s*:\s*["']([^"']+)""").find(cleanBlock)?.groupValues?.get(1) ?: ""
-        if (banner.isBlank()) {
-            val relPath = Regex("""["']?backdrop_path["']?\s*:\s*["'](/[^"'\s]+)""").find(cleanBlock)?.groupValues?.get(1)
-            if (relPath != null) banner = "https://image.tmdb.org/t/p/original$relPath"
-        }
         if (banner.isBlank()) banner = poster 
         
         // 3. Plot
@@ -208,7 +189,6 @@ class AnimeXProvider : MainAPI() {
             e.printStackTrace()
         }
         
-        // Fallback to DOM if API fails
         if (episodes.isEmpty()) {
             document.select("a[href*=/watch/]").forEach { a ->
                 val epHref = fixUrlNull(a.attr("href")) ?: return@forEach
@@ -234,7 +214,7 @@ class AnimeXProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Handles direct M3U8 streams and embedded Iframes)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -256,7 +236,7 @@ class AnimeXProvider : MainAPI() {
         )
 
         try {
-            // STEP 1: Fetch Server List
+            // STEP 1: Fetch Server List via API
             val serversUrl = "https://pp.animex.one/rest/api/servers?id=$slug&epNum=$ep"
             val serversJson = app.get(serversUrl, headers = apiHeaders).text
             
@@ -266,14 +246,12 @@ class AnimeXProvider : MainAPI() {
                 val type = Regex("""["']?type["']?\s*:\s*["']([^"']+)["']""").find(block)?.groupValues?.get(1) ?: "sub"
                 val serverName = Regex("""["']?serverName["']?\s*:\s*["']([^"']+)["']""").find(block)?.groupValues?.get(1) ?: providerId.replaceFirstChar { it.uppercase() }
 
-                // STEP 2: Fetch Source Streams
+                // STEP 2: Fetch Source Streams via API
                 val sourcesUrl = "https://pp.animex.one/rest/api/sources?id=$slug&epNum=$ep&type=$type&providerId=$providerId"
                 val rawSources = app.get(sourcesUrl, headers = apiHeaders).text
-                
-                // UNESCAPE JSON to fix broken URLs
                 val sourcesJson = rawSources.replace("\\/", "/")
                 
-                // Extremely aggressive regex to catch ANY m3u8 or mp4 link, regardless of quotes
+                // 1. Check for Direct M3U8 Streams
                 val m3u8Matches = Regex("""https?://[^"'\s\[\]\{\}]+\.m3u8[^"'\s]*""").findAll(sourcesJson).map { it.value }.toList()
                 for (videoUrl in m3u8Matches) {
                     callback(
@@ -290,6 +268,7 @@ class AnimeXProvider : MainAPI() {
                     found = true
                 }
                 
+                // 2. Check for MP4 Streams
                 if (m3u8Matches.isEmpty()) {
                     val mp4Matches = Regex("""https?://[^"'\s\[\]\{\}]+\.mp4[^"'\s]*""").findAll(sourcesJson).map { it.value }.toList()
                     for (videoUrl in mp4Matches) {
@@ -304,6 +283,14 @@ class AnimeXProvider : MainAPI() {
                                 this.referer = "$mainUrl/"
                             }
                         )
+                        found = true
+                    }
+                }
+
+                // 3. Check for Iframe Embeds inside the API Response (Fixes "No Link Found" for embedded players like flixcloud)
+                val iframeMatches = Regex("""https?://[^"'\s\[\]\{\}]+\/e\/[^"'\s]*""").findAll(sourcesJson).map { it.value }.toList()
+                for (iframeUrl in iframeMatches) {
+                    if (loadExtractor(iframeUrl, data, subtitleCallback, callback)) {
                         found = true
                     }
                 }
@@ -322,11 +309,13 @@ class AnimeXProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // Fallback: Check DOM for mounted iframes
+        // Fallback: Scrape the watch page DOM directly for iframes if API sources return nothing
         if (!found) {
             try {
-                val html = app.get(cleanData).text
+                val watchPageUrl = "$mainUrl/watch/$slug-episode-$ep"
+                val html = app.get(watchPageUrl, headers = apiHeaders).text
                 val document = Jsoup.parse(html)
+                
                 document.select("iframe").forEach { iframe ->
                     val src = iframe.attr("src")
                     if (src.isNotBlank() && src.startsWith("http") && loadExtractor(src, data, subtitleCallback, callback)) {
