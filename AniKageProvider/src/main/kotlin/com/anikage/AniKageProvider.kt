@@ -89,7 +89,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (Hits direct API endpoint: /api/media/anime/search)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
@@ -97,8 +97,8 @@ class AniKageProvider : MainAPI() {
 
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-            
             val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
+            
             for (i in 1 until parts.size) {
                 val part = parts[i]
                 val slug = part.substringBefore("\"").replace("\\", "")
@@ -233,7 +233,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Vidtube Forced Absolute Priority)
+    // LOAD LINKS (Clean Micro-Offset Sorting)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -300,11 +300,11 @@ class AniKageProvider : MainAPI() {
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val serverName = "${provider.uppercase()} ($lang)"
                             
-                            // Absolute Quality Overrides: Vidtube gets 10000+, MegaPlay gets 2000
+                            // Micro-offsets keep quality tags clean (1080p, 720p) while putting Vidtube first
                             val sortQuality = when (provider) {
-                                "vibeube" -> 10000
-                                "megatube" -> 2000
-                                else -> 500
+                                "vibeube" -> Qualities.P1080.value + 2
+                                "megatube" -> Qualities.P1080.value - 2
+                                else -> Qualities.P720.value
                             }
                             
                             callback(
@@ -333,8 +333,8 @@ class AniKageProvider : MainAPI() {
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
                                 
                                 val sortQuality = when {
-                                    isVidtube -> 10000 + link.quality
-                                    isMegaPlay -> 2000 + link.quality
+                                    isVidtube -> link.quality + 2
+                                    isMegaPlay -> link.quality - 2
                                     else -> link.quality
                                 }
 
@@ -375,7 +375,7 @@ class AniKageProvider : MainAPI() {
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
-                            quality = 500
+                            quality = Qualities.P720.value
                             headers = standardHeaders
                         }
                     )
