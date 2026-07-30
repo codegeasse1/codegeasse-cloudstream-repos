@@ -89,33 +89,28 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Updated Logic)
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val html = app.get("$mainUrl/browse?search=$query").text
         val scriptData = Jsoup.parse(html).select("script").html()
         
-        // SvelteKit bundles data in __data.json or directly in the script tags.
-        // We look for the array of results within the script data.
         val parts = scriptData.split("slug:\"")
         val items = mutableListOf<SearchResponse>()
         
         for (i in 1 until parts.size) {
             val part = parts[i]
             val slug = part.substringBefore("\"")
-            // A valid slug shouldn't be too long or empty
             if (slug.isBlank() || slug.length > 200) continue
             
             val window = part.take(1500)
             
-            // Extract Title
             val titleBlock = window.substringAfter("title:{", "").substringBefore("}")
             var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
-            if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").capitalize()
+            if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
             
-            // Extract Poster
             val coverBlock = window.substringAfter("coverImage:{", "").substringBefore("}")
             var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
             if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
@@ -176,7 +171,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Fixed Coroutine Error & Retained Prioritization)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -194,7 +189,6 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        // Prioritized Order: Vidtube (vibeube) > MegaPlay (megatube) > Others
         val knownProviders = listOf(
             "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
@@ -225,15 +219,12 @@ class AniKageProvider : MainAPI() {
         
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
-        // Loop through languages and providers sequentially to avoid coroutine issues
         for (lang in langs) {
             for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                    
-                    // We must convert the Sequence to a List before iterating to safely call suspending functions inside
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
                     
                     for (match in matches) {
@@ -247,7 +238,6 @@ class AniKageProvider : MainAPI() {
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val serverName = "${provider.uppercase()} ($lang)"
                             
-                            // Inject Quality Boost for Direct Streams (Vidtube gets +200, MegaPlay +100)
                             val sortQuality = when (provider) {
                                 "vibeube" -> Qualities.Unknown.value + 200
                                 "megatube" -> Qualities.Unknown.value + 100
@@ -267,8 +257,18 @@ class AniKageProvider : MainAPI() {
                             )
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
-                            // Safely load the extractor. 
+                            
+                            // FIX: Collect links in a list synchronously to avoid suspend function errors
+                            val extractedLinks = mutableListOf<ExtractorLink>()
+                            
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
+                                extractedLinks.add(link)
+                            }) {
+                                found = true
+                            }
+                            
+                            // Now safely iterate through collected links in the suspend environment
+                            for (link in extractedLinks) {
                                 val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
                                 
@@ -291,8 +291,6 @@ class AniKageProvider : MainAPI() {
                                         this.referer = link.referer
                                     }
                                 )
-                            }) {
-                                found = true
                             }
                         }
                     }
@@ -304,7 +302,6 @@ class AniKageProvider : MainAPI() {
 
         if (!found) {
             try {
-                // Same fix here: Convert to List before iterating with suspending functions
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
                 
                 for (match in matches) {
