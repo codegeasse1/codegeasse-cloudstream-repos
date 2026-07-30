@@ -89,38 +89,105 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (Hits direct API endpoint: /api/media/anime/search)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val html = app.get("$mainUrl/browse?search=$query").text
-        val scriptData = Jsoup.parse(html).select("script").html()
-        
-        val parts = scriptData.split("slug:\"")
+        val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
         val items = mutableListOf<SearchResponse>()
-        
-        for (i in 1 until parts.size) {
-            val part = parts[i]
-            val slug = part.substringBefore("\"")
-            if (slug.isBlank() || slug.length > 200) continue
+
+        try {
+            val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
             
-            val window = part.take(1500)
-            
-            val titleBlock = window.substringAfter("title:{", "").substringBefore("}")
-            var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
-            if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
-            if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
-            if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
-            
-            val coverBlock = window.substringAfter("coverImage:{", "").substringBefore("}")
-            var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
-            if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
-            if (poster == coverBlock) poster = ""
-            
-            val url = "$mainUrl/anime/info/$slug"
-            if (items.none { it.url == url }) {
-                items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
-                    this.posterUrl = poster
-                })
+            // Handle JSON response payload
+            val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
+            for (i in 1 until parts.size) {
+                val part = parts[i]
+                val slug = part.substringBefore("\"").replace("\\", "")
+                if (slug.isBlank() || slug.length > 200) continue
+
+                val window = part.take(2000)
+
+                // Extract Title from JSON
+                var title = ""
+                val titleBlock = window.substringAfter("\"title\":", "").substringBefore("}")
+                if (titleBlock.contains("\"english\":")) {
+                    title = titleBlock.substringAfter("\"english\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title == titleBlock) {
+                    title = titleBlock.substringAfter("\"userPreferred\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title == titleBlock) {
+                    title = titleBlock.substringAfter("\"romaji\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title == titleBlock) {
+                    title = window.substringAfter("\"title\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title.contains("{")) {
+                    title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+                }
+
+                // Clean title escaped characters
+                title = title.replace("\\\"", "\"").replace("\\/", "/")
+
+                // Extract Poster from JSON
+                var poster = ""
+                val coverBlock = window.substringAfter("\"coverImage\":", "").substringBefore("}")
+                if (coverBlock.contains("\"extraLarge\":")) {
+                    poster = coverBlock.substringAfter("\"extraLarge\":\"", "").substringBefore("\"")
+                }
+                if (poster.isBlank() || poster == coverBlock) {
+                    poster = coverBlock.substringAfter("\"large\":\"", "").substringBefore("\"")
+                }
+                if (poster.isBlank() || poster == coverBlock) {
+                    poster = window.substringAfter("\"poster\":\"", "").substringBefore("\"")
+                }
+                if (poster == coverBlock) poster = ""
+                poster = poster.replace("\\/", "/")
+
+                val url = "$mainUrl/anime/info/$slug"
+                if (items.none { it.url == url }) {
+                    items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
+                        this.posterUrl = poster
+                    })
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Fallback: Check script tags in browse HTML if API returns empty
+        if (items.isEmpty()) {
+            try {
+                val html = app.get("$mainUrl/browse?search=$query").text
+                val scriptData = Jsoup.parse(html).select("script").html()
+                val parts = scriptData.split("slug:\"")
+                
+                for (i in 1 until parts.size) {
+                    val part = parts[i]
+                    val slug = part.substringBefore("\"")
+                    if (slug.isBlank() || slug.length > 200) continue
+                    
+                    val window = part.take(1500)
+                    val titleBlock = window.substringAfter("title:{", "").substringBefore("}")
+                    var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
+                    if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
+                    if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
+                    if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+                    
+                    val coverBlock = window.substringAfter("coverImage:{", "").substringBefore("}")
+                    var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
+                    if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
+                    if (poster == coverBlock) poster = ""
+                    
+                    val url = "$mainUrl/anime/info/$slug"
+                    if (items.none { it.url == url }) {
+                        items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
         
@@ -171,7 +238,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Vidtube prioritized first)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -257,8 +324,6 @@ class AniKageProvider : MainAPI() {
                             )
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
-                            
-                            // FIX: Collect links in a list synchronously to avoid suspend function errors
                             val extractedLinks = mutableListOf<ExtractorLink>()
                             
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
@@ -267,7 +332,6 @@ class AniKageProvider : MainAPI() {
                                 found = true
                             }
                             
-                            // Now safely iterate through collected links in the suspend environment
                             for (link in extractedLinks) {
                                 val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
