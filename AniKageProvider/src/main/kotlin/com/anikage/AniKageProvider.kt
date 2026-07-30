@@ -89,7 +89,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH 
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
@@ -233,7 +233,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Forced A-Z Source Grouping for Absolute Sorting)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -272,14 +272,7 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-        val standardHeaders = mapOf(
-            "Origin" to mainUrl,
-            "Referer" to "$mainUrl/",
-            "Accept" to "application/json",
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        
-        // Clean headers for Video Streams ONLY (Prevents ExoPlayer rejection)
+        // Clean headers for Video Streams ONLY
         val videoHeaders = mapOf(
             "Origin" to mainUrl,
             "Referer" to "$mainUrl/",
@@ -308,7 +301,6 @@ class AniKageProvider : MainAPI() {
                             val isVidtube = provider == "vibeube"
                             val isMegaPlay = provider == "megatube"
                             
-                            // Hacks CloudStream's A-Z Source Sorting to guarantee exact placement
                             val sourceGroup = when {
                                 isVidtube -> "1. Vidtube"
                                 isMegaPlay -> "2. MegaPlay"
@@ -329,11 +321,20 @@ class AniKageProvider : MainAPI() {
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
                             
+                            // SAFE COLLECTION: Do not call suspend functions inside this lambda
+                            val extractedLinks = mutableListOf<ExtractorLink>()
+                            
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
+                                extractedLinks.add(link)
+                            }) {
+                                found = true
+                            }
+                            
+                            // Iterate in the coroutine-safe block
+                            for (link in extractedLinks) {
                                 val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
                                 
-                                // Hacks CloudStream's A-Z Source Sorting to guarantee exact placement
                                 val sourceGroup = when {
                                     isVidtube -> "1. Vidtube"
                                     isMegaPlay -> "2. MegaPlay"
@@ -343,7 +344,7 @@ class AniKageProvider : MainAPI() {
                                 callback(
                                     newExtractorLink(
                                         source = sourceGroup,
-                                        name = link.name.replace("[1] ", "").replace("[2] ", ""), // cleans up old tags
+                                        name = link.name.replace("[1] ", "").replace("[2] ", ""), 
                                         url = link.url,
                                         type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
@@ -353,8 +354,6 @@ class AniKageProvider : MainAPI() {
                                         this.referer = link.referer
                                     }
                                 )
-                            }) {
-                                found = true
                             }
                         }
                     }
