@@ -233,7 +233,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (With M3U8 Master Playlist Extractor)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -293,7 +293,6 @@ class AniKageProvider : MainAPI() {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
                         
-                        // We check for .m3u to catch those vibevibe worker playlists you found
                         val isDirectM3u8 = cleanUrl.contains(".m3u") || cleanUrl.contains("/m3u8/")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
@@ -301,12 +300,11 @@ class AniKageProvider : MainAPI() {
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val serverName = "${provider.uppercase()} ($lang)"
                             
-                            // If it's an M3U8, parse it manually to extract 1080p, 720p, etc.
                             if (isDirectM3u8 || isKnownHost) {
                                 try {
                                     val m3u8Links = M3u8Helper.generateM3u8(
                                         source = serverName,
-                                        url = cleanUrl,
+                                        streamUrl = cleanUrl,
                                         referer = "$mainUrl/",
                                         headers = standardHeaders
                                     )
@@ -329,11 +327,10 @@ class AniKageProvider : MainAPI() {
                                         continue
                                     }
                                 } catch (e: Exception) {
-                                    // Let it fall through to the raw link fallback below if parsing fails
+                                    // Fall through
                                 }
                             }
                             
-                            // Fallback for raw streams that couldn't be parsed
                             callback(
                                 newExtractorLink(
                                     source = "AniKage",
@@ -362,12 +359,11 @@ class AniKageProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Ignore endpoints quietly
+                    // Ignore missing endpoints quietly
                 }
             }
         }
 
-        // Direct stream fallback from the main page source
         if (!found) {
             try {
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
@@ -380,7 +376,7 @@ class AniKageProvider : MainAPI() {
                         try {
                             M3u8Helper.generateM3u8(
                                 source = "Direct Stream",
-                                url = extractedUrl,
+                                streamUrl = extractedUrl,
                                 referer = "$mainUrl/",
                                 headers = standardHeaders
                             ).forEach { link ->
