@@ -89,7 +89,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (Hits direct API endpoint: /api/media/anime/search)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
@@ -98,6 +98,7 @@ class AniKageProvider : MainAPI() {
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
             
+            // Handle JSON response payload
             val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
@@ -106,6 +107,7 @@ class AniKageProvider : MainAPI() {
 
                 val window = part.take(2000)
 
+                // Extract Title from JSON
                 var title = ""
                 val titleBlock = window.substringAfter("\"title\":", "").substringBefore("}")
                 if (titleBlock.contains("\"english\":")) {
@@ -124,8 +126,10 @@ class AniKageProvider : MainAPI() {
                     title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
                 }
 
+                // Clean title escaped characters
                 title = title.replace("\\\"", "\"").replace("\\/", "/")
 
+                // Extract Poster from JSON
                 var poster = ""
                 val coverBlock = window.substringAfter("\"coverImage\":", "").substringBefore("}")
                 if (coverBlock.contains("\"extraLarge\":")) {
@@ -151,6 +155,7 @@ class AniKageProvider : MainAPI() {
             e.printStackTrace()
         }
 
+        // Fallback: Check script tags in browse HTML if API returns empty
         if (items.isEmpty()) {
             try {
                 val html = app.get("$mainUrl/browse?search=$query").text
@@ -233,7 +238,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Forced Identical Source Override for Vidtube)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -272,14 +277,6 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-        // Clean headers for API requests ONLY
-        val apiHeaders = mapOf(
-            "Origin" to mainUrl,
-            "Referer" to "$mainUrl/",
-            "Accept" to "application/json",
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        
         // Clean headers for Video Streams ONLY (No JSON Accept header to prevent ExoPlayer rejection)
         val videoHeaders = mapOf(
             "Origin" to mainUrl,
@@ -308,7 +305,6 @@ class AniKageProvider : MainAPI() {
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val serverName = "${provider.uppercase()} ($lang)"
                             
-                            // Prepends [1] or [2] to the UI name so CloudStream natively sorts Vidtube to the absolute top
                             val sortedName = when (provider) {
                                 "vibeube" -> "[1] $serverName"
                                 "megatube" -> "[2] $serverName"
@@ -317,8 +313,8 @@ class AniKageProvider : MainAPI() {
                             
                             callback(
                                 newExtractorLink(
-                                    source = "AniKage",
-                                    name = "AniKage - $sortedName",
+                                    source = "AniKage", // FORCE IDENTICAL SOURCE TO BYPASS ALPHABETICAL TIEBREAKER
+                                    name = sortedName,
                                     url = cleanUrl,
                                     type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
@@ -348,7 +344,7 @@ class AniKageProvider : MainAPI() {
 
                                 callback(
                                     newExtractorLink(
-                                        source = link.source,
+                                        source = "AniKage", // FORCE IDENTICAL SOURCE TO BYPASS ALPHABETICAL TIEBREAKER
                                         name = sortedName,
                                         url = link.url,
                                         type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
