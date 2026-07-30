@@ -3,9 +3,6 @@ package com.anikage
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 
 class AniKageProvider : MainAPI() {
     override var mainUrl = "https://anikage.cc"
@@ -172,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Fully Asynchronous Array Probing)
+    // LOAD LINKS (Fully Stable API Probing)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -188,7 +185,7 @@ class AniKageProvider : MainAPI() {
             ?: "1"
 
         // The exact master list of servers and embeds you found
-        val providers = listOf("neko", "ken", "miko", "megg", "dib", "wave", "koto", "e-neko", "e-ken", "e-koto", "e-wish")
+        val providers = listOf("", "neko", "ken", "miko", "megg", "dib", "wave", "koto", "vibeube", "megatube", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-koto", "e-wish")
         val langs = listOf("sub", "dub")
 
         val standardHeaders = mapOf(
@@ -198,53 +195,52 @@ class AniKageProvider : MainAPI() {
         )
         
         // Exclude domains that definitely aren't videos
-        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org", "w3.org")
+        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
-        coroutineScope {
-            val jobs = langs.flatMap { lang ->
-                providers.map { provider ->
-                    async {
-                        val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
-                        try {
-                            val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+        for (lang in langs) {
+            for (provider in providers) {
+                val apiUrl = if (provider.isEmpty()) {
+                    "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?lang=$lang"
+                } else {
+                    "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+                }
+
+                try {
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+                    
+                    Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { match ->
+                        val cleanUrl = match.value.replace("\\/", "/")
+                        if (exclusions.any { cleanUrl.contains(it) }) return@forEach
+                        
+                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                        val isDirectMp4 = cleanUrl.contains(".mp4")
+                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
+                        
+                        if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                            val serverName = if (provider.isEmpty()) "Default ($lang)" else "${provider.uppercase()} ($lang)"
                             
-                            Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { match ->
-                                val cleanUrl = match.value.replace("\\/", "/")
-                                if (exclusions.any { cleanUrl.contains(it) }) return@forEach
-                                
-                                val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
-                                val isDirectMp4 = cleanUrl.contains(".mp4")
-                                val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
-                                
-                                if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                                    val serverName = "${provider.uppercase()} ($lang)"
-                                    
-                                    callback(
-                                        newExtractorLink(
-                                            source = "AniKage",
-                                            name = "AniKage - $serverName",
-                                            url = cleanUrl,
-                                            type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                        ) {
-                                            quality = Qualities.Unknown.value
-                                            headers = standardHeaders
-                                        }
-                                    )
-                                    found = true
-                                } else if (cleanUrl.startsWith("http")) {
-                                    if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
-                                        found = true
-                                    }
+                            callback(
+                                newExtractorLink(
+                                    source = "AniKage",
+                                    name = "AniKage - $serverName",
+                                    url = cleanUrl,
+                                    type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    quality = Qualities.Unknown.value
+                                    headers = standardHeaders
                                 }
+                            )
+                            found = true
+                        } else if (cleanUrl.startsWith("http")) {
+                            if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
+                                found = true
                             }
-                        } catch (e: Exception) {
-                            // Endpoint doesn't exist for this specific anime/provider combo; ignore.
                         }
                     }
+                } catch (e: Exception) {
+                    // Endpoint doesn't exist for this specific anime/provider combo; safely ignored.
                 }
             }
-            // Wait for all 22 requests to finish checking simultaneously
-            jobs.awaitAll()
         }
 
         // Ultimate fallback to parse the HTML page if API fails entirely
