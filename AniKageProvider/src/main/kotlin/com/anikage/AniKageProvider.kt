@@ -169,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Prioritizes Vidtube/MegaPlay over VibePlayer)
+    // LOAD LINKS (Prioritizes Vidtube over MegaPlay and VibePlayer)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -187,11 +187,10 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        // Prioritized Order: Vidtube / MegaPlay / Koto / Wave / Dib come BEFORE Vibe
+        // Prioritized Order: Vidtube (vibeube) comes first, then MegaPlay (megatube)
         val knownProviders = listOf(
-            "megatube", "koto", "e-koto", "wave", "dib", "miko", 
-            "neko", "ken", "megg", "vibeube", "vibe", "kwik", 
-            "aniyt", "e-neko", "e-ken", "e-wish"
+            "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
         
         // Smart Filter: Only test providers that appear in the HTML payload
@@ -203,7 +202,7 @@ class AniKageProvider : MainAPI() {
         }.toMutableList()
 
         if (activeProviders.isEmpty()) {
-            activeProviders.addAll(listOf("megatube", "koto", "neko", "ken", "miko", "vibe"))
+            activeProviders.addAll(listOf("vibeube", "megatube", "koto", "neko", "ken", "miko", "vibe"))
         }
 
         val langs = mutableListOf("sub")
