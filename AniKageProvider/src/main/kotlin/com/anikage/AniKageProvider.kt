@@ -3,6 +3,9 @@ package com.anikage
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class AniKageProvider : MainAPI() {
     override var mainUrl = "https://anikage.cc"
@@ -169,7 +172,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Queries backend API directly)
+    // LOAD LINKS (Fully Asynchronous Array Probing)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -178,55 +181,100 @@ class AniKageProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        
-        val slug = data.substringAfter("/watch/").substringBefore("?").substringBefore("/")
-        val ep = Regex("""[?&]ep=(\d+)""").find(data)?.groupValues?.get(1)
-            ?: Regex("""/(\d+)""").find(data)?.groupValues?.get(1)
+        val cleanData = data.substringBefore("#")
+        val slug = cleanData.substringAfter("/watch/").substringBefore("?").substringBefore("/")
+        val ep = Regex("""[?&]ep=(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: Regex("""/(\d+)""").find(cleanData)?.groupValues?.get(1)
             ?: "1"
 
-        val providers = listOf("neko", "vibe", "kwik", "aniyt")
+        // The exact master list of servers and embeds you found
+        val providers = listOf("neko", "ken", "miko", "megg", "dib", "wave", "koto", "e-neko", "e-ken", "e-koto", "e-wish")
         val langs = listOf("sub", "dub")
 
-        for (lang in langs) {
-            for (provider in providers) {
-                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
-                try {
-                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                    
-                    Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { match ->
-                        val cleanUrl = match.value.replace("\\/", "/")
-                        if (cleanUrl.contains("prox.anicore.tv") || cleanUrl.contains("prox.anikage.cc") || cleanUrl.contains(".m3u8") || cleanUrl.contains(".mp4")) {
-                            val isM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/")
-                            val label = "${provider.uppercase()} (${lang.uppercase()})"
+        val standardHeaders = mapOf(
+            "Origin" to mainUrl,
+            "Referer" to "$mainUrl/",
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        
+        // Exclude domains that definitely aren't videos
+        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org", "w3.org")
+
+        coroutineScope {
+            val jobs = langs.flatMap { lang ->
+                providers.map { provider ->
+                    async {
+                        val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+                        try {
+                            val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                             
-                            callback(
-                                newExtractorLink(
-                                    source = "AniKage",
-                                    name = "AniKage - $label",
-                                    url = cleanUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    quality = Qualities.Unknown.value
-                                    headers = mapOf(
-                                        "Origin" to mainUrl,
-                                        "Referer" to "$mainUrl/",
-                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { match ->
+                                val cleanUrl = match.value.replace("\\/", "/")
+                                if (exclusions.any { cleanUrl.contains(it) }) return@forEach
+                                
+                                val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                                val isDirectMp4 = cleanUrl.contains(".mp4")
+                                val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
+                                
+                                if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                                    val serverName = "${provider.uppercase()} ($lang)"
+                                    
+                                    callback(
+                                        newExtractorLink(
+                                            source = "AniKage",
+                                            name = "AniKage - $serverName",
+                                            url = cleanUrl,
+                                            type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        ) {
+                                            quality = Qualities.Unknown.value
+                                            headers = standardHeaders
+                                        }
                                     )
+                                    found = true
+                                } else if (cleanUrl.startsWith("http")) {
+                                    if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
+                                        found = true
+                                    }
                                 }
-                            )
-                            found = true
-                        } else if (cleanUrl.startsWith("http")) {
-                            if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
-                                found = true
                             }
+                        } catch (e: Exception) {
+                            // Endpoint doesn't exist for this specific anime/provider combo; ignore.
                         }
                     }
-                } catch (e: Exception) {
-                    // Silently ignore missing provider or language combinations
                 }
             }
+            // Wait for all 22 requests to finish checking simultaneously
+            jobs.awaitAll()
         }
-        
+
+        // Ultimate fallback to parse the HTML page if API fails entirely
+        if (!found) {
+            try {
+                val html = app.get(cleanData).text
+                val cleanHtml = html.replace("\\/", "/")
+
+                Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).forEach { match ->
+                    val extractedUrl = match.value
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/")
+                    
+                    callback(
+                        newExtractorLink(
+                            source = "AniKage",
+                            name = "AniKage - Direct",
+                            url = extractedUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            quality = Qualities.Unknown.value
+                            headers = standardHeaders
+                        }
+                    )
+                    found = true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
         return found
     }
 }
