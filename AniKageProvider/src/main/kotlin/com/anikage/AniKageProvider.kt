@@ -233,7 +233,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Vidtube Only)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -251,29 +251,15 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        val knownProviders = listOf(
-            "megg", "kiss", "miko", "verse", "vibeube", "megatube", "koto", 
-            "e-koto", "wave", "dib", "neko", "ken", "vibe", "kwik", "aniyt", 
-            "e-neko", "e-ken", "e-wish"
-        )
-        
-        val activeProviders = knownProviders.filter { provider ->
-            cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
-            cleanHtml.contains("provider=$provider", ignoreCase = true) ||
-            cleanHtml.contains("-$provider", ignoreCase = true) ||
-            cleanHtml.contains(">$provider<", ignoreCase = true)
-        }.toMutableList()
-
-        if (activeProviders.isEmpty()) {
-            activeProviders.addAll(knownProviders)
-        }
+        // STRICTLY ONLY VIDTUBE - Bypassing HTML checks to fix "No Link Found"
+        val activeProviders = listOf("vibeube")
 
         val langs = mutableListOf("sub")
         if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
             langs.add("dub")
         }
 
-        // MINIMAL HEADERS: Bypasses Cloudflare 2004 Error
+        // MINIMAL HEADERS to bypass Cloudflare 2004 Error
         val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -293,37 +279,11 @@ class AniKageProvider : MainAPI() {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
                         
-                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
-                        val isDirectMp4 = cleanUrl.contains(".mp4")
-                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
-                        
-                        if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val isVidtube = provider == "vibeube"
-                            val isMegaPlay = provider == "megatube"
-                            
-                            // FORCE VIDTUBE TO TOP: 1080p always beats 720p natively.
-                            val sortQuality = when {
-                                isVidtube -> Qualities.P1080.value
-                                isMegaPlay -> Qualities.P720.value
-                                else -> Qualities.P480.value
-                            }
-                            
-                            callback(
-                                newExtractorLink(
-                                    source = "AniKage",
-                                    name = "${provider.uppercase()} ($lang)",
-                                    url = cleanUrl,
-                                    type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = sortQuality
-                                    this.headers = videoHeaders // Replaced to prevent 2004 error
-                                }
-                            )
-                            found = true
-                        } else if (cleanUrl.startsWith("http")) {
+                        if (cleanUrl.startsWith("http")) {
                             
                             val extractedLinks = mutableListOf<ExtractorLink>()
                             
+                            // Let CloudStream automatically extract the REAL qualities (1080p, 720p, 360p)
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
                                 extractedLinks.add(link)
                             }) {
@@ -331,29 +291,41 @@ class AniKageProvider : MainAPI() {
                             }
                             
                             for (link in extractedLinks) {
-                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
-                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
-                                
-                                // FORCE VIDTUBE TO TOP: 1080p always beats 720p natively.
-                                val sortQuality = when {
-                                    isVidtube -> Qualities.P1080.value
-                                    isMegaPlay -> Qualities.P720.value
-                                    else -> Qualities.P480.value
-                                }
-
                                 callback(
                                     newExtractorLink(
-                                        source = "AniKage",
+                                        source = "Vidtube",
                                         name = link.name,
                                         url = link.url,
                                         type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
-                                        this.quality = sortQuality
-                                        this.headers = videoHeaders // Replaced to prevent 2004 error
+                                        this.quality = link.quality // Restored real quality
+                                        this.headers = videoHeaders 
                                         this.extractorData = link.extractorData
                                         this.referer = link.referer
                                     }
                                 )
+                            }
+
+                            // Fallback if the built-in extractor misses it
+                            if (extractedLinks.isEmpty()) {
+                                val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                                val isDirectMp4 = cleanUrl.contains(".mp4")
+                                val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
+                                
+                                if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                                    callback(
+                                        newExtractorLink(
+                                            source = "Vidtube",
+                                            name = "Vidtube ($lang)",
+                                            url = cleanUrl,
+                                            type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        ) {
+                                            this.quality = Qualities.Unknown.value
+                                            this.headers = videoHeaders
+                                        }
+                                    )
+                                    found = true
+                                }
                             }
                         }
                     }
@@ -363,6 +335,7 @@ class AniKageProvider : MainAPI() {
             }
         }
 
+        // Direct stream fallback
         if (!found) {
             try {
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
@@ -373,8 +346,8 @@ class AniKageProvider : MainAPI() {
                     
                     callback(
                         newExtractorLink(
-                            source = "AniKage",
-                            name = "Direct",
+                            source = "Vidtube",
+                            name = "Vidtube Direct",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
