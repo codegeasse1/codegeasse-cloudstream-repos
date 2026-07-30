@@ -233,7 +233,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (With M3U8 Master Playlist Extractor)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -272,10 +272,10 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-        // Clean headers for Video Streams ONLY
-        val videoHeaders = mapOf(
+        val standardHeaders = mapOf(
             "Origin" to mainUrl,
             "Referer" to "$mainUrl/",
+            "Accept" to "*/*",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
@@ -293,35 +293,61 @@ class AniKageProvider : MainAPI() {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
                         
-                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                        // We check for .m3u to catch those vibevibe worker playlists you found
+                        val isDirectM3u8 = cleanUrl.contains(".m3u") || cleanUrl.contains("/m3u8/")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val isVidtube = provider == "vibeube"
-                            val isMegaPlay = provider == "megatube"
+                            val serverName = "${provider.uppercase()} ($lang)"
                             
-                            val sourceGroup = when {
-                                isVidtube -> "1. Vidtube"
-                                isMegaPlay -> "2. MegaPlay"
-                                else -> "3. ${provider.uppercase()}"
+                            // If it's an M3U8, parse it manually to extract 1080p, 720p, etc.
+                            if (isDirectM3u8 || isKnownHost) {
+                                try {
+                                    val m3u8Links = M3u8Helper.generateM3u8(
+                                        source = serverName,
+                                        url = cleanUrl,
+                                        referer = "$mainUrl/",
+                                        headers = standardHeaders
+                                    )
+                                    
+                                    if (m3u8Links.isNotEmpty()) {
+                                        m3u8Links.forEach { link ->
+                                            callback(
+                                                newExtractorLink(
+                                                    source = link.source,
+                                                    name = link.name,
+                                                    url = link.url,
+                                                    type = ExtractorLinkType.M3U8
+                                                ) {
+                                                    this.quality = link.quality
+                                                    this.headers = standardHeaders
+                                                }
+                                            )
+                                        }
+                                        found = true
+                                        continue
+                                    }
+                                } catch (e: Exception) {
+                                    // Let it fall through to the raw link fallback below if parsing fails
+                                }
                             }
                             
+                            // Fallback for raw streams that couldn't be parsed
                             callback(
                                 newExtractorLink(
-                                    source = sourceGroup,
-                                    name = "${provider.uppercase()} ($lang)",
+                                    source = "AniKage",
+                                    name = "AniKage - $serverName",
                                     url = cleanUrl,
-                                    type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    type = if (isDirectM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.quality = Qualities.Unknown.value
-                                    this.headers = videoHeaders
+                                    this.headers = standardHeaders
                                 }
                             )
                             found = true
-                        } else if (cleanUrl.startsWith("http")) {
                             
-                            // SAFE COLLECTION: Do not call suspend functions inside this lambda
+                        } else if (cleanUrl.startsWith("http")) {
                             val extractedLinks = mutableListOf<ExtractorLink>()
                             
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
@@ -330,56 +356,60 @@ class AniKageProvider : MainAPI() {
                                 found = true
                             }
                             
-                            // Iterate in the coroutine-safe block
                             for (link in extractedLinks) {
-                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
-                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
-                                
-                                val sourceGroup = when {
-                                    isVidtube -> "1. Vidtube"
-                                    isMegaPlay -> "2. MegaPlay"
-                                    else -> "3. ${link.source}"
-                                }
-
-                                callback(
-                                    newExtractorLink(
-                                        source = sourceGroup,
-                                        name = link.name.replace("[1] ", "").replace("[2] ", ""), 
-                                        url = link.url,
-                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.quality = link.quality
-                                        this.headers = link.headers
-                                        this.extractorData = link.extractorData
-                                        this.referer = link.referer
-                                    }
-                                )
+                                callback(link)
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    // Ignore missing endpoints quietly
+                    // Ignore endpoints quietly
                 }
             }
         }
 
+        // Direct stream fallback from the main page source
         if (!found) {
             try {
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
                 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/")
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains(".m3u")
+                    
+                    if (isM3u8) {
+                        try {
+                            M3u8Helper.generateM3u8(
+                                source = "Direct Stream",
+                                url = extractedUrl,
+                                referer = "$mainUrl/",
+                                headers = standardHeaders
+                            ).forEach { link ->
+                                callback(
+                                    newExtractorLink(
+                                        source = "AniKage",
+                                        name = link.name,
+                                        url = link.url,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.quality = link.quality
+                                        this.headers = standardHeaders
+                                    }
+                                )
+                            }
+                            found = true
+                            continue
+                        } catch (e: Exception) {}
+                    }
                     
                     callback(
                         newExtractorLink(
-                            source = "3. Direct",
-                            name = "Direct",
+                            source = "AniKage",
+                            name = "AniKage - Direct",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             quality = Qualities.Unknown.value
-                            headers = videoHeaders
+                            headers = standardHeaders
                         }
                     )
                     found = true
