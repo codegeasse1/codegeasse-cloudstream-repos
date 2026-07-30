@@ -169,7 +169,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Fully Stable API Probing)
+    // LOAD LINKS (Smart API Filtering)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -184,26 +184,44 @@ class AniKageProvider : MainAPI() {
             ?: Regex("""/(\d+)""").find(cleanData)?.groupValues?.get(1)
             ?: "1"
 
-        // The exact master list of servers and embeds you found
-        val providers = listOf("", "neko", "ken", "miko", "megg", "dib", "wave", "koto", "vibeube", "megatube", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-koto", "e-wish")
-        val langs = listOf("sub", "dub")
+        // Fetch the episode HTML page to analyze what servers are actually rendered on it
+        val html = app.get(cleanData).text
+        val cleanHtml = html.replace("\\/", "/")
+
+        val knownProviders = listOf("neko", "ken", "miko", "megg", "dib", "wave", "koto", "vibeube", "megatube", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-koto", "e-wish")
+        
+        // Smart Filter: Only test providers that appear textually in the HTML payload
+        val activeProviders = knownProviders.filter { provider ->
+            cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
+            cleanHtml.contains("provider=$provider", ignoreCase = true) ||
+            cleanHtml.contains("-$provider", ignoreCase = true) ||
+            cleanHtml.contains(">$provider<", ignoreCase = true)
+        }.toMutableList()
+
+        // Absolute fallback if parsing fails: Check the most common ones
+        if (activeProviders.isEmpty()) {
+            activeProviders.addAll(listOf("neko", "ken", "miko", "vibe", "koto"))
+        }
+
+        // Check for Dubs if the page mentions it, otherwise default to sub
+        val langs = mutableListOf("sub")
+        if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
+            langs.add("dub")
+        }
 
         val standardHeaders = mapOf(
             "Origin" to mainUrl,
             "Referer" to "$mainUrl/",
+            "Accept" to "application/json",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
-        // Exclude domains that definitely aren't videos
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
+        // Hit the endpoints (Now only 2-6 requests instead of 34, stopping timeouts!)
         for (lang in langs) {
-            for (provider in providers) {
-                val apiUrl = if (provider.isEmpty()) {
-                    "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?lang=$lang"
-                } else {
-                    "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
-                }
+            for (provider in activeProviders) {
+                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
@@ -217,7 +235,7 @@ class AniKageProvider : MainAPI() {
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val serverName = if (provider.isEmpty()) "Default ($lang)" else "${provider.uppercase()} ($lang)"
+                            val serverName = "${provider.uppercase()} ($lang)"
                             
                             callback(
                                 newExtractorLink(
@@ -238,17 +256,14 @@ class AniKageProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Endpoint doesn't exist for this specific anime/provider combo; safely ignored.
+                    // Ignore missing endpoints quietly
                 }
             }
         }
 
-        // Ultimate fallback to parse the HTML page if API fails entirely
+        // Secondary fallback to grab any streams directly baked into the page source
         if (!found) {
             try {
-                val html = app.get(cleanData).text
-                val cleanHtml = html.replace("\\/", "/")
-
                 Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).forEach { match ->
                     val extractedUrl = match.value
                     val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/")
