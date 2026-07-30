@@ -97,8 +97,9 @@ class AniKageProvider : MainAPI() {
 
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-            val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             
+            // Handle JSON response payload
+            val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
                 val slug = part.substringBefore("\"").replace("\\", "")
@@ -106,6 +107,7 @@ class AniKageProvider : MainAPI() {
 
                 val window = part.take(2000)
 
+                // Extract Title from JSON
                 var title = ""
                 val titleBlock = window.substringAfter("\"title\":", "").substringBefore("}")
                 if (titleBlock.contains("\"english\":")) {
@@ -124,8 +126,10 @@ class AniKageProvider : MainAPI() {
                     title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
                 }
 
+                // Clean title escaped characters
                 title = title.replace("\\\"", "\"").replace("\\/", "/")
 
+                // Extract Poster from JSON
                 var poster = ""
                 val coverBlock = window.substringAfter("\"coverImage\":", "").substringBefore("}")
                 if (coverBlock.contains("\"extraLarge\":")) {
@@ -151,6 +155,7 @@ class AniKageProvider : MainAPI() {
             e.printStackTrace()
         }
 
+        // Fallback: Check script tags in browse HTML if API returns empty
         if (items.isEmpty()) {
             try {
                 val html = app.get("$mainUrl/browse?search=$query").text
@@ -233,7 +238,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Clean Micro-Offset Sorting)
+    // LOAD LINKS (Vidtube prioritized first)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -300,11 +305,10 @@ class AniKageProvider : MainAPI() {
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val serverName = "${provider.uppercase()} ($lang)"
                             
-                            // Micro-offsets keep quality tags clean (1080p, 720p) while putting Vidtube first
                             val sortQuality = when (provider) {
-                                "vibeube" -> Qualities.P1080.value + 2
-                                "megatube" -> Qualities.P1080.value - 2
-                                else -> Qualities.P720.value
+                                "vibeube" -> Qualities.Unknown.value + 200
+                                "megatube" -> Qualities.Unknown.value + 100
+                                else -> Qualities.Unknown.value
                             }
                             
                             callback(
@@ -333,8 +337,8 @@ class AniKageProvider : MainAPI() {
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
                                 
                                 val sortQuality = when {
-                                    isVidtube -> link.quality + 2
-                                    isMegaPlay -> link.quality - 2
+                                    isVidtube -> link.quality + 200
+                                    isMegaPlay -> link.quality + 100
                                     else -> link.quality
                                 }
 
@@ -375,7 +379,7 @@ class AniKageProvider : MainAPI() {
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
-                            quality = Qualities.P720.value
+                            quality = Qualities.Unknown.value
                             headers = standardHeaders
                         }
                     )
