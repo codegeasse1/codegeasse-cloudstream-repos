@@ -272,10 +272,9 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
+       // Minimal headers to avoid triggering CORS/403 blocks on Cloudflare Workers
         val standardHeaders = mapOf(
-            "Origin" to mainUrl,
             "Referer" to "$mainUrl/",
-            "Accept" to "*/*",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
