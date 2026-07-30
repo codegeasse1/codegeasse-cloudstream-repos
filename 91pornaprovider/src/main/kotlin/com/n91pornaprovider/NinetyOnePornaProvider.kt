@@ -35,7 +35,21 @@ class NinetyOnePornaProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        *homeSections.map { it.first to it.second }.toTypedArray()
+        "黑料吃瓜" to "/黑料吃瓜/推荐",
+        "推荐给您" to "/comic/index/video?category=now_month_hot",
+        "正在播放" to "/comic/index/video?category=play",
+        "最近更新" to "/comic/index/video?category=new_update",
+        "乱伦" to "/comic/index/search?keyword=乱伦",
+        "熟女" to "/comic/index/search?keyword=熟女",
+        "萝莉" to "/comic/index/search?keyword=萝莉",
+        "动漫" to "/comic/index/search?keyword=动漫",
+        "黑人" to "/comic/index/search?keyword=黑人",
+        "巨乳" to "/comic/index/search?keyword=巨乳",
+        "调教" to "/comic/index/search?keyword=调教",
+        "换妻" to "/comic/index/search?keyword=换妻",
+        "内射" to "/comic/index/search?keyword=内射",
+        "按摩" to "/comic/index/search?keyword=按摩",
+        "吃瓜黑料" to "/comic/index/search?keyword=吃瓜+黑料+爆料+明星+网红"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
