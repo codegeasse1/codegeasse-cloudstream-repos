@@ -134,7 +134,7 @@ class AnimeXProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Hits correct API for episodes & fixes missing Plot/Poster)
+    // LOAD
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val slug = url.substringAfterLast("/")
@@ -171,7 +171,7 @@ class AnimeXProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
         
-        // 4. API Episode Generation (Fixes "1 Episode" Bug)
+        // 4. API Episode Generation
         try {
             val epApiUrl = "https://pp.animex.one/rest/api/episodes?id=$slug"
             val epJson = app.get(epApiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
@@ -194,7 +194,7 @@ class AnimeXProvider : MainAPI() {
             e.printStackTrace()
         }
         
-        // Fallback to DOM if API fails or blocks
+        // Fallback to DOM if API fails
         if (episodes.isEmpty()) {
             document.select("a[href*=/watch/]").forEach { a ->
                 val epHref = fixUrlNull(a.attr("href")) ?: return@forEach
@@ -214,12 +214,12 @@ class AnimeXProvider : MainAPI() {
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
-            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.episode }) // Prevents duplicates
+            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.episode })
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Hits the 2-step API to unlock m3u8 streams)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -266,27 +266,31 @@ class AnimeXProvider : MainAPI() {
                         val videoUrl = urlMatch.groupValues[1].replace("\\/", "/")
                         
                         if (videoUrl.contains(".m3u8") || videoUrl.contains(".m3u")) {
+                            // FIXED SYNTAX: Quality and Referer moved inside lambda block
                             callback(
                                 newExtractorLink(
                                     source = "AnimeX",
                                     name = "$serverName ($type)",
                                     url = videoUrl,
-                                    referer = "$mainUrl/",
-                                    quality = Qualities.Unknown.value,
                                     type = ExtractorLinkType.M3U8
-                                )
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.referer = "$mainUrl/"
+                                }
                             )
                             found = true
                         } else if (videoUrl.contains(".mp4")) {
+                            // FIXED SYNTAX: Quality and Referer moved inside lambda block
                             callback(
                                 newExtractorLink(
                                     source = "AnimeX",
                                     name = "$serverName ($type)",
                                     url = videoUrl,
-                                    referer = "$mainUrl/",
-                                    quality = Qualities.Unknown.value,
                                     type = ExtractorLinkType.VIDEO
-                                )
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.referer = "$mainUrl/"
+                                }
                             )
                             found = true
                         }
