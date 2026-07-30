@@ -243,7 +243,7 @@ class AnimeXProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (UPDATED – JSON array parsing, iframe fallback)
+    // LOAD LINKS (FIXED – subtitle extraction without file variable reference)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -322,7 +322,7 @@ class AnimeXProvider : MainAPI() {
                     val sourceObj = sourcesArray.getJSONObject(j)
                     val subFile = sourceObj.optString("file", "")
                     val label = sourceObj.optString("label", "")
-                    if (subFile.endsWith(".vtt") && label.isNotBlank() && subFile != file) {
+                    if (subFile.endsWith(".vtt") && label.isNotBlank()) {
                         subtitleCallback(SubtitleFile(label, subFile))
                     }
                 }
