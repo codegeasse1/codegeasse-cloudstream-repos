@@ -180,7 +180,6 @@ class AniKageProvider : MainAPI() {
         var html = app.get(data).text
         var found = extractLinksFromHtml(html, data, subtitleCallback, callback)
         
-        // Fail-safe URL swap: if ?ep=1 fails, retry instantly with /1
         if (!found && data.contains("?ep=")) {
             val altUrl = data.replace("?ep=", "/")
             html = app.get(altUrl).text
@@ -202,7 +201,17 @@ class AniKageProvider : MainAPI() {
         // 1. Direct Hit: Check for the exact anicore proxy URL format
         Regex("""(https?://(?:prox\.anicore\.tv|prox\.anikage\.cc)/m3u8/[a-zA-Z0-9_=-]+)""").findAll(scriptData).forEach { match ->
             val extractedUrl = match.groupValues[1]
-            callback(newExtractorLink("AniKage", "AniKage HD", extractedUrl, mainUrl, Qualities.Unknown.value, true))
+            callback(
+                newExtractorLink(
+                    source = "AniKage",
+                    name = "AniKage HD",
+                    url = extractedUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    quality = Qualities.Unknown.value
+                    referer = mainUrl
+                }
+            )
             found = true
         }
 
@@ -211,7 +220,17 @@ class AniKageProvider : MainAPI() {
             Regex("""(?:source|id|file|url|token|hash)"?\s*:\s*"([a-zA-Z0-9_=-]{40,})"""").findAll(scriptData).forEach { match ->
                 val token = match.groupValues[1]
                 val constructedUrl = "https://prox.anicore.tv/m3u8/$token"
-                callback(newExtractorLink("AniKage", "AniKage HD", constructedUrl, mainUrl, Qualities.Unknown.value, true))
+                callback(
+                    newExtractorLink(
+                        source = "AniKage",
+                        name = "AniKage HD",
+                        url = constructedUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        quality = Qualities.Unknown.value
+                        referer = mainUrl
+                    }
+                )
                 found = true
             }
         }
@@ -224,7 +243,18 @@ class AniKageProvider : MainAPI() {
                     if (loadExtractor(extractedUrl, data, subtitleCallback, callback)) {
                         found = true
                     } else if (extractedUrl.contains(".m3u8") || extractedUrl.contains(".mp4")) {
-                        callback(newExtractorLink("AniKage", "AniKage Server", extractedUrl, mainUrl, Qualities.Unknown.value, extractedUrl.contains(".m3u8")))
+                        val isM3u8 = extractedUrl.contains(".m3u8")
+                        callback(
+                            newExtractorLink(
+                                source = "AniKage",
+                                name = "AniKage Server",
+                                url = extractedUrl,
+                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                quality = Qualities.Unknown.value
+                                referer = mainUrl
+                            }
+                        )
                         found = true
                     }
                 }
