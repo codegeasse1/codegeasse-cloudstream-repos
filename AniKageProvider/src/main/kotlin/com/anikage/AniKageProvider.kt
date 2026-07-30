@@ -89,7 +89,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (Hits direct API endpoint: /api/media/anime/search)
+    // SEARCH 
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
@@ -98,7 +98,6 @@ class AniKageProvider : MainAPI() {
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
             
-            // Handle JSON response payload
             val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
@@ -107,7 +106,6 @@ class AniKageProvider : MainAPI() {
 
                 val window = part.take(2000)
 
-                // Extract Title from JSON
                 var title = ""
                 val titleBlock = window.substringAfter("\"title\":", "").substringBefore("}")
                 if (titleBlock.contains("\"english\":")) {
@@ -126,10 +124,8 @@ class AniKageProvider : MainAPI() {
                     title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
                 }
 
-                // Clean title escaped characters
                 title = title.replace("\\\"", "\"").replace("\\/", "/")
 
-                // Extract Poster from JSON
                 var poster = ""
                 val coverBlock = window.substringAfter("\"coverImage\":", "").substringBefore("}")
                 if (coverBlock.contains("\"extraLarge\":")) {
@@ -155,7 +151,6 @@ class AniKageProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // Fallback: Check script tags in browse HTML if API returns empty
         if (items.isEmpty()) {
             try {
                 val html = app.get("$mainUrl/browse?search=$query").text
@@ -238,7 +233,7 @@ class AniKageProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Forced Identical Source Override for Vidtube)
+    // LOAD LINKS (Forced A-Z Source Grouping for Absolute Sorting)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -277,7 +272,14 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-        // Clean headers for Video Streams ONLY (No JSON Accept header to prevent ExoPlayer rejection)
+        val standardHeaders = mapOf(
+            "Origin" to mainUrl,
+            "Referer" to "$mainUrl/",
+            "Accept" to "application/json",
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        
+        // Clean headers for Video Streams ONLY (Prevents ExoPlayer rejection)
         val videoHeaders = mapOf(
             "Origin" to mainUrl,
             "Referer" to "$mainUrl/",
@@ -303,18 +305,20 @@ class AniKageProvider : MainAPI() {
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val serverName = "${provider.uppercase()} ($lang)"
+                            val isVidtube = provider == "vibeube"
+                            val isMegaPlay = provider == "megatube"
                             
-                            val sortedName = when (provider) {
-                                "vibeube" -> "[1] $serverName"
-                                "megatube" -> "[2] $serverName"
-                                else -> serverName
+                            // Hacks CloudStream's A-Z Source Sorting to guarantee exact placement
+                            val sourceGroup = when {
+                                isVidtube -> "1. Vidtube"
+                                isMegaPlay -> "2. MegaPlay"
+                                else -> "3. ${provider.uppercase()}"
                             }
                             
                             callback(
                                 newExtractorLink(
-                                    source = "AniKage", // FORCE IDENTICAL SOURCE TO BYPASS ALPHABETICAL TIEBREAKER
-                                    name = sortedName,
+                                    source = sourceGroup,
+                                    name = "${provider.uppercase()} ($lang)",
                                     url = cleanUrl,
                                     type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
@@ -324,28 +328,22 @@ class AniKageProvider : MainAPI() {
                             )
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
-                            val extractedLinks = mutableListOf<ExtractorLink>()
                             
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
-                                extractedLinks.add(link)
-                            }) {
-                                found = true
-                            }
-                            
-                            for (link in extractedLinks) {
                                 val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
                                 
-                                val sortedName = when {
-                                    isVidtube && !link.name.startsWith("[1]") -> "[1] ${link.name}"
-                                    isMegaPlay && !link.name.startsWith("[2]") -> "[2] ${link.name}"
-                                    else -> link.name
+                                // Hacks CloudStream's A-Z Source Sorting to guarantee exact placement
+                                val sourceGroup = when {
+                                    isVidtube -> "1. Vidtube"
+                                    isMegaPlay -> "2. MegaPlay"
+                                    else -> "3. ${link.source}"
                                 }
 
                                 callback(
                                     newExtractorLink(
-                                        source = "AniKage", // FORCE IDENTICAL SOURCE TO BYPASS ALPHABETICAL TIEBREAKER
-                                        name = sortedName,
+                                        source = sourceGroup,
+                                        name = link.name.replace("[1] ", "").replace("[2] ", ""), // cleans up old tags
                                         url = link.url,
                                         type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
@@ -355,6 +353,8 @@ class AniKageProvider : MainAPI() {
                                         this.referer = link.referer
                                     }
                                 )
+                            }) {
+                                found = true
                             }
                         }
                     }
@@ -374,8 +374,8 @@ class AniKageProvider : MainAPI() {
                     
                     callback(
                         newExtractorLink(
-                            source = "AniKage",
-                            name = "AniKage - Direct",
+                            source = "3. Direct",
+                            name = "Direct",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
