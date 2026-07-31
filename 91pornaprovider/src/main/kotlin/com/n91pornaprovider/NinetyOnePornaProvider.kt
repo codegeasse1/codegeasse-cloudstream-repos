@@ -15,7 +15,7 @@ class NinetyOnePornaProvider : MainAPI() {
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.NSFW)
 
-    // Mimic a real browser to bypass Cloudflare and API blocks
+    // Critical: These headers mimic a real browser to bypass Cloudflare and CDN Hotlink protections
     private val defaultHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer" to "$mainUrl/",
@@ -44,12 +44,12 @@ class NinetyOnePornaProvider : MainAPI() {
         *homeSections.toTypedArray()
     )
 
-    // Universal aggressive extraction to bypass the broken HTML layout
+    // Unbreakable item parser designed to bypass duration badges and capture CDN tokens
     private fun parseVideoItems(htmlData: String): List<SearchResponse> {
         val doc = Jsoup.parse(htmlData)
         val items = mutableListOf<SearchResponse>()
         
-        // Grab ANY link that points to a video player
+        // Grab ANY link that points to a valid video/detail page
         val videoLinks = doc.select("a[href*=/detail?video_key=], a[href*=/avdetail], a[href*=/video/]")
         
         for (aTag in videoLinks) {
@@ -57,37 +57,41 @@ class NinetyOnePornaProvider : MainAPI() {
             val fullHref = fixUrl(href)
             if (fullHref.isBlank()) continue
 
-            // Climb the DOM tree slightly to capture the container holding the image and title
-            val container = aTag.parent()?.parent() ?: aTag
+            // Climb the DOM tree to find the outermost card container
+            val container = aTag.closest("li") ?: aTag.closest(".video-item") ?: aTag.parent() ?: continue
             val containerHtml = container.outerHtml()
 
-            // 1. Aggressive Image Hunt (Preserves the crucial ?auth_key= tokens)
-            var poster = container.selectFirst("img")?.let { img ->
-                img.attr("data-src").takeIf { it.isNotBlank() }
-                    ?: img.attr("data-original").takeIf { it.isNotBlank() }
-                    ?: img.attr("src").takeIf { it.isNotBlank() }
-            } ?: Regex("""https?://[^"'\s<>]+\.(?:jpeg|jpg|png|webp|gif)[^"'\s<>]*""").find(containerHtml)?.value ?: ""
-
-            // 2. Aggressive Title Hunt (Bypasses the "30:14" text bug)
-            var title = aTag.attr("title").takeIf { it.isNotBlank() }
-                ?: container.selectFirst("img")?.attr("alt")?.takeIf { it.isNotBlank() }
-                ?: container.selectFirst(".title, h1, h2, h3, h4, .video-title, .line-clamp-2")?.text()?.takeIf { it.isNotBlank() }
-                ?: container.text()
-
-            // Obliterate video durations (e.g., 30:14, 1:20:05) from the title
-            title = title.replace(Regex("""\b\d{1,2}:\d{2}(?::\d{2})?\b"""), "").trim()
+            // 1. Poster Hunt: Prioritize CDN images with ?auth_key tokens to prevent blank images
+            var poster = Regex("""https?://[^\s"'<>]+\.(?:jpeg|jpg|png|webp)[^\s"'<>]*\?auth_key=[^\s"'<>]+""").find(containerHtml)?.value
             
-            // Filter out obvious Casino/Gambling ads (PG棋牌)
+            if (poster == null) {
+                val img = container.selectFirst("img")
+                poster = img?.attr("data-src").takeIf { !it.isNullOrBlank() }
+                    ?: img?.attr("data-original").takeIf { !it.isNullOrBlank() }
+                    ?: img?.attr("src").takeIf { !it.isNullOrBlank() }
+                    ?: Regex("""url\(['"]?(https?://[^'"]+)['"]?\)""").find(containerHtml)?.groupValues?.get(1)
+                    ?: ""
+            }
+
+            // 2. Title Hunt: Excludes duration badges (30:14) by targeting specific text nodes
+            var title = container.selectFirst(".title, .video-title, h1, h2, h3, h4, .line-clamp-2")?.text()?.trim()
+            if (title.isNullOrBlank()) title = container.selectFirst("img")?.attr("alt")?.trim()
+            if (title.isNullOrBlank()) title = aTag.attr("title").trim()
+            if (title.isNullOrBlank()) {
+                title = container.text().replace(Regex("""\d{1,2}:\d{2}(?::\d{2})?"""), "").trim()
+            }
+
+            // Filter out obvious Casino/Gambling ads mapping to video links
             if (title.isBlank() || title.contains("棋牌") || title.contains("赌场") || title.contains("PG")) continue
 
             items.add(
                 newMovieSearchResponse(title, fullHref, TvType.NSFW) {
                     this.posterUrl = fixUrl(poster)
+                    this.posterHeaders = defaultHeaders // Fixes the gray square / 403 Forbidden image issue
                 }
             )
         }
         
-        // Remove duplicates in case the image and title both had the same link
         return items.distinctBy { it.url }
     }
 
@@ -110,26 +114,27 @@ class NinetyOnePornaProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val response = app.get(url, headers = defaultHeaders)
-        val html = response.text.replace("\\/", "/") // Unescape JavaScript immediately
+        val html = response.text.replace("\\/", "/") 
 
-        // 1. Unbreakable Title Extraction
+        // 1. Title Extraction
         var title = Regex("""data-video_title\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
             ?: Regex("""<title>([^<]+)</title>""").find(html)?.groupValues?.get(1)?.replace("- 91porna", "")?.trim()
             ?: "No Title"
 
-        // 2. Unbreakable Poster Extraction (Preserves auth_key)
-        var poster = Regex("""meta property=["']og:image["'] content=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+        // 2. Poster Extraction (Preserves auth_key tokens)
+        var poster = Regex("""https?://[^\s"'<>]+\.(?:jpeg|jpg|png|webp)[^\s"'<>]*\?auth_key=[^\s"'<>]+""").find(html)?.value
+            ?: Regex("""meta property=["']og:image["'] content=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
             ?: Regex("""data-poster\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-            ?: Regex("""https?://[^"'\s<>]+\.(?:jpeg|jpg|png|webp)[^"'\s<>]*""").find(html)?.value
             ?: ""
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = fixUrl(poster)
+            this.posterHeaders = defaultHeaders // Applies the Referer header to inside pages as well
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS: Hunts the entire document for encrypted .m3u8 links
+    // LOAD LINKS: Replicates the POST /index/videoEnter request
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -138,17 +143,17 @@ class NinetyOnePornaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val response = app.get(data, headers = defaultHeaders)
-        // Aggressively unescape all JSON and Javascript formatting to reveal hidden links
-        val html = response.text.replace("\\/", "/") 
+        val html = response.text
+        val cleanHtml = html.replace("\\/", "/").replace("&amp;", "&")
         var found = false
 
-        // 1. Hunt directly for ANY .m3u8 link (including those with ?auth_key tokens)
-        val m3u8Matches = Regex("""https?://[^"'\s\[\]\{\}<>]+\.m3u8[^"'\s\[\]\{\}<>]*""").findAll(html).map { it.value }.toList()
+        // 1. DIRECT REGEX HUNT (Catches exposed data-url attributes)
+        val m3u8Matches = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(cleanHtml).map { it.value }.toList()
         for (videoUrl in m3u8Matches) {
             callback(
                 newExtractorLink(
                     source = name,
-                    name = "M3U8 Stream",
+                    name = "Direct Stream",
                     url = videoUrl,
                     type = ExtractorLinkType.M3U8
                 ) {
@@ -159,9 +164,49 @@ class NinetyOnePornaProvider : MainAPI() {
             found = true
         }
 
-        // 2. Fallback Hunt for raw .mp4 or .ts streams
+        // 2. POST API FALLBACK (Executes the exact network request you found in your screenshot)
         if (!found) {
-            val mp4Matches = Regex("""https?://[^"'\s\[\]\{\}<>]+\.(?:mp4|ts)[^"'\s\[\]\{\}<>]*""").findAll(html).map { it.value }.toList()
+            val videoId = Regex("""video_key=([^&"']+)""").find(data)?.groupValues?.get(1)
+                ?: Regex("""data-video_id=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+
+            if (videoId != null) {
+                val apiHeaders = defaultHeaders.toMutableMap()
+                apiHeaders["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+                apiHeaders["X-Requested-With"] = "XMLHttpRequest"
+
+                try {
+                    val postResponse = app.post(
+                        url = "$mainUrl/index/videoEnter",
+                        headers = apiHeaders,
+                        data = mapOf("video_id" to videoId)
+                    ).text
+                    
+                    val postClean = postResponse.replace("\\/", "/").replace("&amp;", "&")
+                    val postM3u8Matches = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(postClean).map { it.value }.toList()
+                    
+                    for (videoUrl in postM3u8Matches) {
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = "API Stream",
+                                url = videoUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.quality = Qualities.Unknown.value
+                                this.referer = "$mainUrl/"
+                            }
+                        )
+                        found = true
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        // 3. MP4 / TS FALLBACK
+        if (!found) {
+            val mp4Matches = Regex("""https?://[^\s"'<>\\]+\.(?:mp4|ts)[^\s"'<>\\]*""").findAll(cleanHtml).map { it.value }.toList()
             for (videoUrl in mp4Matches) {
                 callback(
                     newExtractorLink(
@@ -178,7 +223,7 @@ class NinetyOnePornaProvider : MainAPI() {
             }
         }
 
-        // 3. Subtitle Hunt
+        // 4. SUBTITLE HUNT
         val doc = Jsoup.parse(html)
         doc.select("track[kind=subtitles]").forEach { track ->
             val subUrl = track.attr("src")
@@ -191,8 +236,8 @@ class NinetyOnePornaProvider : MainAPI() {
         return found
     }
 
-    private fun fixUrl(href: String): String {
-        if (href.isBlank() || href.startsWith("blob:")) return ""
+    private fun fixUrl(href: String?): String {
+        if (href.isNullOrBlank() || href.startsWith("blob:")) return ""
         if (href.startsWith("//")) return "https:$href"
         return if (href.startsWith("http")) href else mainUrl + href
     }
