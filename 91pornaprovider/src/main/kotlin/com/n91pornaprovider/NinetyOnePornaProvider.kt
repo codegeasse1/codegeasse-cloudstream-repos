@@ -15,10 +15,11 @@ class NinetyOnePornaProvider : MainAPI() {
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.NSFW)
 
-    // Using browser headers prevents the site from blocking the scraper and returning blank pages
+    // Mimic a real browser to bypass Cloudflare and API blocks
     private val defaultHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer" to "$mainUrl/"
+        "Referer" to "$mainUrl/",
+        "Accept-Language" to "en-US,en;q=0.9"
     )
 
     private val homeSections = listOf(
@@ -43,32 +44,41 @@ class NinetyOnePornaProvider : MainAPI() {
         *homeSections.toTypedArray()
     )
 
-    // Universal parser using aggressive Regex to bypass hidden DOM structures
-    private fun parseVideoItems(elements: List<Element>): List<SearchResponse> {
+    // Universal aggressive extraction to bypass the broken HTML layout
+    private fun parseVideoItems(htmlData: String): List<SearchResponse> {
+        val doc = Jsoup.parse(htmlData)
         val items = mutableListOf<SearchResponse>()
-        for (el in elements) {
-            val html = el.outerHtml()
-            
-            // Extract Link
-            var href = Regex("""href=["']([^"']+)["']""").find(html)?.groupValues?.get(1) ?: continue
-            if (href == "#") continue
+        
+        // Grab ANY link that points to a video player
+        val videoLinks = doc.select("a[href*=/detail?video_key=], a[href*=/avdetail], a[href*=/video/]")
+        
+        for (aTag in videoLinks) {
+            val href = aTag.attr("href")
             val fullHref = fixUrl(href)
-            
-            // 1. Aggressive Image Extraction: Scans all possible lazy-load attributes or raw image links
-            var poster = Regex("""data-(?:src|original|bg)=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-                ?: Regex("""src=["']([^"']+(?:jpeg|jpg|png|webp|gif)[^"']*)["']""").find(html)?.groupValues?.get(1)
-                ?: Regex("""url\(['"]?(https?://[^'"]+)['"]?\)""").find(html)?.groupValues?.get(1)
-                ?: ""
-                
-            // 2. Aggressive Title Extraction: Grabs title/alt tags before falling back to text
-            var title = Regex("""title=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-                ?: Regex("""alt=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-                ?: el.selectFirst(".line-clamp-2, .video-title, h2.post-item-title")?.text()
-                ?: el.text()
+            if (fullHref.isBlank()) continue
 
-            // Clean up false titles like "30:14" durations
-            title = title.replace(Regex("""\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2}"""), "").trim()
-            if (title.isBlank()) continue
+            // Climb the DOM tree slightly to capture the container holding the image and title
+            val container = aTag.parent()?.parent() ?: aTag
+            val containerHtml = container.outerHtml()
+
+            // 1. Aggressive Image Hunt (Preserves the crucial ?auth_key= tokens)
+            var poster = container.selectFirst("img")?.let { img ->
+                img.attr("data-src").takeIf { it.isNotBlank() }
+                    ?: img.attr("data-original").takeIf { it.isNotBlank() }
+                    ?: img.attr("src").takeIf { it.isNotBlank() }
+            } ?: Regex("""https?://[^"'\s<>]+\.(?:jpeg|jpg|png|webp|gif)[^"'\s<>]*""").find(containerHtml)?.value ?: ""
+
+            // 2. Aggressive Title Hunt (Bypasses the "30:14" text bug)
+            var title = aTag.attr("title").takeIf { it.isNotBlank() }
+                ?: container.selectFirst("img")?.attr("alt")?.takeIf { it.isNotBlank() }
+                ?: container.selectFirst(".title, h1, h2, h3, h4, .video-title, .line-clamp-2")?.text()?.takeIf { it.isNotBlank() }
+                ?: container.text()
+
+            // Obliterate video durations (e.g., 30:14, 1:20:05) from the title
+            title = title.replace(Regex("""\b\d{1,2}:\d{2}(?::\d{2})?\b"""), "").trim()
+            
+            // Filter out obvious Casino/Gambling ads (PG棋牌)
+            if (title.isBlank() || title.contains("棋牌") || title.contains("赌场") || title.contains("PG")) continue
 
             items.add(
                 newMovieSearchResponse(title, fullHref, TvType.NSFW) {
@@ -76,18 +86,17 @@ class NinetyOnePornaProvider : MainAPI() {
                 }
             )
         }
-        return items
+        
+        // Remove duplicates in case the image and title both had the same link
+        return items.distinctBy { it.url }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val sectionUrl = homeSections.find { it.first == request.data }?.second ?: return newHomePageResponse(emptyList())
         val url = mainUrl + sectionUrl
         val response = app.get(url, headers = defaultHeaders)
-        val doc = Jsoup.parse(response.text)
-
-        val allItems = doc.select("ul.video-items > li, .video-list > li, article.post-item, .video-item").toList()
-        val parsedItems = parseVideoItems(allItems)
-
+        
+        val parsedItems = parseVideoItems(response.text)
         return newHomePageResponse(listOf(HomePageList(request.data, parsedItems)))
     }
 
@@ -95,24 +104,23 @@ class NinetyOnePornaProvider : MainAPI() {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val url = "$mainUrl/comic/index/search?keyword=$encodedQuery"
         val response = app.get(url, headers = defaultHeaders)
-        val doc = Jsoup.parse(response.text)
-
-        val videoItems = doc.select("ul.video-items > li, .video-list > li, .video-item").toList()
-        return parseVideoItems(videoItems)
+        
+        return parseVideoItems(response.text)
     }
 
     override suspend fun load(url: String): LoadResponse {
         val response = app.get(url, headers = defaultHeaders)
-        val html = response.text
+        val html = response.text.replace("\\/", "/") // Unescape JavaScript immediately
 
-        // 1. Title Extraction: Targets the exact custom attribute you found in the source code
+        // 1. Unbreakable Title Extraction
         var title = Regex("""data-video_title\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-            ?: Jsoup.parse(html).selectFirst("title")?.text()?.replace("- 91porna", "")?.trim() 
+            ?: Regex("""<title>([^<]+)</title>""").find(html)?.groupValues?.get(1)?.replace("- 91porna", "")?.trim()
             ?: "No Title"
 
-        // 2. Poster Extraction: Hunts for meta tags or any valid image link near the player
+        // 2. Unbreakable Poster Extraction (Preserves auth_key)
         var poster = Regex("""meta property=["']og:image["'] content=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
             ?: Regex("""data-poster\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+            ?: Regex("""https?://[^"'\s<>]+\.(?:jpeg|jpg|png|webp)[^"'\s<>]*""").find(html)?.value
             ?: ""
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
@@ -121,7 +129,7 @@ class NinetyOnePornaProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS: Completely overhauled to hunt raw stream links
+    // LOAD LINKS: Hunts the entire document for encrypted .m3u8 links
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -130,18 +138,18 @@ class NinetyOnePornaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val response = app.get(data, headers = defaultHeaders)
-        val html = response.text
+        // Aggressively unescape all JSON and Javascript formatting to reveal hidden links
+        val html = response.text.replace("\\/", "/") 
         var found = false
 
-        // 1. EXTRACT DIRECT M3U8 LINKS
-        // Because the links are buried in 'data-url' attributes and JS blocks, we scan the entire raw HTML.
-        val m3u8Matches = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(html).map { it.value }.toList()
+        // 1. Hunt directly for ANY .m3u8 link (including those with ?auth_key tokens)
+        val m3u8Matches = Regex("""https?://[^"'\s\[\]\{\}<>]+\.m3u8[^"'\s\[\]\{\}<>]*""").findAll(html).map { it.value }.toList()
         for (videoUrl in m3u8Matches) {
             callback(
                 newExtractorLink(
                     source = name,
-                    name = "Direct M3U8",
-                    url = videoUrl.replace("\\/", "/"),
+                    name = "M3U8 Stream",
+                    url = videoUrl,
                     type = ExtractorLinkType.M3U8
                 ) {
                     this.quality = Qualities.Unknown.value
@@ -151,15 +159,15 @@ class NinetyOnePornaProvider : MainAPI() {
             found = true
         }
 
-        // 2. EXTRACT MP4/TS LINKS (Fallback)
+        // 2. Fallback Hunt for raw .mp4 or .ts streams
         if (!found) {
-            val rawVideoMatches = Regex("""https?://[^\s"'<>\\]+\.(?:mp4|ts)[^\s"'<>\\]*""").findAll(html).map { it.value }.toList()
-            for (videoUrl in rawVideoMatches) {
+            val mp4Matches = Regex("""https?://[^"'\s\[\]\{\}<>]+\.(?:mp4|ts)[^"'\s\[\]\{\}<>]*""").findAll(html).map { it.value }.toList()
+            for (videoUrl in mp4Matches) {
                 callback(
                     newExtractorLink(
                         source = name,
                         name = "Direct Stream",
-                        url = videoUrl.replace("\\/", "/"),
+                        url = videoUrl,
                         type = ExtractorLinkType.VIDEO
                     ) {
                         this.quality = Qualities.Unknown.value
@@ -170,7 +178,7 @@ class NinetyOnePornaProvider : MainAPI() {
             }
         }
 
-        // 3. EXTRACT SUBTITLES
+        // 3. Subtitle Hunt
         val doc = Jsoup.parse(html)
         doc.select("track[kind=subtitles]").forEach { track ->
             val subUrl = track.attr("src")
