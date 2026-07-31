@@ -129,74 +129,73 @@ class AniNekoProvider : MainAPI() {
             val fullName = "$serverName ($typeInfo)"
 
             if (serverUrl.isNotBlank()) {
-                // Extract subtitles if passed as URL parameters
+                // Extract subtitles if present in the iframe query params
                 val subUrl = Regex("""[?&](?:sub|c1_file|caption_1)=([^&]+)""").find(serverUrl)?.groupValues?.get(1)
                 if (subUrl != null) {
                     subtitleCallback(newSubtitleFile("English", subUrl))
                 }
 
-                // Map mirror domains to standard extractors
-                if (serverUrl.contains("playmogo.com")) {
-                    serverUrl = serverUrl.replace("playmogo.com", "dood.to")
-                }
-
-                // 1. Attempt native extractor resolution (Doodstream, StreamTape, etc.)
-                if (loadExtractor(serverUrl, data, subtitleCallback, callback)) {
-                    found = true
+                // Standard Doodstream / Playmogo handler
+                if (serverUrl.contains("playmogo.com") || serverUrl.contains("dood")) {
+                    val doodUrl = serverUrl.replace("playmogo.com", "dood.to")
+                    if (loadExtractor(doodUrl, data, subtitleCallback, callback)) {
+                        found = true
+                    }
                 } else {
-                    // 2. Custom unpacker & scraper for HD-1, HD-2, StreamHG, Earnvids
+                    // Custom direct parser for HD-1 (vivibebe), HD-2 (bibiemb), StreamHG (otakuhg), Earnvids (otakuvid)
+                    // Preserves custom server names and injects headers to fix segment buffering
                     try {
-                        val iframeHtml = app.get(serverUrl, referer = "$mainUrl/").text
-                        
-                        // Unpack packed JavaScript obfuscation (StreamHG & Earnvids)
+                        val iframeHeaders = mapOf(
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Referer" to "$mainUrl/"
+                        )
+                        val iframeHtml = app.get(serverUrl, headers = iframeHeaders).text
                         val unpackedHtml = getAndUnpack(iframeHtml) + "\n" + iframeHtml
-                        
-                        // Regex search for direct stream URLs (.m3u8 or .txt)
+
                         val m3u8Matches = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|txt)[^\s"'<>\\]*""")
                             .findAll(unpackedHtml)
-                            .map { it.value }
+                            .map { it.value.replace("\\/", "/") }
                             .distinct()
                             .toList()
 
                         if (m3u8Matches.isNotEmpty()) {
-                            m3u8Matches.forEach { rawUrl ->
-                                val cleanUrl = rawUrl.replace("\\/", "/")
+                            m3u8Matches.forEach { videoUrl ->
                                 callback(
                                     newExtractorLink(
                                         source = name,
                                         name = fullName,
-                                        url = cleanUrl,
+                                        url = videoUrl,
                                         type = ExtractorLinkType.M3U8
                                     ) {
                                         this.quality = Qualities.Unknown.value
                                         this.referer = serverUrl
                                         this.headers = mapOf(
                                             "Referer" to serverUrl,
-                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                            "Origin" to fixUrl(serverUrl).removeSuffix("/")
                                         )
                                     }
                                 )
                                 found = true
                             }
                         } else {
-                            // Fallback: Check JWPlayer / Video object configs
                             val fileMatch = Regex("""(?:file|source|url)["']?\s*:\s*["']([^"']+)["']""")
-                                .find(unpackedHtml)?.groupValues?.get(1)
+                                .find(unpackedHtml)?.groupValues?.get(1)?.replace("\\/", "/")
 
-                            if (fileMatch != null && fileMatch.startsWith("http")) {
-                                val cleanUrl = fileMatch.replace("\\/", "/")
+                            if (!fileMatch.isNullOrBlank() && fileMatch.startsWith("http")) {
                                 callback(
                                     newExtractorLink(
                                         source = name,
                                         name = fullName,
-                                        url = cleanUrl,
-                                        type = if (cleanUrl.contains(".m3u8") || cleanUrl.contains(".txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        url = fileMatch,
+                                        type = if (fileMatch.contains(".m3u8") || fileMatch.contains(".txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
                                         this.quality = Qualities.Unknown.value
                                         this.referer = serverUrl
                                         this.headers = mapOf(
                                             "Referer" to serverUrl,
-                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                            "Origin" to fixUrl(serverUrl).removeSuffix("/")
                                         )
                                     }
                                 )
