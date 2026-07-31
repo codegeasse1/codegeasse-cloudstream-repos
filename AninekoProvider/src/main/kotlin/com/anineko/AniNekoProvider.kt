@@ -122,28 +122,32 @@ class AniNekoProvider : MainAPI() {
         val doc = app.get(data).document
         var found = false
 
-        doc.select(".nv-server-btn").forEach { btn ->
+        // Sort buttons to push HD-1 (vivibebe) to the absolute bottom of the list.
+        // This ensures CloudStream auto-plays HD-2, StreamHG, or Earnvids first.
+        val serverButtons = doc.select(".nv-server-btn").sortedBy { btn ->
+            val sName = btn.ownText().trim()
+            val sUrl = btn.attr("data-video")
+            sName.contains("HD-1", ignoreCase = true) || sUrl.contains("vivibebe", ignoreCase = true)
+        }
+
+        serverButtons.forEach { btn ->
             var serverUrl = btn.attr("data-video")
             val serverName = btn.ownText().trim()
             val typeInfo = btn.selectFirst("span")?.text()?.trim() ?: "SUB"
             val fullName = "$serverName ($typeInfo)"
 
             if (serverUrl.isNotBlank()) {
-                // Extract subtitles if present in the iframe query params
                 val subUrl = Regex("""[?&](?:sub|c1_file|caption_1)=([^&]+)""").find(serverUrl)?.groupValues?.get(1)
                 if (subUrl != null) {
                     subtitleCallback(newSubtitleFile("English", subUrl))
                 }
 
-                // Standard Doodstream / Playmogo handler
                 if (serverUrl.contains("playmogo.com") || serverUrl.contains("dood")) {
                     val doodUrl = serverUrl.replace("playmogo.com", "dood.to")
                     if (loadExtractor(doodUrl, data, subtitleCallback, callback)) {
                         found = true
                     }
                 } else {
-                    // Custom direct parser for HD-1 (vivibebe), HD-2 (bibiemb), StreamHG (otakuhg), Earnvids (otakuvid)
-                    // Preserves custom server names and injects headers to fix segment buffering
                     try {
                         val iframeHeaders = mapOf(
                             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
