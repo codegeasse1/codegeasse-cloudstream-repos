@@ -123,55 +123,81 @@ class AniNekoProvider : MainAPI() {
         var found = false
 
         doc.select(".nv-server-btn").forEach { btn ->
-            val serverUrl = btn.attr("data-video")
+            var serverUrl = btn.attr("data-video")
             val serverName = btn.ownText().trim()
             val typeInfo = btn.selectFirst("span")?.text()?.trim() ?: "SUB"
-            
             val fullName = "$serverName ($typeInfo)"
 
             if (serverUrl.isNotBlank()) {
+                // Extract subtitles if passed as URL parameters
                 val subUrl = Regex("""[?&](?:sub|c1_file|caption_1)=([^&]+)""").find(serverUrl)?.groupValues?.get(1)
                 if (subUrl != null) {
                     subtitleCallback(newSubtitleFile("English", subUrl))
                 }
 
-                if (serverUrl.contains("dood") || serverUrl.contains("playmogo")) {
-                    if (loadExtractor(serverUrl, data, subtitleCallback, callback)) {
-                        found = true
-                    }
+                // Map mirror domains to standard extractors
+                if (serverUrl.contains("playmogo.com")) {
+                    serverUrl = serverUrl.replace("playmogo.com", "dood.to")
+                }
+
+                // 1. Attempt native extractor resolution (Doodstream, StreamTape, etc.)
+                if (loadExtractor(serverUrl, data, subtitleCallback, callback)) {
+                    found = true
                 } else {
+                    // 2. Custom unpacker & scraper for HD-1, HD-2, StreamHG, Earnvids
                     try {
                         val iframeHtml = app.get(serverUrl, referer = "$mainUrl/").text
                         
-                        val m3u8Regex = Regex("""(?:file|source|url)["']?\s*:\s*["']([^"']+\.(?:m3u8|txt)[^"']*)["']""")
-                        val match = m3u8Regex.find(iframeHtml)
+                        // Unpack packed JavaScript obfuscation (StreamHG & Earnvids)
+                        val unpackedHtml = getAndUnpack(iframeHtml) + "\n" + iframeHtml
                         
-                        if (match != null) {
-                            val videoUrl = match.groupValues[1].replace("\\/", "/")
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = fullName,
-                                    url = videoUrl,
-                                    type = if (videoUrl.contains(".m3u8") || videoUrl.contains(".txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.referer = serverUrl
-                                }
-                            )
-                            found = true
-                        } else {
-                            val rawMatch = Regex("""https?://[^"'\s<>]+\.m3u8[^"'\s<>]*""").find(iframeHtml)
-                            if (rawMatch != null) {
+                        // Regex search for direct stream URLs (.m3u8 or .txt)
+                        val m3u8Matches = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|txt)[^\s"'<>\\]*""")
+                            .findAll(unpackedHtml)
+                            .map { it.value }
+                            .distinct()
+                            .toList()
+
+                        if (m3u8Matches.isNotEmpty()) {
+                            m3u8Matches.forEach { rawUrl ->
+                                val cleanUrl = rawUrl.replace("\\/", "/")
                                 callback(
                                     newExtractorLink(
                                         source = name,
                                         name = fullName,
-                                        url = rawMatch.value,
+                                        url = cleanUrl,
                                         type = ExtractorLinkType.M3U8
                                     ) {
                                         this.quality = Qualities.Unknown.value
                                         this.referer = serverUrl
+                                        this.headers = mapOf(
+                                            "Referer" to serverUrl,
+                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                                        )
+                                    }
+                                )
+                                found = true
+                            }
+                        } else {
+                            // Fallback: Check JWPlayer / Video object configs
+                            val fileMatch = Regex("""(?:file|source|url)["']?\s*:\s*["']([^"']+)["']""")
+                                .find(unpackedHtml)?.groupValues?.get(1)
+
+                            if (fileMatch != null && fileMatch.startsWith("http")) {
+                                val cleanUrl = fileMatch.replace("\\/", "/")
+                                callback(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = fullName,
+                                        url = cleanUrl,
+                                        type = if (cleanUrl.contains(".m3u8") || cleanUrl.contains(".txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = Qualities.Unknown.value
+                                        this.referer = serverUrl
+                                        this.headers = mapOf(
+                                            "Referer" to serverUrl,
+                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                                        )
                                     }
                                 )
                                 found = true
