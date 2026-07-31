@@ -72,7 +72,6 @@ class AniNekoProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // The LD+JSON schema states the search path is /browser?keyword=
         val doc = app.get("$mainUrl/browser?keyword=$query").document
         
         return doc.select(".nv-anime-card, .nv-search-item").mapNotNull { card ->
@@ -132,23 +131,19 @@ class AniNekoProvider : MainAPI() {
             val fullName = "$serverName ($typeInfo)"
 
             if (serverUrl.isNotBlank()) {
-                // Extract embedded subtitles from the iframe URL (e.g. ?sub=... or ?caption_1=...)
                 val subUrl = Regex("""[?&](?:sub|c1_file|caption_1)=([^&]+)""").find(serverUrl)?.groupValues?.get(1)
                 if (subUrl != null) {
                     subtitleCallback(SubtitleFile("English", subUrl))
                 }
 
-                // If it's a known extractor (like Doodstream), let CloudStream handle it natively
                 if (serverUrl.contains("dood") || serverUrl.contains("playmogo")) {
                     if (loadExtractor(serverUrl, data, subtitleCallback, callback)) {
                         found = true
                     }
                 } else {
-                    // For custom JWPlayer embeds (vivibebe, otakuhg, bibiemb), fetch the iframe and rip the .m3u8 directly
                     try {
                         val iframeHtml = app.get(serverUrl, referer = "$mainUrl/").text
                         
-                        // Aggressive hunt for Master Playlists in the player configuration
                         val m3u8Regex = Regex("""(?:file|source|url)["']?\s*:\s*["']([^"']+\.(?:m3u8|txt)[^"']*)["']""")
                         val match = m3u8Regex.find(iframeHtml)
                         
@@ -159,16 +154,14 @@ class AniNekoProvider : MainAPI() {
                                     source = name,
                                     name = fullName,
                                     url = videoUrl,
-                                    referer = serverUrl,
-                                    // Sometimes they hide M3U8s as .txt files to avoid detection (Screenshot 358)
-                                    type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    type = if (videoUrl.contains(".m3u8") || videoUrl.contains(".txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.quality = Qualities.Unknown.value
+                                    this.referer = serverUrl // FIXED: Moved inside lambda
                                 }
                             )
                             found = true
                         } else {
-                            // Absolute fallback: Find ANY unquoted m3u8 link in the iframe's DOM
                             val rawMatch = Regex("""https?://[^"'\s<>]+\.m3u8[^"'\s<>]*""").find(iframeHtml)
                             if (rawMatch != null) {
                                 callback(
@@ -176,10 +169,10 @@ class AniNekoProvider : MainAPI() {
                                         source = name,
                                         name = fullName,
                                         url = rawMatch.value,
-                                        referer = serverUrl,
                                         type = ExtractorLinkType.M3U8
                                     ) {
                                         this.quality = Qualities.Unknown.value
+                                        this.referer = serverUrl // FIXED: Moved inside lambda
                                     }
                                 )
                                 found = true
