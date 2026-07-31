@@ -19,7 +19,7 @@ class AniNekoProvider : MainAPI() {
         val doc = app.get(request.data).document
         val homeItems = mutableListOf<HomePageList>()
 
-        // 1. Hero Slider (Featured)
+        // 1. Hero Slider
         val heroItems = doc.select(".nv-hero-slide").mapNotNull { slide ->
             val title = slide.selectFirst(".nv-hero-title")?.text() ?: return@mapNotNull null
             val url = fixUrl(slide.selectFirst(".nv-hero-actions a")?.attr("href") ?: return@mapNotNull null)
@@ -43,7 +43,7 @@ class AniNekoProvider : MainAPI() {
         }
         if (featuredItems.isNotEmpty()) homeItems.add(HomePageList("Featured Anime", featuredItems))
 
-        // 3. Trending List (Sidebar)
+        // 3. Trending List
         val trendingItems = doc.select(".nv-trending-list .nv-trending-item").mapNotNull { item ->
             val title = item.selectFirst("strong")?.text() ?: return@mapNotNull null
             val url = fixUrl(item.attr("href"))
@@ -55,7 +55,7 @@ class AniNekoProvider : MainAPI() {
         }
         if (trendingItems.isNotEmpty()) homeItems.add(HomePageList("Top Trending", trendingItems))
 
-        // 4. Latest Updates (Sidebar)
+        // 4. Latest Updates
         val latestItems = doc.select(".nv-latest-list .nv-latest-item").mapNotNull { item ->
             if (item.hasClass("nv-schedule-sidebar-item")) return@mapNotNull null
             val title = item.selectFirst("strong")?.text() ?: return@mapNotNull null
