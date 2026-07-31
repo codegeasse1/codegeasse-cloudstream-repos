@@ -4,30 +4,20 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
+version = 1
+
+cloudstream {
+    description = "AniNeko Extension"
+    authors = listOf("Codegeasse")
+    status = 1
+    tvTypes = listOf("Anime")
+    iconUrl = "https://www.google.com/s2/favicons?domain=anineko.to&sz=%size%"
+}
+
 android {
     namespace = "com.anineko"
     compileSdk = 33
     defaultConfig {
         minSdk = 21
     }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
-    kotlin {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
-            freeCompilerArgs.addAll(
-                listOf(
-                    "-Xno-call-assertions",
-                    "-Xno-param-assertions",
-                    "-Xno-receiver-assertions"
-                )
-            )
-        }
-    }
-}
-
-dependencies {
-    implementation("org.jsoup:jsoup:1.15.4")
 }
