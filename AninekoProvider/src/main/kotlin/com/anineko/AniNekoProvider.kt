@@ -57,7 +57,7 @@ class AniNekoProvider : MainAPI() {
 
         // 4. Latest Updates (Sidebar)
         val latestItems = doc.select(".nv-latest-list .nv-latest-item").mapNotNull { item ->
-            if (item.hasClass("nv-schedule-sidebar-item")) return@mapNotNull null // Skip schedule items
+            if (item.hasClass("nv-schedule-sidebar-item")) return@mapNotNull null
             val title = item.selectFirst("strong")?.text() ?: return@mapNotNull null
             val url = fixUrl(item.attr("href"))
             val poster = item.selectFirst("img")?.attr("src") ?: ""
@@ -95,7 +95,6 @@ class AniNekoProvider : MainAPI() {
             
         val plot = doc.selectFirst(".nv-info-desc, .nv-info-synopsis p")?.text() ?: ""
         
-        // Parse episodes from the grid
         val episodes = doc.select(".nv-info-episode-item a.nv-info-episode-main, .nv-episode-list a.nv-episode-item").mapNotNull { epNode ->
             val epHref = fixUrl(epNode.attr("href"))
             val epName = epNode.selectFirst("strong")?.text() ?: epNode.text()
@@ -133,7 +132,7 @@ class AniNekoProvider : MainAPI() {
             if (serverUrl.isNotBlank()) {
                 val subUrl = Regex("""[?&](?:sub|c1_file|caption_1)=([^&]+)""").find(serverUrl)?.groupValues?.get(1)
                 if (subUrl != null) {
-                    subtitleCallback(SubtitleFile("English", subUrl))
+                    subtitleCallback(newSubtitleFile("English", subUrl))
                 }
 
                 if (serverUrl.contains("dood") || serverUrl.contains("playmogo")) {
@@ -157,7 +156,7 @@ class AniNekoProvider : MainAPI() {
                                     type = if (videoUrl.contains(".m3u8") || videoUrl.contains(".txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.quality = Qualities.Unknown.value
-                                    this.referer = serverUrl // FIXED: Moved inside lambda
+                                    this.referer = serverUrl
                                 }
                             )
                             found = true
@@ -172,7 +171,7 @@ class AniNekoProvider : MainAPI() {
                                         type = ExtractorLinkType.M3U8
                                     ) {
                                         this.quality = Qualities.Unknown.value
-                                        this.referer = serverUrl // FIXED: Moved inside lambda
+                                        this.referer = serverUrl
                                     }
                                 )
                                 found = true
