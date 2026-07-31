@@ -105,7 +105,7 @@ class NinetyOnePornaProvider : MainAPI() {
         val doc = Jsoup.parse(response.text)
         val html = doc.html()
 
-        // 1. Title Extraction (Uses the exact data-video_title attribute you discovered)
+        // 1. Title Extraction (Uses the exact data-video_title attribute)
         var title = doc.selectFirst("#mse")?.attr("data-video_title")?.takeIf { it.isNotBlank() }
             ?: Regex("""data-video_title\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
             ?: doc.selectFirst("title")?.text()?.replace("- 91porna", "")?.trim() 
@@ -132,7 +132,7 @@ class NinetyOnePornaProvider : MainAPI() {
         val html = doc.html()
         var found = false
 
-        // Extract Video URL (Specifically targets the custom data-url attribute for the xgplayer you found)
+        // Extract Video URL (Specifically targets the custom data-url attribute)
         val videoUrl = doc.selectFirst("div[data-url]")?.attr("data-url")?.takeIf { it.isNotBlank() }
             ?: Regex("""data-url\s*=\s*["'](https?://[^"']+)["']""").find(html)?.groupValues?.get(1)
             ?: Regex("""source\s+src\s*=\s*["'](https?://[^"']+)["']""").find(html)?.groupValues?.get(1)
@@ -145,16 +145,16 @@ class NinetyOnePornaProvider : MainAPI() {
                     source = "91porna",
                     name = "Direct Stream",
                     url = videoUrl,
-                    referer = "$mainUrl/",
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.quality = Qualities.Unknown.value
+                    this.referer = "$mainUrl/" // FIXED: Moved inside the lambda block
                 }
             )
             found = true
         }
 
-        // Subtitle Extraction (Catches the track element you found in the code)
+        // Subtitle Extraction
         doc.select("track[kind=subtitles]").forEach { track ->
             val subUrl = track.attr("src")
             val subLabel = track.attr("label").ifBlank { "Subtitle" }
