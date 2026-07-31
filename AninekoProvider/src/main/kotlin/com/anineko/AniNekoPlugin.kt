@@ -1,11 +1,12 @@
 package com.anineko
 
-import com.lagradost.cloudstream3.plugins.CloudStreamPlugin
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import android.content.Context
 
-@CloudStreamPlugin
-class AniNekoPlugin: Plugin() {
-    override fun load() {
+@CloudstreamPlugin
+class AniNekoPlugin : Plugin() {
+    override fun load(context: Context) {
         registerMainAPI(AniNekoProvider())
     }
 }
