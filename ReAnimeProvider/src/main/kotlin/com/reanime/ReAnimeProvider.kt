@@ -22,7 +22,7 @@ class ReAnimeProvider : MainAPI() {
 
         private const val FLIX = "https://flixcloud.cc"
 
-        /** turn on to get diagnostic entries in the source list */
+        /** diagnostics appear in the SUBTITLE list, never as playable links */
         private const val DEBUG = true
 
         private val UUID_REGEX =
@@ -200,21 +200,6 @@ class ReAnimeProvider : MainAPI() {
     //  LINKS
     // =====================================================================
 
-    // NOTE: must be `suspend` — newExtractorLink is a suspend function
-    private suspend fun note(callback: (ExtractorLink) -> Unit, msg: String) {
-        if (!DEBUG) return
-        callback(
-            newExtractorLink(
-                source = name,
-                name = "DBG ${msg.take(90)}",
-                url = "https://127.0.0.1/none.m3u8",
-                type = ExtractorLinkType.M3U8
-            ) {
-                this.quality = Qualities.Unknown.value
-            }
-        )
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -228,27 +213,46 @@ class ReAnimeProvider : MainAPI() {
         val watchUrl = "$mainUrl/watch/$slug?ep=$epNum"
 
         val seen = hashSetOf<String>()
+        var dbgN = 0
 
-        // NOTE: must be `suspend` — newExtractorLink is a suspend function
+        /** diagnostics go to the subtitle picker so they can never be played */
+        fun dbg(msg: String) {
+            if (!DEBUG) return
+            dbgN++
+            subtitleCallback(SubtitleFile("[$dbgN] ${msg.take(140)}", "https://127.0.0.1/d.vtt"))
+        }
+
+        /** fetch the playlist and find header combo the CDN accepts */
+        suspend fun verify(url: String): Map<String, String>? {
+            val combos = listOf(
+                mapOf("User-Agent" to UA, "Referer" to "$FLIX/", "Origin" to FLIX, "Accept" to "*/*"),
+                mapOf("User-Agent" to UA, "Referer" to "$mainUrl/", "Origin" to mainUrl, "Accept" to "*/*"),
+                mapOf("User-Agent" to UA, "Accept" to "*/*")
+            )
+            var lastPeek = ""
+            for (h in combos) {
+                val body = runCatching { app.get(url, headers = h).text }.getOrNull() ?: continue
+                if (body.trimStart().startsWith("#EXTM3U")) return h
+                lastPeek = body.take(60).replace("\n", " ")
+            }
+            dbg("manifest rejected: $lastPeek")
+            return null
+        }
+
         suspend fun push(rawUrl: String, label: String): Boolean {
             val u = rawUrl.unesc().trim().trimEnd(',', ';', ')', '"', '\'')
             if (u.isBlank() || u.startsWith("blob:") || !seen.add(u)) return false
+            val hdr = verify(u) ?: return false          // never offer a dead link
             callback(
                 newExtractorLink(
                     source = name,
                     name = label,
                     url = u,
-                    type = if (u.contains(".m3u8", true))
-                        ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = "$FLIX/"
+                    this.referer = hdr["Referer"] ?: ""
                     this.quality = Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "User-Agent" to UA,
-                        "Origin"     to FLIX,
-                        "Referer"    to "$FLIX/",
-                        "Accept"     to "*/*"
-                    )
+                    this.headers = hdr
                 }
             )
             return true
@@ -264,95 +268,110 @@ class ReAnimeProvider : MainAPI() {
         }
 
         // -----------------------------------------------------------------
-        // PASS 1 : cheap scrape (works only if the site ever inlines the url)
+        // PASS 1 : plain scrape
         // -----------------------------------------------------------------
         val embeds = linkedSetOf<String>()
         val pageHtml = runCatching {
-            app.get(watchUrl, headers = mapOf(
-                "User-Agent" to UA, "Referer" to "$mainUrl/"
-            )).text.unesc()
+            app.get(watchUrl, headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/"))
+                .text.unesc()
         }.getOrNull() ?: ""
+
+        dbg("html=${pageHtml.length} flix=${pageHtml.contains("flixcloud")}")
 
         if (pageHtml.isNotEmpty()) {
             M3U8_REGEX.findAll(pageHtml).forEach { if (push(it.value, "FlixCloud")) found = true }
             pushSubs(pageHtml)
             FLIX_URL_REGEX.findAll(pageHtml).forEach { m ->
                 val u = m.value
-                if (!u.contains(".m3u8") && !u.contains(".css") &&
-                    !u.contains(".js") && !u.contains(".png") && !u.contains(".jpg")) embeds += u
+                if (!u.contains(".m3u8") && !u.contains(".css") && !u.contains(".js") &&
+                    !u.contains(".png") && !u.contains(".jpg") && !u.contains(".ico")) embeds += u
             }
             Jsoup.parse(pageHtml).select("iframe").forEach { f ->
                 val s = f.attr("src").ifBlank { f.attr("data-src") }
-                if (s.contains("flixcloud")) embeds += fixUrl(s)
+                if (s.isNotBlank()) embeds += fixUrl(s)
             }
         }
         if (found) return true
 
         // -----------------------------------------------------------------
-        // PASS 2 : WebView on the watch page — let the real player load
+        // PASS 2 : WebView, intercept the playlist
         // -----------------------------------------------------------------
         val playScript = """
             (function(){
-              var n = 0;
-              var t = setInterval(function(){
-                if (++n > 20) { clearInterval(t); return; }
-                document.querySelectorAll('video').forEach(function(v){
-                  try { v.muted = true; v.play(); } catch(e){}
-                });
-                var b = document.querySelector(
-                  '.art-state, .art-poster, .play-button, .vjs-big-play-button, [class*=play]');
-                if (b) { try { b.click(); } catch(e){} }
-              }, 700);
+              var n=0;
+              var t=setInterval(function(){
+                if(++n>30){clearInterval(t);return;}
+                var vs=document.getElementsByTagName('video');
+                for(var i=0;i<vs.length;i++){try{vs[i].muted=true;vs[i].play();}catch(e){}}
+                var sel=['.art-poster','.art-state','.vjs-big-play-button',
+                         '.plyr__control--overlaid','[class*=play]','button'];
+                for(var s=0;s<sel.length;s++){
+                  var b=document.querySelector(sel[s]);
+                  if(b){try{b.click();}catch(e){}}
+                }
+              },600);
             })();
         """.trimIndent()
 
-        suspend fun webviewGrab(target: String, label: String): Boolean {
+        suspend fun grab(target: String, pattern: Regex): String? {
             val resolver = runCatching {
                 WebViewResolver(
-                    interceptUrl = Regex("""\.m3u8"""),
-                    additionalUrls = listOf(Regex("""\.m3u8""")),
+                    interceptUrl = pattern,
+                    additionalUrls = listOf(pattern),
+                    userAgent = UA,
                     useOkhttp = false,
                     script = playScript,
-                    timeout = 25_000L
+                    timeout = 40_000L
                 )
-            }.getOrNull() ?: return false
-
+            }.getOrNull() ?: return null
             val res = runCatching {
                 app.get(target, headers = mapOf("User-Agent" to UA),
                     referer = "$mainUrl/", interceptor = resolver)
-            }.getOrNull() ?: return false
-
-            val hit = res.url
-            if (hit.contains(".m3u8", true)) return push(hit, label)
-            return false
+            }.getOrNull() ?: return null
+            return res.url
         }
 
-        if (webviewGrab(watchUrl, "FlixCloud")) return true
-        note(callback, "webview(watch) got nothing; embeds=${embeds.size}")
+        val hit = grab(watchUrl, Regex("""\.m3u8|/_v7/"""))
+        if (hit != null && (hit.contains(".m3u8") || hit.contains("/_v7/"))) {
+            if (push(hit, "FlixCloud")) return true
+        }
+        dbg("wv-watch=${hit?.take(90)} embeds=${embeds.size}")
 
         // -----------------------------------------------------------------
-        // PASS 3 : WebView directly on the flixcloud iframe
+        // PASS 3 : WebView on the flixcloud iframe itself
         // -----------------------------------------------------------------
         for (e in embeds.take(4)) {
-            note(callback, "embed=$e")
-            if (webviewGrab(e, "FlixCloud")) return true
+            dbg("embed=$e")
+            val h2 = grab(e, Regex("""\.m3u8|/_v7/"""))
+            if (h2 != null && (h2.contains(".m3u8") || h2.contains("/_v7/"))) {
+                if (push(h2, "FlixCloud")) return true
+            }
         }
 
         // -----------------------------------------------------------------
-        // PASS 4 : last resort — build embed url from a bare uuid
+        // PASS 4 : build embed url from a bare uuid
         // -----------------------------------------------------------------
         val ids = linkedSetOf<String>()
         Regex("""[?&]vid=([A-Za-z0-9-]{8,})""").find(clean)?.let { ids += it.groupValues[1] }
         if (pageHtml.contains("flixcloud", true))
             UUID_REGEX.findAll(pageHtml).forEach { ids += it.value }
 
-        for (id in ids.take(3)) {
+        for (id in ids.take(2)) {
             for (p in listOf("$FLIX/embed/$id", "$FLIX/e/$id", "$FLIX/v/$id")) {
-                if (webviewGrab(p, "FlixCloud")) return true
+                val h3 = grab(p, Regex("""\.m3u8|/_v7/"""))
+                if (h3 != null && (h3.contains(".m3u8") || h3.contains("/_v7/"))) {
+                    if (push(h3, "FlixCloud")) return true
+                }
             }
         }
 
-        note(callback, "FAILED ids=${ids.joinToString(",").take(70)}")
+        // -----------------------------------------------------------------
+        // PASS 5 : diagnostic sweep — what DOES the page talk to?
+        // -----------------------------------------------------------------
+        val any = grab(watchUrl, Regex("""flixcloud\.cc"""))
+        dbg("any-flix=${any?.take(120)}")
+        dbg("ids=${ids.joinToString(",").take(80)}")
+
         return found
     }
 }
