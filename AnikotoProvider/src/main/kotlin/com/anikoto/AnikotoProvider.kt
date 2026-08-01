@@ -32,12 +32,10 @@ class AnikotoProvider : MainAPI() {
             val a = element.selectFirst("a[href*=/watch/]") ?: element.selectFirst("a") ?: continue
             val url = fixUrlNull(a.attr("href")) ?: continue
             
-            // Prioritize actual header tags over button text like "Play now"
             val title = element.selectFirst("h2.title, h2, .name, .title")?.text()?.trim()
                 ?: element.selectFirst("a.name, a.title, .info a")?.text()?.trim()
                 ?: "Unknown"
 
-            // Fix empty string fallback for data-src vs src
             var poster = element.selectFirst("img")?.attr("data-src")?.ifBlank { null }
                 ?: element.selectFirst("img")?.attr("src")?.ifBlank { null }
 
@@ -84,28 +82,35 @@ class AnikotoProvider : MainAPI() {
         val plot = document.selectFirst(".synopsis .content")?.text()?.trim() ?: ""
 
         val episodes = mutableListOf<Episode>()
-        val slug = url.substringAfter("/watch/").substringBefore("/ep-").substringBefore("?")
         
-        // 1. Check currently released episode badges (Sub/Dub)
-        val releasedSub = document.select(".ep-status.sub span, .meta .sub, span.sub")
-            .mapNotNull { it.text().replace(Regex("[^0-9]"), "").toIntOrNull() }.maxOrNull()
-        val releasedDub = document.select(".ep-status.dub span, .meta .dub, span.dub")
-            .mapNotNull { it.text().replace(Regex("[^0-9]"), "").toIntOrNull() }.maxOrNull()
+        // 1. Parse released episodes directly from the HTML (#w-episodes)
+        var epLinks = document.select("#w-episodes a[href*=/watch/], .episodes a[href*=/watch/], ul.ep-range a")
         
-        var availableEps = listOfNotNull(releasedSub, releasedDub).maxOrNull()
-
-        // 2. Fallback to planned count if released count isn't specified
-        if (availableEps == null || availableEps < 1) {
-            val epsDiv = document.select("div.meta > div").firstOrNull { it.text().startsWith("Episodes:") }
-            val totalPlanned = epsDiv?.text()?.substringAfter("Episodes:")?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
-            availableEps = totalPlanned ?: 1
+        // 2. Fallback: If on details page without #w-episodes, fetch the ep-1 page
+        if (epLinks.isEmpty()) {
+            val slug = url.substringAfter("/watch/").substringBefore("/ep-").substringBefore("?")
+            try {
+                val watchHtml = app.get("$mainUrl/watch/$slug/ep-1").text
+                val watchDoc = Jsoup.parse(watchHtml)
+                epLinks = watchDoc.select("#w-episodes a[href*=/watch/], .episodes a[href*=/watch/], ul.ep-range a")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
 
-        for (i in 1..availableEps) {
+        for (a in epLinks) {
+            val href = fixUrlNull(a.attr("href")) ?: continue
+            val epNum = a.attr("data-num").toIntOrNull() 
+                ?: a.attr("data-slug").toIntOrNull()
+                ?: Regex("""/ep-(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                ?: 1
+            val epName = a.attr("title").ifBlank { "Episode $epNum" }
+            val dataIds = a.attr("data-ids")
+
             episodes.add(
-                newEpisode("$mainUrl/watch/$slug/ep-$i") {
-                    this.name = "Episode $i"
-                    this.episode = i
+                newEpisode("$href#dataids=$dataIds") {
+                    this.name = epName
+                    this.episode = epNum
                 }
             )
         }
@@ -125,13 +130,14 @@ class AnikotoProvider : MainAPI() {
     ): Boolean {
         var found = false
         val cleanData = data.substringBefore("#")
+        val dataIdsFromUrl = if (data.contains("#dataids=")) data.substringAfter("#dataids=") else ""
+
         val html = app.get(cleanData).text
         val document = Jsoup.parse(html)
 
-        val animeId = document.selectFirst("#watch-main")?.attr("data-id") ?: ""
-        val epNum = Regex("""/ep-(\d+)""").find(cleanData)?.groupValues?.get(1) ?: "1"
-
-        if (animeId.isBlank()) return false
+        // Grab data-ids from the current episode element if absent in URL
+        val activeEp = document.selectFirst("#w-episodes a.active, .episodes a.active")
+        val dataIds = dataIdsFromUrl.ifBlank { activeEp?.attr("data-ids") ?: "" }
 
         val ajaxHeaders = mapOf(
             "X-Requested-With" to "XMLHttpRequest",
@@ -139,35 +145,34 @@ class AnikotoProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // Targeted endpoints using Anikoto's exact parameter schema
-        val endpoints = listOf(
-            "$mainUrl/ajax/server/list?manga_id=$animeId&ep=$epNum",
-            "$mainUrl/ajax/server/list?anime_id=$animeId&ep=$epNum",
-            "$mainUrl/ajax/server/list?id=$animeId&ep=$epNum",
-            "$mainUrl/check-server?manga_id=$animeId"
-        )
-
         val linkIds = mutableSetOf<String>()
 
-        for (endpoint in endpoints) {
+        // Call server list API using exact parameter name found in screenshot: servers=
+        if (dataIds.isNotBlank()) {
             try {
-                val res = app.get(endpoint, headers = ajaxHeaders).text
+                val res = app.get("$mainUrl/ajax/server/list?servers=$dataIds", headers = ajaxHeaders).text
+                val doc = Jsoup.parse(if (res.contains("<")) res else JSONObject(res).optString("result", res))
                 
-                // Extract Base64 server IDs (e.g. MTF1dkFtaW9B...)
-                val matches = Regex("""data-(?:link-)?id=["']([^"']+)["']""").findAll(res)
-                for (match in matches) {
-                    linkIds.add(match.groupValues[1])
+                doc.select("li[data-link-id], li[data-id]").forEach { li ->
+                    val id = li.attr("data-link-id").ifBlank { li.attr("data-id") }
+                    if (id.isNotBlank()) linkIds.add(id)
                 }
                 
-                // Direct Base64 match fallback
-                val rawMatches = Regex("""MTF[a-zA-Z0-9+/=]+""").findAll(res)
-                for (match in rawMatches) {
-                    linkIds.add(match.value)
+                if (linkIds.isEmpty()) {
+                    Regex("""data-(?:link-)?id=["']([^"']+)["']""").findAll(res).forEach { m ->
+                        linkIds.add(m.groupValues[1])
+                    }
                 }
-
-                if (linkIds.isNotEmpty()) break
             } catch (e: Exception) {
                 e.printStackTrace()
+            }
+        }
+
+        // Direct iframe fallback from HTML
+        document.select("iframe").forEach { iframe ->
+            val src = iframe.attr("src")
+            if (src.isNotBlank() && src.startsWith("http")) {
+                if (loadExtractor(src, cleanData, subtitleCallback, callback)) found = true
             }
         }
 
@@ -186,19 +191,24 @@ class AnikotoProvider : MainAPI() {
                     ?: json.optString("url")
                 
                 if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
-                    val isMegaplayOrVidtube = streamUrl.contains("megaplay.buzz") || streamUrl.contains("vidtube.site")
+                    val isEmbedServer = streamUrl.contains("megaplay.buzz") || streamUrl.contains("vidtube.site") || streamUrl.contains("mewcdn.online") || streamUrl.contains("kwik")
                     
-                    if (isMegaplayOrVidtube) {
+                    if (isEmbedServer) {
                         val embedHtml = app.get(streamUrl, headers = videoHeaders).text.replace("\\/", "/")
-                        val m3u8Match = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(embedHtml)
+                        val m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(embedHtml)
                         
                         if (m3u8Match != null) {
+                            val mediaUrl = m3u8Match.value
                             callback(
                                 newExtractorLink(
                                     source = "Anikoto",
-                                    name = if (streamUrl.contains("vidtube")) "Vidtube" else "MegaPlay",
-                                    url = m3u8Match.value,
-                                    type = ExtractorLinkType.M3U8
+                                    name = when {
+                                        streamUrl.contains("vidtube") -> "Vidtube"
+                                        streamUrl.contains("megaplay") -> "MegaPlay"
+                                        else -> "Server Stream"
+                                    },
+                                    url = mediaUrl,
+                                    type = if (mediaUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.quality = Qualities.Unknown.value
                                     this.headers = mapOf("Referer" to streamUrl)
