@@ -14,35 +14,7 @@ class ReAnimeProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    private fun parseAnimeArray(jsonArrayStr: String?): List<SearchResponse> {
-        if (jsonArrayStr.isNullOrBlank()) return emptyList()
-        val items = mutableListOf<SearchResponse>()
-        try {
-            val arr = JSONArray(jsonArrayStr)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val id = obj.optString("anime_id")
-                if (id.isBlank()) continue
-                
-                val titleObj = obj.optJSONObject("title")
-                val title = titleObj?.optString("english")?.ifBlank { null }
-                    ?: titleObj?.optString("user_preferred")?.ifBlank { null }
-                    ?: titleObj?.optString("romaji") ?: id
-                    
-                val coverObj = obj.optJSONObject("cover_image")
-                val poster = coverObj?.optString("extra_large")?.ifBlank { null }
-                    ?: coverObj?.optString("large") ?: ""
-                    
-                items.add(newAnimeSearchResponse(title, "$mainUrl/anime/$id", TvType.Anime) {
-                    this.posterUrl = poster.replace("\\/", "/")
-                })
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return items
-    }
-
+    // Extracts SvelteKit arrays even if the keys aren't wrapped in quotes
     private fun extractSectionArray(html: String, key: String): List<SearchResponse> {
         val match = Regex("""["']?$key["']?\s*:\s*\[""").find(html) ?: return emptyList()
         val startIdx = html.indexOf('[', match.range.first)
@@ -148,7 +120,6 @@ class ReAnimeProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val html = app.get(url).text
         val document = Jsoup.parse(html)
-
         val slug = url.substringAfter("/anime/").substringAfter("/watch/").substringBefore("?")
 
         var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
@@ -167,10 +138,13 @@ class ReAnimeProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
-        val aniIdMatch = Regex(""""anilist_id"\s*:\s*(\d+)""").find(html) ?: Regex(""""anilist"\s*:\s*(\d+)""").find(html)
-        val malIdMatch = Regex(""""mal_id"\s*:\s*(\d+)""").find(html) ?: Regex(""""mal"\s*:\s*(\d+)""").find(html)
-        
+        // Extract Anilist ID to use in API calls later
+        val aniIdMatch = Regex(""""anilist_id"\s*:\s*(\d+)""").find(html) 
+            ?: Regex(""""anilist"\s*:\s*(\d+)""").find(html)
         val anilistId = aniIdMatch?.groupValues?.get(1) ?: ""
+
+        val malIdMatch = Regex(""""mal_id"\s*:\s*(\d+)""").find(html) 
+            ?: Regex(""""mal"\s*:\s*(\d+)""").find(html)
         val malId = malIdMatch?.groupValues?.get(1) ?: ""
 
         val episodes = mutableListOf<Episode>()
@@ -247,46 +221,28 @@ class ReAnimeProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // 1. Fetch from Re:Anime Downloads Check API (Direct MP4/M3U8 fallback to bypass encryption)
-        if (aniId.isNotBlank() && malId.isNotBlank()) {
-            try {
-                val dlUrl = "$mainUrl/api/v1/downloads/check?anilist_id=$aniId&mal_id=$malId&episode=$epNum"
-                val dlRes = app.get(dlUrl, headers = videoHeaders).text.replace("\\/", "/")
-                
-                Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(dlRes).forEach { match ->
-                    val streamUrl = match.value
-                    callback(
-                        newExtractorLink(
-                            source = "Re:Anime",
-                            name = "Direct Stream",
-                            url = streamUrl,
-                            type = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.quality = Qualities.Unknown.value
-                            this.headers = videoHeaders
-                        }
-                    )
-                    found = true
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
+        // The hidden Re:Anime APIs that return the M3U8 streams directly
+        val apiEndpoints = mutableListOf<String>()
+        if (aniId.isNotBlank()) apiEndpoints.add("$mainUrl/api/flix/$aniId/$epNum")
+        if (aniId.isNotBlank() && malId.isNotBlank()) apiEndpoints.add("$mainUrl/api/v1/downloads/check?anilist_id=$aniId&mal_id=$malId&episode=$epNum")
 
-        // 2. Fetch encrypted FlixCloud ID from Re:Anime API
-        if (aniId.isNotBlank() && !found) {
+        // 1. Scan the ReAnime APIs for the M3U8 URLs
+        for (apiUrl in apiEndpoints) {
             try {
-                val flixRes = app.get("$mainUrl/api/flix/$aniId/$epNum", headers = videoHeaders).text.replace("\\/", "/")
+                // replace \/ with / to fix escaped JSON URLs
+                val response = app.get(apiUrl, headers = videoHeaders).text.replace("\\/", "/")
                 
-                // First check if the API just returned a raw M3U8 string
-                Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(flixRes).forEach { match ->
+                // Aggressive Regex to find ANY stream link
+                val streamMatches = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(response)
+                
+                for (match in streamMatches) {
                     val streamUrl = match.value
                     callback(
                         newExtractorLink(
                             source = "Re:Anime",
-                            name = "Flix Stream",
+                            name = if (streamUrl.contains("flixcloud", true)) "FlixCloud Server" else "Direct Stream",
                             url = streamUrl,
-                            type = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = if (streamUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.quality = Qualities.Unknown.value
                             this.headers = videoHeaders
@@ -295,40 +251,51 @@ class ReAnimeProvider : MainAPI() {
                     found = true
                 }
 
-                // If not, hunt for the 24-character FlixCloud ID to pass to MegaCloud Extractor
+                // If no direct M3U8 is found, check if it returned the 24-character FlixCloud ID
                 if (!found) {
-                    val idMatch = Regex("""([a-fA-F0-9]{24})""").find(flixRes)
+                    val idMatch = Regex("""([a-fA-F0-9]{24})""").find(response)
                     if (idMatch != null) {
                         val flixId = idMatch.groupValues[1]
-                        val fakeMegaUrl = "https://megacloud.tv/embed-2/e-1/$flixId"
-                        if (loadExtractor(fakeMegaUrl, data, subtitleCallback, callback)) {
-                            found = true
-                        }
+                        loadExtractor("https://flixcloud.cc/embed/$flixId", data, subtitleCallback, callback)
+                        loadExtractor("https://megacloud.tv/embed-2/e-1/$flixId", data, subtitleCallback, callback)
+                        loadExtractor("https://rabbitstream.net/v2/embed-4/$flixId", data, subtitleCallback, callback)
+                        found = true
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+            if (found) break
         }
 
-        // 3. Absolute Fallback: Scan the watch page HTML
+        // 2. Absolute Fallback: Scan the Watch Page HTML
         if (!found) {
             try {
-                val html = app.get(cleanData).text.replace("\\/", "/")
-                Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(html).forEach { match ->
+                val html = app.get(cleanData, headers = videoHeaders).text.replace("\\/", "/")
+                
+                Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(html).forEach { match ->
                     val streamUrl = match.value
                     callback(
                         newExtractorLink(
                             source = "Re:Anime",
                             name = "Fallback Stream",
                             url = streamUrl,
-                            type = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = if (streamUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.quality = Qualities.Unknown.value
                             this.headers = videoHeaders
                         }
                     )
                     found = true
+                }
+                
+                // Extract any embedded player iframes
+                Jsoup.parse(html).select("iframe").forEach { iframe ->
+                    val src = iframe.attr("src")
+                    if (src.isNotBlank() && src.startsWith("http")) {
+                        loadExtractor(src, cleanData, subtitleCallback, callback)
+                        found = true
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
