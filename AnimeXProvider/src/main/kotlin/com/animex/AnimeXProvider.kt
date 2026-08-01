@@ -245,12 +245,12 @@ class AnimeXProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
+// ---------------------------------------------------------------
     // LOAD LINKS
-    // Primary: pp.animex.one providers → sources API, confirmed shape:
-    //   providers:  {"subProviders":[{"id":"beep","default":true,...}],"dubProviders":[...]}
-    //   sources:    {"sources":[{"url":"...m3u8","quality":"auto","type":"video/mpegurl"}],
-    //                "tracks":null or [...], "headers":{"Referer":"..."}}
+    // Confirmed: https://pp.animex.one/rest/api/servers?id=...&epNum=...
+    //   → {"subProviders":[{"id":"beep","default":true,...}],"dubProviders":[...]}
+    // Sources: https://pp.animex.one/rest/api/sources?id=...&epNum=...&type=...&providerId=...
+    //   → {"sources":[{"url":"...m3u8",...}],"tracks":null or [...],"headers":{"Referer":"..."}}
     // Fallback: embedded player_url in the watch page's resolve() block,
     // then any iframe found directly in the DOM.
     // ---------------------------------------------------------------
@@ -276,8 +276,8 @@ class AnimeXProvider : MainAPI() {
         )
 
         try {
-            val providersUrl = "https://pp.animex.one/rest/api/providers?id=$slug&epNum=$epNum"
-            val providersJson = JSONObject(app.get(providersUrl, headers = apiHeaders).text)
+            val serversUrl = "https://pp.animex.one/rest/api/servers?id=$slug&epNum=$epNum"
+            val serversJson = JSONObject(app.get(serversUrl, headers = apiHeaders).text)
 
             suspend fun fetchSources(type: String, providerId: String) {
                 try {
@@ -311,7 +311,6 @@ class AnimeXProvider : MainAPI() {
                         }
                     }
 
-                    // tracks may hold subtitle entries when not null
                     val tracksArray = sourceObj.optJSONArray("tracks")
                     if (tracksArray != null) {
                         for (i in 0 until tracksArray.length()) {
@@ -326,7 +325,7 @@ class AnimeXProvider : MainAPI() {
                 } catch (_: Exception) { }
             }
 
-            val subProviders = providersJson.optJSONArray("subProviders")
+            val subProviders = serversJson.optJSONArray("subProviders")
             if (subProviders != null) {
                 for (i in 0 until subProviders.length()) {
                     val p = subProviders.getJSONObject(i)
@@ -339,7 +338,7 @@ class AnimeXProvider : MainAPI() {
                 }
             }
 
-            val dubProviders = providersJson.optJSONArray("dubProviders")
+            val dubProviders = serversJson.optJSONArray("dubProviders")
             if (dubProviders != null) {
                 for (i in 0 until dubProviders.length()) {
                     val p = dubProviders.getJSONObject(i)
@@ -352,7 +351,6 @@ class AnimeXProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // Fallback: embedded player_url in the watch page's resolve() block
         if (!found) {
             try {
                 val html = app.get(cleanData).text
@@ -374,7 +372,6 @@ class AnimeXProvider : MainAPI() {
             }
         }
 
-        // Final fallback: any iframe embedded directly in the DOM
         if (!found) {
             try {
                 val html = app.get(cleanData).text
@@ -392,4 +389,3 @@ class AnimeXProvider : MainAPI() {
 
         return found
     }
-}
