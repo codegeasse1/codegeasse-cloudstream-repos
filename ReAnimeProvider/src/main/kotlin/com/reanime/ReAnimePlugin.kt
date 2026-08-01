@@ -1,23 +1,12 @@
-plugins {
-    id("com.android.library")
-    id("kotlin-android")
-    id("com.lagradost.cloudstream3.gradle")
-}
+package com.reanime
 
-version = 1
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.Plugin
+import android.content.Context
 
-cloudstream {
-    description = "Re:Anime Extension"
-    authors = listOf("Codegeasse")
-    status = 1
-    tvTypes = listOf("Anime")
-    iconUrl = "https://www.google.com/s2/favicons?domain=reanime.to&sz=%size%"
-}
-
-android {
-    namespace = "com.reanime"
-    compileSdk = 33
-    defaultConfig {
-        minSdk = 21
+@CloudstreamPlugin
+class ReAnimePlugin : Plugin() {
+    override fun load(context: Context) {
+        registerMainAPI(ReAnimeProvider())
     }
 }
