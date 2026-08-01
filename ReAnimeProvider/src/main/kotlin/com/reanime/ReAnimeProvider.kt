@@ -1,7 +1,6 @@
 package com.reanime
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.json.JSONArray
@@ -21,90 +20,90 @@ class ReAnimeProvider : MainAPI() {
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         private const val FLIX = "https://flixcloud.cc"
+        // NOTE: the fetch host is sharded (fetch.flixcloud.cc, fetch7.flixcloud.cc,
+        // etc.) — confirmed from two different real captures. Never hardcode a
+        // single subdomain when assembling a master.m3u8 URL ourselves; only
+        // trust a fetch*.flixcloud.cc URL when we find the FULL url already
+        // present in a response (page text), since only then do we know which
+        // shard actually owns that video id.
+        private val FETCH_HOST_REGEX = Regex("""https://fetch\d*\.flixcloud\.cc""")
 
-        /** true = prepend a diagnostic report to the anime description */
-        private const val DEBUG = true
+        /** set to true to surface diagnostic entries in the source list */
+        private const val DEBUG = false
 
         private val UUID_REGEX =
             Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
+
+        private val JWT_REGEX =
+            Regex("""eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}""")
+
         private val M3U8_REGEX =
             Regex("""https?://[^\s"'\\<>()\[\]]+\.m3u8[^\s"'\\<>()\[\]]*""")
+
+        private val MP4_REGEX =
+            Regex("""https?://[^\s"'\\<>()\[\]]+\.mp4[^\s"'\\<>()\[\]]*""")
+
         private val SUB_REGEX =
             Regex("""https?://[^\s"'\\<>()\[\]]+\.(?:vtt|srt|ass)[^\s"'\\<>()\[\]]*""")
 
-        // finds "/api/..." string literals inside JS bundles
-        private val API_PATH_REGEX = Regex("[\"'`](/api/[A-Za-z0-9_./-]+)")
+        private val EMBED_ID_REGEX =
+            Regex("""flixcloud\.cc/(?:embed|e|v|watch|player)/([A-Za-z0-9_-]{8,})""")
+
+        private val KNOWN_HOSTS = listOf(
+            "vidhide", "streamwish", "filemoon", "dood", "voe",
+            "ok.ru", "vk.com", "mixdrop", "mp4upload", "megaup", "anicore"
+        )
     }
 
+    /** unescape the various json/js escapings the site uses */
     private fun String.unesc(): String = this
         .replace("\\/", "/")
-        .replace("\\u002F", "/").replace("\\u002f", "/")
-        .replace("\\u0026", "&").replace("&amp;", "&")
+        .replace("\\u002F", "/")
+        .replace("\\u002f", "/")
+        .replace("\\u0026", "&")
+        .replace("&amp;", "&")
 
-    // =====================================================================
-    //  SHARED : discover api paths from the site's own JS
-    // =====================================================================
-
-    private suspend fun jsBundles(pageHtml: String): List<String> {
-        val srcs = Jsoup.parse(pageHtml).select("script[src]")
-            .map { it.attr("src") }
-            .map { if (it.startsWith("http")) it else mainUrl + (if (it.startsWith("/")) "" else "/") + it }
-            .distinct()
-        return srcs.take(8)
-    }
-
-    private suspend fun discoverApi(pageHtml: String): Pair<Set<String>, List<String>> {
-        val paths = linkedSetOf<String>()
-        val flixHits = mutableListOf<String>()
-        for (u in jsBundles(pageHtml)) {
-            val js = runCatching {
-                app.get(u, headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/")).text
-            }.getOrNull() ?: continue
-            API_PATH_REGEX.findAll(js).forEach { paths += it.groupValues[1] }
-            var i = js.indexOf("flixcloud")
-            var n = 0
-            while (i >= 0 && n < 4) {
-                flixHits += js.substring(maxOf(0, i - 45), minOf(js.length, i + 55))
-                    .replace("\n", " ")
-                i = js.indexOf("flixcloud", i + 1); n++
-            }
-        }
-        return paths to flixHits
-    }
-
-    // =====================================================================
-    //  MAIN PAGE / SEARCH
-    // =====================================================================
+    // ---------------------------------------------------------------------
+    //  MAIN PAGE / SEARCH / LOAD  (unchanged logic, kept intact)
+    // ---------------------------------------------------------------------
 
     private fun extractSectionArray(html: String, key: String): List<SearchResponse> {
         val match = Regex("""["']?$key["']?\s*:\s*\[""").find(html) ?: return emptyList()
         val startIdx = html.indexOf('[', match.range.first)
         if (startIdx == -1) return emptyList()
 
-        var depth = 0
+        var bracketCount = 0
         var endIdx = -1
         for (i in startIdx until html.length) {
-            if (html[i] == '[') depth++ else if (html[i] == ']') depth--
-            if (depth == 0) { endIdx = i + 1; break }
+            if (html[i] == '[') bracketCount++
+            else if (html[i] == ']') bracketCount--
+            if (bracketCount == 0) {
+                endIdx = i + 1
+                break
+            }
         }
         if (endIdx == -1) return emptyList()
 
+        val arrayStr = html.substring(startIdx, endIdx)
         val items = mutableListOf<SearchResponse>()
-        val parts = html.substring(startIdx, endIdx)
-            .split(Regex("""["']?anime_id["']?\s*:\s*["']"""))
+        val parts = arrayStr.split(Regex("""["']?anime_id["']?\s*:\s*["']"""))
 
         for (i in 1 until parts.size) {
-            val animeId = parts[i].substringBefore("\"").substringBefore("'")
+            val part = parts[i]
+            val animeId = part.substringBefore("\"").substringBefore("'")
             if (animeId.isBlank() || animeId.length > 200) continue
-            val w = parts[i].take(2000).unesc()
 
-            var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
+            val window = part.take(2000).unesc()
+
+            var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?native["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = animeId.replace("-", " ").replaceFirstChar { it.uppercase() }
 
-            var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
-            if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
+            var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?medium["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
 
             val url = "$mainUrl/anime/$animeId"
             if (items.none { it.url == url }) {
@@ -118,35 +117,42 @@ class ReAnimeProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get("$mainUrl/home", headers = mapOf("User-Agent" to UA)).text
-        val lists = mutableListOf<HomePageList>()
-        listOf(
+        val homeItems = mutableListOf<HomePageList>()
+
+        val sections = listOf(
             "latest_aired" to "Latest Episodes",
             "new_on_site" to "New on Site",
             "trending" to "Trending",
             "upcoming" to "Upcoming"
-        ).forEach { (k, t) ->
-            val items = extractSectionArray(html, k)
-            if (items.isNotEmpty()) lists.add(HomePageList(t, items))
+        )
+
+        for ((key, title) in sections) {
+            val items = extractSectionArray(html, key)
+            if (items.isNotEmpty()) homeItems.add(HomePageList(title, items))
         }
-        return newHomePageResponse(lists)
+
+        return newHomePageResponse(homeItems)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val html = app.get("$mainUrl/search?q=$query", headers = mapOf("User-Agent" to UA)).text
         val items = mutableListOf<SearchResponse>()
         val parts = html.split(Regex("""["']?anime_id["']?\s*:\s*["']"""))
-        for (i in 1 until parts.size) {
-            val animeId = parts[i].substringBefore("\"").substringBefore("'")
-            if (animeId.isBlank() || animeId.length > 200) continue
-            val w = parts[i].take(2000).unesc()
 
-            var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
+        for (i in 1 until parts.size) {
+            val part = parts[i]
+            val animeId = part.substringBefore("\"").substringBefore("'")
+            if (animeId.isBlank() || animeId.length > 200) continue
+
+            val window = part.take(2000).unesc()
+
+            var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = animeId.replace("-", " ").replaceFirstChar { it.uppercase() }
 
-            var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
-            if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(w)?.groupValues?.get(1) ?: ""
+            var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
 
             val url = "$mainUrl/anime/$animeId"
             if (items.none { it.url == url }) {
@@ -158,168 +164,139 @@ class ReAnimeProvider : MainAPI() {
         return items
     }
 
-    // =====================================================================
-    //  DIAGNOSTIC REPORT  (shown in the description)
-    // =====================================================================
-
-    private suspend fun buildReport(slug: String, epNum: String): String {
-        val r = StringBuilder()
-        fun l(s: String) { r.append(s).append("\n") }
-        l("===== ReAnime DEBUG =====")
-        l("slug=$slug ep=$epNum")
-
-        // episode json keys
-        runCatching {
-            val txt = app.get("$mainUrl/api/v1/anime/$slug/episodes?limit=50",
-                headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/")).text
-            val arr = if (txt.trimStart().startsWith("[")) JSONArray(txt) else {
-                val o = JSONObject(txt)
-                o.optJSONArray("data") ?: o.optJSONArray("episodes") ?: JSONArray()
-            }
-            if (arr.length() > 0) {
-                val o = arr.getJSONObject(0)
-                l("EPKEYS: " + o.keys().asSequence().joinToString(","))
-                l("EPJSON: " + o.toString().take(260))
-            } else l("EPKEYS: empty array")
-        }.onFailure { l("EPKEYS: ERR ${it.message?.take(50)}") }
-
-        // watch page
-        val watchUrl = "$mainUrl/watch/$slug?ep=$epNum"
-        val html = runCatching {
-            app.get(watchUrl, headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/"))
-                .text.unesc()
-        }.getOrNull() ?: ""
-        l("HTML len=${html.length} flix=${html.contains("flixcloud")} m3u8=${html.contains(".m3u8")}")
-
-        val ifr = Jsoup.parse(html).select("iframe")
-            .map { it.attr("src").ifBlank { it.attr("data-src") } }.filter { it.isNotBlank() }
-        l("IFRAMES: " + ifr.joinToString(" | ").take(180).ifBlank { "none" })
-
-        val uu = UUID_REGEX.findAll(html).map { it.value }.distinct().take(4).toList()
-        l("UUIDS: " + uu.joinToString(",").ifBlank { "none" })
-
-        // js bundle mining
-        val (paths, flixHits) = discoverApi(html)
-        l("SCRIPTS: " + jsBundles(html).size)
-        val interesting = paths.filter {
-            listOf("episode", "watch", "stream", "source", "server", "video", "player", "anime")
-                .any { k -> it.contains(k, true) }
-        }
-        l("APIPATHS(" + paths.size + "): " + interesting.joinToString(" ").take(500))
-        if (flixHits.isNotEmpty()) l("FLIXJS: " + flixHits.joinToString(" ~~ ").take(400))
-
-        // probe discovered + guessed endpoints
-        val cand = linkedSetOf<String>()
-        interesting.forEach { p ->
-            val b = mainUrl + p.trimEnd('/')
-            cand += "$b/$slug"
-            cand += "$b/$slug/$epNum"
-            cand += "$b/$slug/episodes/$epNum"
-        }
-        cand += "$mainUrl/api/v1/anime/$slug/episodes/$epNum"
-        cand += "$mainUrl/api/v1/anime/$slug/episodes/$epNum/servers"
-        cand += "$mainUrl/api/v1/watch/$slug?ep=$epNum"
-
-        var probed = 0
-        for (c in cand) {
-            if (probed++ >= 14) break
-            val res = runCatching {
-                app.get(c, headers = mapOf("User-Agent" to UA, "Referer" to watchUrl,
-                    "Accept" to "application/json", "X-Requested-With" to "XMLHttpRequest"))
-            }.getOrNull()
-            if (res == null) { l("P ${c.removePrefix(mainUrl)} ERR"); continue }
-            if (res.code == 404) continue
-            l("P ${c.removePrefix(mainUrl)} ${res.code} ${res.text.take(90).replace("\n"," ")}")
-        }
-        l("===== END DEBUG =====")
-        return r.toString()
-    }
-
-    // =====================================================================
-    //  LOAD
-    // =====================================================================
-
     override suspend fun load(url: String): LoadResponse {
         val html = app.get(url, headers = mapOf("User-Agent" to UA)).text
-        val doc = Jsoup.parse(html)
+        val document = Jsoup.parse(html)
         val slug = url.substringAfter("/anime/").substringAfter("/watch/").substringBefore("?")
 
         var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
         if (title.isNullOrBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
-        if (title.isNullOrBlank()) title = doc.selectFirst("h1")?.text()?.trim()
+        if (title.isNullOrBlank()) title = document.selectFirst("h1")?.text()?.trim()
             ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
 
         var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
-        if (poster.isNullOrBlank()) poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
+        if (poster.isNullOrBlank()) poster = document.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
         poster = poster.unesc()
 
         var plot = Regex("""["']?description["']?\s*:\s*["']((?:[^"'\\]|\\.)*)["']""")
-            .find(html)?.groupValues?.get(1)?.replace("\\n", "\n")?.replace("\\u003C", "<")
-        plot = if (plot.isNullOrBlank())
-            doc.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
-        else Jsoup.parse(plot).text()
+            .find(html)?.groupValues?.get(1)
+            ?.replace("\\n", "\n")?.replace("\\u003C", "<")
+        plot = if (plot.isNullOrBlank()) {
+            document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+        } else {
+            Jsoup.parse(plot).text()
+        }
 
         var anilistId = Regex("""bx(\d+)""").find(poster)?.groupValues?.get(1)
-        if (anilistId.isNullOrBlank())
+        if (anilistId.isNullOrBlank()) {
             anilistId = Regex(""""anilist(?:_id)?"\s*:\s*(\d+)""").find(html)?.groupValues?.get(1) ?: ""
+        }
         val malId = Regex(""""mal(?:_id)?"\s*:\s*(\d+)""").find(html)?.groupValues?.get(1) ?: ""
 
         val episodes = mutableListOf<Episode>()
+
         try {
             val epsRes = app.get(
                 "$mainUrl/api/v1/anime/$slug/episodes?limit=2000",
                 headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/")
             ).text
-            val arr = if (epsRes.trim().startsWith("[")) JSONArray(epsRes) else {
+
+            val jsonArray = if (epsRes.trim().startsWith("[")) {
+                JSONArray(epsRes)
+            } else {
                 val o = JSONObject(epsRes)
                 o.optJSONArray("data") ?: o.optJSONArray("episodes") ?: JSONArray()
             }
-            for (i in 0 until arr.length()) {
-                val e = arr.getJSONObject(i)
-                val n = e.optInt("episode_number", e.optInt("number", -1))
-                if (n == -1) continue
-                val thumb = e.optString("thumbnail", "")
-                val inlineId = UUID_REGEX.find(e.toString())?.value ?: ""
+
+            for (i in 0 until jsonArray.length()) {
+                val epObj = jsonArray.getJSONObject(i)
+                val epNum = epObj.optInt("episode_number", epObj.optInt("number", -1))
+                if (epNum == -1) continue
+
+                val epTitle = epObj.optString("title", "").ifBlank { "Episode $epNum" }
+                val thumbnail = epObj.optString("thumbnail", "")
+
+                // stash the flixcloud id if the episode list already exposes it
+                val inlineId = UUID_REGEX.find(epObj.toString())?.value ?: ""
+
                 episodes.add(
-                    newEpisode("$mainUrl/watch/$slug?ep=$n&ani=$anilistId&mal=$malId&vid=$inlineId") {
-                        name = e.optString("title", "").ifBlank { "Episode $n" }
-                        episode = n
-                        posterUrl = thumb.ifBlank { poster }
+                    newEpisode("$mainUrl/watch/$slug?ep=$epNum&ani=$anilistId&mal=$malId&vid=$inlineId") {
+                        name = epTitle
+                        episode = epNum
+                        posterUrl = thumbnail.ifBlank { poster }
                     }
                 )
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
         if (episodes.isEmpty()) {
-            for (a in doc.select("a[href*=/watch/]")) {
-                val href = fixUrlNull(a.attr("href")) ?: continue
-                val n = Regex("""[?&]ep=(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-                episodes.add(newEpisode("$href&ani=$anilistId&mal=$malId") {
-                    name = a.selectFirst("span")?.text() ?: "Episode $n"
-                    episode = n
-                    posterUrl = poster
-                })
+            for (a in document.select("a[href*=/watch/]")) {
+                val epHref = fixUrlNull(a.attr("href")) ?: continue
+                val epNum = Regex("""[?&]ep=(\d+)""").find(epHref)?.groupValues?.get(1)?.toIntOrNull()
+                    ?: a.attr("data-episode").toIntOrNull() ?: 1
+                val epName = a.selectFirst("span")?.text() ?: "Episode $epNum"
+
+                episodes.add(
+                    newEpisode("$epHref&ani=$anilistId&mal=$malId") {
+                        name = epName
+                        episode = epNum
+                        posterUrl = poster
+                    }
+                )
             }
         }
 
-        // ---- DEBUG REPORT INTO THE DESCRIPTION ----
-        val finalPlot = if (DEBUG) {
-            val ep1 = episodes.minByOrNull { it.episode ?: 1 }?.episode?.toString() ?: "1"
-            val rep = runCatching { buildReport(slug, ep1) }
-                .getOrElse { "REPORT CRASHED: ${it::class.simpleName} ${it.message}" }
-            rep + "\n\n" + plot
-        } else plot
-
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
-            this.plot = finalPlot
+            this.plot = plot
             addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.episode })
         }
     }
 
-    // =====================================================================
-    //  LINKS
-    // =====================================================================
+    // ---------------------------------------------------------------------
+    //  LINK RESOLUTION
+    // ---------------------------------------------------------------------
+
+    private suspend fun emit(
+        callback: (ExtractorLink) -> Unit,
+        label: String,
+        url: String,
+        isM3u8: Boolean,
+        referer: String,
+        origin: String
+    ) {
+        callback(
+            newExtractorLink(
+                source = name,
+                name = label,
+                url = url,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = referer
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf(
+                    "User-Agent" to UA,
+                    "Origin" to origin,
+                    "Referer" to referer,
+                    "Accept" to "*/*"
+                )
+            }
+        )
+    }
+
+    private suspend fun debugNote(callback: (ExtractorLink) -> Unit, msg: String) {
+        if (!DEBUG) return
+        callback(
+            newExtractorLink(
+                source = name,
+                name = "DEBUG: $msg",
+                url = "https://127.0.0.1/none.m3u8",
+                type = ExtractorLinkType.M3U8
+            ) { this.quality = Qualities.Unknown.value }
+        )
+    }
 
     override suspend fun loadLinks(
         data: String,
@@ -328,87 +305,237 @@ class ReAnimeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val clean = data.substringBefore("#")
-        val slug  = clean.substringAfter("/watch/").substringBefore("?")
-        val epNum = Regex("""[?&]ep=(\d+)""").find(clean)?.groupValues?.get(1) ?: "1"
-        val watchUrl = "$mainUrl/watch/$slug?ep=$epNum"
-        val seen = hashSetOf<String>()
 
-        suspend fun push(rawUrl: String): Boolean {
-            val u = rawUrl.unesc().trim().trimEnd(',', ';', ')', '"', '\'')
-            if (u.isBlank() || u.startsWith("blob:") || !seen.add(u)) return false
-            val combos = listOf(
-                mapOf("User-Agent" to UA, "Referer" to "$FLIX/", "Origin" to FLIX),
-                mapOf("User-Agent" to UA, "Referer" to "$mainUrl/", "Origin" to mainUrl),
-                mapOf("User-Agent" to UA)
+        val cleanData = data.substringBefore("#")
+        val slug  = cleanData.substringAfter("/watch/").substringBefore("?")
+        val epNum = Regex("""[?&]ep=(\d+)""").find(cleanData)?.groupValues?.get(1) ?: "1"
+        val aniId = Regex("""[?&]ani=(\d+)""").find(cleanData)?.groupValues?.get(1) ?: ""
+        val malId = Regex("""[?&]mal=(\d+)""").find(cleanData)?.groupValues?.get(1) ?: ""
+        val presetVid = Regex("""[?&]vid=([A-Za-z0-9-]+)""").find(cleanData)?.groupValues?.get(1) ?: ""
+
+        val siteHeaders = mapOf(
+            "User-Agent" to UA,
+            "Referer" to "$mainUrl/",
+            "Origin" to mainUrl,
+            "Accept" to "application/json, text/plain, */*",
+            "X-Requested-With" to "XMLHttpRequest"
+        )
+
+        val flixHeaders = mapOf(
+            "User-Agent" to UA,
+            "Referer" to "$mainUrl/",
+            "Origin" to mainUrl,
+            "Accept" to "*/*"
+        )
+
+        val seenLinks = hashSetOf<String>()
+        val seenSubs  = hashSetOf<String>()
+        val videoIds  = linkedSetOf<String>()
+        if (presetVid.isNotBlank()) videoIds.add(presetVid)
+
+        // -- helper: push a playable url -----------------------------------
+        suspend fun pushStream(rawUrl: String, label: String, fromFlix: Boolean): Boolean {
+            val url = rawUrl.unesc().trim().trimEnd(',', ';', ')')
+            if (url.isBlank() || url.startsWith("blob:")) return false
+            if (!seenLinks.add(url)) return false
+            val isM3u8 = url.contains(".m3u8", true)
+            emit(
+                callback,
+                label,
+                url,
+                isM3u8,
+                referer = if (fromFlix) "$FLIX/" else "$mainUrl/",
+                origin  = if (fromFlix) FLIX else mainUrl
             )
-            for (h in combos) {
-                val b = runCatching { app.get(u, headers = h).text }.getOrNull() ?: continue
-                if (!b.trimStart().startsWith("#EXTM3U")) continue
-                callback(newExtractorLink(name, "FlixCloud", u, ExtractorLinkType.M3U8) {
-                    this.referer = h["Referer"] ?: ""
-                    this.quality = Qualities.Unknown.value
-                    this.headers = h
-                })
-                return true
+            return true
+        }
+
+        // -- helper: pull subtitles, ignoring the artplayer metadata track --
+        fun pushSubs(text: String) {
+            SUB_REGEX.findAll(text).forEach { m ->
+                val u = m.value.unesc()
+                val low = u.lowercase()
+                if (low.contains("thumbnail") || low.contains("storyboard") ||
+                    low.contains("sprite") || low.contains("preview")) return@forEach
+                if (!seenSubs.add(u)) return@forEach
+                val langName = when {
+                    low.contains("eng") -> "English"
+                    low.contains("spa") -> "Spanish"
+                    low.contains("por") -> "Portuguese"
+                    low.contains("ara") -> "Arabic"
+                    low.contains("fre") || low.contains("fra") -> "French"
+                    low.contains("ger") || low.contains("deu") -> "German"
+                    else -> "Subtitle"
+                }
+                subtitleCallback(SubtitleFile(langName, u))
             }
-            return false
         }
 
-        val pageHtml = runCatching {
-            app.get(watchUrl, headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/"))
-                .text.unesc()
-        }.getOrNull() ?: ""
+        // ==================================================================
+        // STEP 1 — gather pages that may contain the flixcloud video id
+        // ==================================================================
+        val pages = mutableListOf<String>()
 
-        M3U8_REGEX.findAll(pageHtml).forEach { if (push(it.value)) found = true }
-        SUB_REGEX.findAll(pageHtml).forEach {
-            val l = it.value.lowercase()
-            if (!l.contains("thumbnail") && !l.contains("storyboard") && !l.contains("sprite"))
-                subtitleCallback(SubtitleFile("English", it.value))
+        runCatching { pages += app.get(cleanData, headers = siteHeaders).text }
+        runCatching { pages += app.get("$mainUrl/watch/$slug?ep=$epNum", headers = siteHeaders).text }
+
+        // >>> ADJUST THESE AFTER CHECKING DEVTOOLS -> Network -> Fetch/XHR <
+        val apiCandidates = listOf(
+            "$mainUrl/api/v1/anime/$slug/episodes/$epNum/servers",
+            "$mainUrl/api/v1/anime/$slug/episodes/$epNum/sources",
+            "$mainUrl/api/v1/anime/$slug/episodes/$epNum",
+            "$mainUrl/api/v1/watch/$slug?ep=$epNum",
+            "$mainUrl/api/v1/episode/$slug-episode-$epNum/servers"
+        )
+        for (u in apiCandidates) {
+            runCatching { pages += app.get(u, headers = siteHeaders).text }
         }
+
+        if (aniId.isNotBlank()) {
+            runCatching {
+                pages += app.get(
+                    "$mainUrl/api/v1/downloads/check?anilist_id=$aniId&mal_id=$malId&episode=$epNum",
+                    headers = siteHeaders
+                ).text
+            }
+        }
+
+        runCatching {
+            pages += app.get(
+                "$mainUrl/api/v1/anime/$slug/episodes?limit=2000",
+                headers = siteHeaders
+            ).text
+        }
+
+        // ==================================================================
+        // STEP 2 — scan them
+        // ==================================================================
+        for (raw in pages) {
+            val page = raw.unesc()
+
+            // already-signed flixcloud playlist sitting in the payload —
+            // this also naturally handles fetch.flixcloud.cc,
+            // fetch7.flixcloud.cc, or any other numbered shard, since we
+            // trust whatever full URL is actually present rather than
+            // constructing one ourselves.
+            M3U8_REGEX.findAll(page).forEach { m ->
+                val u = m.value
+                val flix = u.contains("flixcloud", true)
+                if (pushStream(u, if (flix) "FlixCloud" else "Direct", flix)) found = true
+            }
+
+            // plain mp4 fallbacks
+            MP4_REGEX.findAll(page).forEach { m ->
+                val u = m.value
+                if (u.contains("/ads", true)) return@forEach
+                val flix = u.contains("flixcloud", true)
+                if (pushStream(u, if (flix) "FlixCloud MP4" else "Direct MP4", flix)) found = true
+            }
+
+            pushSubs(page)
+
+            // remember every candidate id
+            EMBED_ID_REGEX.findAll(page).forEach { videoIds += it.groupValues[1] }
+            if (page.contains("flixcloud", true) || page.contains("\"video_id\"")) {
+                // Exclude UUIDs that only ever appear inside a blob: URL —
+                // those are browser-internal object references (created via
+                // URL.createObjectURL()) and can never be fetched
+                // server-side, so minting a token against them always fails.
+                UUID_REGEX.findAll(page).forEach { match ->
+                    val surroundingStart = maxOf(0, match.range.first - 10)
+                    val context = page.substring(surroundingStart, match.range.first)
+                    if (!context.contains("blob:")) {
+                        videoIds += match.value
+                    }
+                }
+            }
+            Regex(""""(?:video_id|videoId|file_id|hash|uid)"\s*:\s*"([A-Za-z0-9-]{8,})"""")
+                .findAll(page).forEach { videoIds += it.groupValues[1] }
+
+            // third-party mirrors
+            Regex("""https?://[^\s"'<>\\]+""").findAll(page).forEach { m ->
+                val u = m.value
+                if (KNOWN_HOSTS.any { u.contains(it, true) } && seenLinks.add(u)) {
+                    runCatching {
+                        if (loadExtractor(u, cleanData, subtitleCallback, callback)) found = true
+                    }
+                }
+            }
+        }
+
         if (found) return true
 
-        // try endpoints mined from the site's own JS
-        val (paths, _) = discoverApi(pageHtml)
-        val cand = linkedSetOf<String>()
-        paths.filter {
-            listOf("episode", "watch", "stream", "source", "server", "video").any { k -> it.contains(k, true) }
-        }.forEach { p ->
-            val b = mainUrl + p.trimEnd('/')
-            cand += "$b/$slug/$epNum"; cand += "$b/$slug/episodes/$epNum"; cand += "$b/$slug"
+        if (videoIds.isEmpty()) {
+            debugNote(callback, "no video id found in ${pages.size} pages")
+            return false
         }
-        var n = 0
-        for (c in cand) {
-            if (n++ >= 12) break
-            val body = runCatching {
-                app.get(c, headers = mapOf("User-Agent" to UA, "Referer" to watchUrl,
-                    "Accept" to "application/json")).text.unesc()
-            }.getOrNull() ?: continue
-            M3U8_REGEX.findAll(body).forEach { if (push(it.value)) found = true }
-            if (found) return true
+        debugNote(callback, "ids=${videoIds.joinToString(",").take(60)}")
+
+        // ==================================================================
+        // STEP 3 — ask FlixCloud to mint a token for each candidate id
+        // NOTE: this whole step is only reached if Step 2 found nothing
+        // usable in any already-fetched page. Since real captures show
+        // reanime.to's own backend hands back a ready-made, already-signed
+        // fetch*.flixcloud.cc URL (not just a bare video id), this step is
+        // likely unreachable in practice once the real endpoint from
+        // apiCandidates is confirmed and added above — it exists purely as
+        // a last-resort fallback while that endpoint is still unconfirmed.
+        // ==================================================================
+        for (id in videoIds) {
+            // >>> ADJUST THESE TOO IF DEVTOOLS SHOWS A DIFFERENT PATH <
+            val flixEndpoints = listOf(
+                "$FLIX/embed/$id",
+                "$FLIX/e/$id",
+                "$FLIX/api/v1/videos/$id",
+                "$FLIX/api/v1/videos/$id/stream",
+                "$FLIX/api/v1/video/$id/token",
+                "$FLIX/api/video/$id"
+            )
+
+            for (ep in flixEndpoints) {
+                val body = runCatching { app.get(ep, headers = flixHeaders).text }.getOrNull()
+                    ?: continue
+                val page = body.unesc()
+
+                // a) a complete signed url is in the response
+                M3U8_REGEX.findAll(page).forEach { m ->
+                    if (pushStream(m.value, "FlixCloud", true)) found = true
+                }
+
+                // b) only the JWT is present -> we don't know which fetch*
+                // shard owns this id, so we can't safely assemble the url
+                // ourselves anymore (confirmed the host varies: fetch vs
+                // fetch7, likely more). Without a full URL, skip rather
+                // than guess a shard that will 404.
+                pushSubs(page)
+
+                // c) the embed page may point at yet another script holding
+                // a complete signed url or the token
+                if (!found) {
+                    Regex("""<script[^>]+src=["']([^"']+)["']""").findAll(page)
+                        .map { it.groupValues[1] }
+                        .filter { it.contains("player") || it.contains("main") || it.contains("chunk") }
+                        .take(3)
+                        .forEach { s ->
+                            val js = runCatching {
+                                app.get(
+                                    if (s.startsWith("http")) s else "$FLIX${if (s.startsWith("/")) "" else "/"}$s",
+                                    headers = flixHeaders
+                                ).text
+                            }.getOrNull()?.unesc() ?: return@forEach
+
+                            M3U8_REGEX.findAll(js).forEach { m ->
+                                if (pushStream(m.value, "FlixCloud", true)) found = true
+                            }
+                        }
+                }
+
+                if (found) break
+            }
+            if (found) break
         }
 
-        // webview fallback
-        val js = """
-            (function(){var n=0;var t=setInterval(function(){
-              if(++n>25){clearInterval(t);return;}
-              var v=document.getElementsByTagName('video');
-              for(var i=0;i<v.length;i++){try{v[i].muted=true;v[i].play();}catch(e){}}
-              var s=['.art-poster','.art-state','.vjs-big-play-button','[class*=play]','button'];
-              for(var k=0;k<s.length;k++){var b=document.querySelector(s[k]);
-                if(b){try{b.click();}catch(e){}}}
-            },600);})();
-        """.trimIndent()
-        val hit = runCatching {
-            val pat = Regex("""\.m3u8|/_v7/""")
-            app.get(watchUrl, headers = mapOf("User-Agent" to UA), referer = "$mainUrl/",
-                interceptor = WebViewResolver(interceptUrl = pat, additionalUrls = listOf(pat),
-                    useOkhttp = false, script = js, timeout = 30_000L)).url
-        }.getOrNull()
-        if (hit != null && (hit.contains(".m3u8") || hit.contains("/_v7/"))) {
-            if (push(hit)) return true
-        }
-
+        if (!found) debugNote(callback, "ids ok but no token returned")
         return found
     }
 }
