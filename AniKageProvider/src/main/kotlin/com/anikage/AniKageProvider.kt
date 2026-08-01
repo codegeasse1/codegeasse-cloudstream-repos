@@ -240,7 +240,7 @@ class AniKageProvider : MainAPI() {
         val cleanHtml = html.replace("\\/", "/")
 
         val knownProviders = listOf(
-            "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
+            "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "dib", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
         
@@ -251,15 +251,16 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
-        if (activeProviders.isEmpty()) {
-            activeProviders.addAll(listOf("vibeube", "megatube", "koto", "neko", "ken", "miko", "vibe"))
+        // Force primary servers into the query list to guarantee they are fetched
+        listOf("vibeube", "vidtube", "megatube", "megaplay").forEach {
+            if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // 1. Force Vidtube to be processed first in the loop
+        // Sort so Vidtube is queried first, Megaplay last
         activeProviders.sortBy { provider ->
             when {
-                provider == "vibeube" -> 0
-                provider == "megatube" -> 2
+                provider == "vibeube" || provider == "vidtube" -> 0
+                provider == "megatube" || provider == "megaplay" -> 2
                 else -> 1
             }
         }
@@ -269,7 +270,6 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-        // Removed the Origin header that broke Cloudflare video chunks
         val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -294,8 +294,8 @@ class AniKageProvider : MainAPI() {
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val isVidtube = provider == "vibeube"
-                            val isMegaPlay = provider == "megatube"
+                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
+                            val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
                             
                             val displayProviderName = when {
                                 isVidtube -> "Vidtube"
@@ -303,21 +303,23 @@ class AniKageProvider : MainAPI() {
                                 else -> provider.replaceFirstChar { it.uppercase() }
                             }
 
-                            // 2. Setting names starting with "1." and "3." forces alphabetical sorting over ties.
+                            // CloudStream natively alphabetizes links with identical resolutions.
+                            // Prepending "1." and "3." forces Vidtube to sit above MegaPlay in the player list.
                             val sourceGroup = when {
                                 isVidtube -> "1. Vidtube"
                                 isMegaPlay -> "3. MegaPlay"
                                 else -> "2. $displayProviderName"
                             }
                             
+                            val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
+                            
                             callback(
                                 newExtractorLink(
                                     source = sourceGroup,
                                     name = "$displayProviderName ($lang)",
                                     url = cleanUrl,
-                                    type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    // 3. Keep Quality Unknown. CloudStream will read the real quality inside the M3U8 (360p, 720p, etc).
                                     this.quality = Qualities.Unknown.value 
                                     this.headers = videoHeaders
                                 }
@@ -333,8 +335,8 @@ class AniKageProvider : MainAPI() {
                             }
                             
                             for (link in extractedLinks) {
-                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
-                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
+                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
+                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
                                 
                                 val sourceGroup = when {
                                     isVidtube -> "1. Vidtube"
@@ -370,11 +372,11 @@ class AniKageProvider : MainAPI() {
                 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/")
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
                     
                     callback(
                         newExtractorLink(
-                            source = "4. Direct",
+                            source = "2. Direct Stream",
                             name = "Direct Stream",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
