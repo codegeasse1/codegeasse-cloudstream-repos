@@ -55,6 +55,7 @@ class ReAnimeProvider : MainAPI() {
         )
         
         for ((key, title) in sections) {
+            // SvelteKit stores the data arrays directly in the HTML script tag
             val regex = Regex(""""$key"\s*:\s*(\[.*?\])\s*,\s*"(?:[a-zA-Z0-9_]+_cursor|upcoming|new_on_site)"""")
             val match = regex.find(html)
             val items = parseAnimeArray(match?.groupValues?.get(1))
@@ -117,6 +118,7 @@ class ReAnimeProvider : MainAPI() {
         }
 
         val episodes = mutableListOf<Episode>()
+        // Re:Anime renders all episode links directly into the DOM
         document.select("a[href*=/watch/]").forEach { a ->
             val epHref = fixUrlNull(a.attr("href")) ?: return@forEach
             val epNum = a.attr("data-episode").toIntOrNull() ?: return@forEach
@@ -147,12 +149,11 @@ class ReAnimeProvider : MainAPI() {
         val html = app.get(data).text
         var found = false
 
-        // 1. Hunt for FlixCloud URLs
+        // 1. Hunt for FlixCloud URLs inside the page source
         val flixCloudMatches = Regex("""https?://(?:fetch7\.)?flixcloud\.cc[^\s"'<>\\]+""").findAll(html)
         flixCloudMatches.forEach { match ->
             val flixUrl = match.value.replace("\\/", "/")
             if (flixUrl.contains(".m3u8")) {
-                // Pass to CloudStream's internal extractors to decode the encrypted payload
                 if (!loadExtractor(flixUrl, data, subtitleCallback, callback)) {
                     callback(
                         newExtractorLink(
@@ -161,8 +162,8 @@ class ReAnimeProvider : MainAPI() {
                             url = flixUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "$mainUrl/"
                             this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("Referer" to "$mainUrl/")
                         }
                     )
                 }
@@ -170,7 +171,7 @@ class ReAnimeProvider : MainAPI() {
             }
         }
 
-        // 2. Extract Subtitles (VTT)
+        // 2. Extract Subtitles (VTT) if available
         val vttMatches = Regex("""https?://(?:fetch\.)?flixcloud\.cc/thumbnails_vtt/[^\s"'<>\\]+""").findAll(html)
         vttMatches.forEach { match ->
             val vttUrl = match.value.replace("\\/", "/")
@@ -197,8 +198,8 @@ class ReAnimeProvider : MainAPI() {
                                 url = cleanUrl,
                                 type = ExtractorLinkType.M3U8
                             ) {
-                                this.referer = "$mainUrl/"
                                 this.quality = Qualities.Unknown.value
+                                this.headers = mapOf("Referer" to "$mainUrl/")
                             }
                         )
                     }
