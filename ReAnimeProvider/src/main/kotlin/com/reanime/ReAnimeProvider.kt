@@ -137,7 +137,6 @@ class ReAnimeProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
-        // Extract Anilist & MAL IDs to use in API calls later
         val aniIdMatch = Regex(""""anilist_id"\s*:\s*(\d+)""").find(html) ?: Regex(""""anilist"\s*:\s*(\d+)""").find(html)
         val anilistId = aniIdMatch?.groupValues?.get(1) ?: ""
 
@@ -146,7 +145,6 @@ class ReAnimeProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        // 1. Fetch Episodes from API
         try {
             val epsRes = app.get("$mainUrl/api/v1/anime/$slug/episodes?limit=2000").text
             val jsonArray = if (epsRes.trim().startsWith("[")) {
@@ -175,7 +173,6 @@ class ReAnimeProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // 2. Fallback: Parse from page
         if (episodes.isEmpty()) {
             val links = document.select("a[href*=/watch/]")
             for (a in links) {
@@ -220,13 +217,13 @@ class ReAnimeProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // Helper to add streams avoiding duplicates and deprecated constructors
         val extractedUrls = hashSetOf<String>()
-        val addStream = { streamUrl: String, sourceName: String ->
+
+        fun addStream(streamUrl: String, sourceName: String) {
             val cleanUrl = streamUrl.replace("\\/", "/")
-            if (!extractedUrls.contains(cleanUrl)) {
+            if (!extractedUrls.contains(cleanUrl) && cleanUrl.startsWith("http")) {
                 extractedUrls.add(cleanUrl)
-                val isM3u8 = cleanUrl.contains(".m3u8", true)
+                val isM3u8 = cleanUrl.contains(".m3u8", true) || cleanUrl.contains("m3u8", true)
                 callback(
                     ExtractorLink(
                         source = "Re:Anime",
@@ -241,28 +238,49 @@ class ReAnimeProvider : MainAPI() {
             }
         }
 
-        val urlExtractRegex = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""")
-        val hosts = listOf("vidhide", "streamwish", "filemoon", "dood", "voe", "ok.ru", "vk.com", "mixdrop", "anicore", "mp4upload", "mega")
+        // 1. Bypass Encryption: Hit the Downloads API directly
+        if (aniId.isNotBlank()) {
+            try {
+                val dlUrl = "$mainUrl/api/v1/downloads/check?anilist_id=$aniId&mal_id=$malId&episode=$epNum"
+                val dlRes = app.get(dlUrl, headers = videoHeaders).text.replace("\\/", "/")
+                
+                val dlMatches = Regex(""""(?:url|link|src|file)"\s*:\s*"([^"]+)"""").findAll(dlRes)
+                for (match in dlMatches) {
+                    addStream(match.groupValues[1], "Direct Download")
+                }
+                
+                val dlDirectMatches = Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(dlRes)
+                for (match in dlDirectMatches) {
+                    addStream(match.value, "Direct Download")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
 
-        // 1. Scan multiple servers (HD-1, HD-2, HD-3) from the Watch Page to bypass FlixCloud
+        // 2. Scan multiple servers (HD-1, HD-2, HD-3, Backup) from the Watch Page
         val servers = listOf("HD-1", "HD-2", "HD-3", "Backup")
         for (server in servers) {
             try {
                 val watchUrl = "$mainUrl/watch/$slug?ep=$epNum&lang=sub&server=$server"
                 val watchHtml = app.get(watchUrl, headers = videoHeaders).text.replace("\\/", "/")
                 
-                // Find direct streams inside the HTML payload
-                val streamMatches = urlExtractRegex.findAll(watchHtml)
+                val streamMatches = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(watchHtml)
                 for (match in streamMatches) {
                     addStream(match.value, "Server $server")
                 }
 
-                // Check for embedded known host iframes
-                val allUrls = Regex("""https?://[^\s"'<>\\]+""").findAll(watchHtml).map { it.value }.toSet()
-                for (u in allUrls) {
+                val hosts = listOf("vidhide", "streamwish", "filemoon", "dood", "voe", "ok.ru", "vk.com", "mixdrop", "mp4upload", "mega")
+                val iframeMatches = Regex("""https?://[^\s"'<>\\]+""").findAll(watchHtml)
+                
+                for (match in iframeMatches) {
+                    val u = match.value
                     if (hosts.any { u.contains(it, true) }) {
-                        if (loadExtractor(u, data, subtitleCallback, callback)) {
-                            found = true
+                        if (!extractedUrls.contains(u)) {
+                            extractedUrls.add(u)
+                            if (loadExtractor(u, cleanData, subtitleCallback, callback)) {
+                                found = true
+                            }
                         }
                     }
                 }
@@ -271,47 +289,15 @@ class ReAnimeProvider : MainAPI() {
             }
         }
 
-        // 2. Bypass Encryption: Hit the Downloads API directly
-        if (aniId.isNotBlank()) {
-            try {
-                val dlUrl = "$mainUrl/api/v1/downloads/check?anilist_id=$aniId&mal_id=$malId&episode=$epNum"
-                val dlRes = app.get(dlUrl, headers = videoHeaders).text.replace("\\/", "/")
-                
-                // Aggressively extract any URL inside the JSON response
-                val urlMatches = Regex(""""url"\s*:\s*"([^"]+)"""").findAll(dlRes)
-                for (match in urlMatches) {
-                    addStream(match.groupValues[1], "Direct Download")
-                }
-                
-                // Backup Regex just in case "url" key is named differently
-                val backupMatches = urlExtractRegex.findAll(dlRes)
-                for (match in backupMatches) {
-                    addStream(match.value, "Direct Download")
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        // 3. Fallback: Check internal Flix API
+        // 3. Fallback: Check internal Flix API in case it returns raw M3U8
         if (aniId.isNotBlank()) {
             try {
                 val flixUrl = "$mainUrl/api/flix/$aniId/$epNum"
                 val flixRes = app.get(flixUrl, headers = videoHeaders).text.replace("\\/", "/")
 
-                val streamMatches = urlExtractRegex.findAll(flixRes)
-                for (match in streamMatches) {
+                val flixMatches = Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(flixRes)
+                for (match in flixMatches) {
                     addStream(match.value, "Flix API")
-                }
-
-                // If no direct link, try passing the 24-char ID to CloudStream's MegaCloud/RabbitStream decryptor
-                if (!found) {
-                    val idMatch = Regex("""([a-fA-F0-9]{24})""").find(flixRes)
-                    if (idMatch != null) {
-                        val flixId = idMatch.groupValues[1]
-                        if (loadExtractor("https://megacloud.tv/embed-2/e-1/$flixId", data, subtitleCallback, callback)) found = true
-                        if (loadExtractor("https://rabbitstream.net/v2/embed-4/$flixId", data, subtitleCallback, callback)) found = true
-                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
