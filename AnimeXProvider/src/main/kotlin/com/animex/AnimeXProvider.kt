@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.json.JSONArray
+import org.json.JSONObject
 
 class AnimeXProvider : MainAPI() {
     override var mainUrl = "https://animex.one"
@@ -50,13 +51,11 @@ class AnimeXProvider : MainAPI() {
             if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
             
-            // Fix for Serveproxy and Anilist images
             var poster = Regex("""["']?extraLarge["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (poster.isBlank()) poster = Regex("""https?://serveproxy\.com[^"'\s]+""").find(window)?.value ?: ""
             if (poster.isBlank()) poster = Regex("""https?://s4\.anilist\.co[^"'\s]+""").find(window)?.value ?: ""
             
-            // TMDB fallback just in case
             if (poster.isBlank()) {
                 val relPath = Regex("""["']?poster_path["']?\s*:\s*["'](/[^"'\s]+)""").find(window)?.groupValues?.get(1)
                 if (relPath != null) poster = "https://image.tmdb.org/t/p/original$relPath"
@@ -143,10 +142,9 @@ class AnimeXProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // LOAD — reads the real embedded JSON fields directly (titleEnglish,
-    // coverImage.extraLarge, bannerImage, synopsis, genres) instead of
-    // fragile slug-based string splitting. Episodes come from the
-    // confirmed pp.animex.one episodes API with correct field names
-    // (titles.en, img — not the old title/thumbnail/slug names).
+    // coverImage.extraLarge, bannerImage, synopsis, genres, anilistId)
+    // instead of fragile slug-based string splitting. Episode watch
+    // URLs are built as {slugBase}-{anilistId}-episode-{epNum}.
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val slug = url.substringAfter("/anime/").substringBefore("?")
@@ -179,6 +177,10 @@ class AnimeXProvider : MainAPI() {
             Regex(""""name"\s*:\s*"([^"]+)"""").findAll(it).map { m -> m.groupValues[1] }.toList()
         } ?: emptyList()
 
+        // anilistId needed to build correct /watch/ URLs
+        val anilistId = Regex(""""anilistId"\s*:\s*(\d+)""").find(html)?.groupValues?.get(1)
+        val slugBase = slug.substringBeforeLast("-")
+
         val episodes = mutableListOf<Episode>()
 
         try {
@@ -199,7 +201,11 @@ class AnimeXProvider : MainAPI() {
                 val epTitle = titlesObj?.optString("en", "")?.ifBlank { null } ?: "Episode $epNum"
 
                 val thumbnail = epObj.optString("img", "")
-                val epUrl = "$mainUrl/anime/$slug?epNum=$epNum"
+
+                val epUrl = if (anilistId != null)
+                    "$mainUrl/watch/$slugBase-$anilistId-episode-$epNum"
+                else
+                    "$mainUrl/anime/$slug?epNum=$epNum"
 
                 episodes.add(
                     newEpisode(epUrl) {
@@ -240,9 +246,13 @@ class AnimeXProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS — the real player URL is streamed directly in the
-    // same watch-page response (SvelteKit deferred-data resolve block),
-    // NOT from a separate pp.animex.one servers/sources API.
+    // LOAD LINKS
+    // Primary: pp.animex.one providers → sources API, confirmed shape:
+    //   providers:  {"subProviders":[{"id":"beep","default":true,...}],"dubProviders":[...]}
+    //   sources:    {"sources":[{"url":"...m3u8","quality":"auto","type":"video/mpegurl"}],
+    //                "tracks":null or [...], "headers":{"Referer":"..."}}
+    // Fallback: embedded player_url in the watch page's resolve() block,
+    // then any iframe found directly in the DOM.
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -253,27 +263,118 @@ class AnimeXProvider : MainAPI() {
         var found = false
         val cleanData = data.substringBefore("#")
 
+        val slug = cleanData.substringAfter("/watch/").substringBeforeLast("-episode-")
+            .let { if (it.isNotBlank()) it else cleanData.substringAfter("/anime/").substringBefore("?") }
+        val epNum = Regex("""-episode-(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: Regex("""[?&]epNum=(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: "1"
+
+        val apiHeaders = mapOf(
+            "Accept" to "application/json",
+            "Origin" to mainUrl,
+            "Referer" to "$mainUrl/"
+        )
+
         try {
-            val html = app.get(cleanData).text
+            val providersUrl = "https://pp.animex.one/rest/api/providers?id=$slug&epNum=$epNum"
+            val providersJson = JSONObject(app.get(providersUrl, headers = apiHeaders).text)
 
-            val playerUrls = Regex(""""player_url"\s*:\s*"([^"]+)"""")
-                .findAll(html)
-                .map { it.groupValues[1].replace("\\/", "/") }
-                .distinct()
-                .toList()
-
-            for (playerUrl in playerUrls) {
+            suspend fun fetchSources(type: String, providerId: String) {
                 try {
-                    if (loadExtractor(playerUrl, cleanData, subtitleCallback, callback)) {
-                        found = true
+                    val sourcesUrl = "https://pp.animex.one/rest/api/sources?id=$slug&epNum=$epNum&type=$type&providerId=$providerId"
+                    val raw = app.get(sourcesUrl, headers = apiHeaders).text.replace("\\/", "/")
+                    val sourceObj = JSONObject(raw)
+
+                    val referer = sourceObj.optJSONObject("headers")?.optString("Referer", mainUrl) ?: mainUrl
+
+                    val sourcesArray = sourceObj.optJSONArray("sources")
+                    if (sourcesArray != null) {
+                        for (i in 0 until sourcesArray.length()) {
+                            val src = sourcesArray.getJSONObject(i)
+                            val streamUrl = src.optString("url", "")
+                            if (streamUrl.isBlank()) continue
+
+                            val isM3u8 = streamUrl.contains(".m3u8") || src.optString("type", "").contains("mpegurl", true)
+
+                            callback(
+                                newExtractorLink(
+                                    source = "AnimeX",
+                                    name = "$providerId ($type)",
+                                    url = streamUrl,
+                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = referer
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            found = true
+                        }
+                    }
+
+                    // tracks may hold subtitle entries when not null
+                    val tracksArray = sourceObj.optJSONArray("tracks")
+                    if (tracksArray != null) {
+                        for (i in 0 until tracksArray.length()) {
+                            val track = tracksArray.getJSONObject(i)
+                            val trackUrl = track.optString("url", track.optString("file", ""))
+                            val label = track.optString("label", track.optString("lang", "Subtitle"))
+                            if (trackUrl.isNotBlank()) {
+                                subtitleCallback(SubtitleFile(label, trackUrl))
+                            }
+                        }
                     }
                 } catch (_: Exception) { }
+            }
+
+            val subProviders = providersJson.optJSONArray("subProviders")
+            if (subProviders != null) {
+                for (i in 0 until subProviders.length()) {
+                    val p = subProviders.getJSONObject(i)
+                    if (p.optBoolean("default", false)) {
+                        fetchSources("sub", p.optString("id"))
+                    }
+                }
+                if (!found && subProviders.length() > 0) {
+                    fetchSources("sub", subProviders.getJSONObject(0).optString("id"))
+                }
+            }
+
+            val dubProviders = providersJson.optJSONArray("dubProviders")
+            if (dubProviders != null) {
+                for (i in 0 until dubProviders.length()) {
+                    val p = dubProviders.getJSONObject(i)
+                    if (p.optBoolean("default", false)) {
+                        fetchSources("dub", p.optString("id"))
+                    }
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        // Fallback: any iframe embedded directly in the DOM
+        // Fallback: embedded player_url in the watch page's resolve() block
+        if (!found) {
+            try {
+                val html = app.get(cleanData).text
+                val playerUrls = Regex(""""player_url"\s*:\s*"([^"]+)"""")
+                    .findAll(html)
+                    .map { it.groupValues[1].replace("\\/", "/") }
+                    .distinct()
+                    .toList()
+
+                for (playerUrl in playerUrls) {
+                    try {
+                        if (loadExtractor(playerUrl, cleanData, subtitleCallback, callback)) {
+                            found = true
+                        }
+                    } catch (_: Exception) { }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // Final fallback: any iframe embedded directly in the DOM
         if (!found) {
             try {
                 val html = app.get(cleanData).text
