@@ -62,9 +62,6 @@ class AniKageProvider : MainAPI() {
         return items
     }
 
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get(mainUrl).text
         val scriptData = Jsoup.parse(html).select("script").html()
@@ -88,9 +85,6 @@ class AniKageProvider : MainAPI() {
         return newHomePageResponse(homeItems)
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
         val items = mutableListOf<SearchResponse>()
@@ -189,9 +183,6 @@ class AniKageProvider : MainAPI() {
         return items
     }
 
-    // ---------------------------------------------------------------
-    // LOAD
-    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val slug = url.substringAfterLast("/")
         val html = app.get(url).text
@@ -232,9 +223,6 @@ class AniKageProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -251,10 +239,9 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        // MUST KEEP ALL PROVIDERS as fallback if Vidtube doesn't exist
         val knownProviders = listOf(
             "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish", "vidtube", "megaplay"
         )
         
         val activeProviders = knownProviders.filter { provider ->
@@ -265,7 +252,7 @@ class AniKageProvider : MainAPI() {
         }.toMutableList()
 
         if (activeProviders.isEmpty()) {
-            activeProviders.addAll(listOf("vibeube", "megatube", "koto", "neko", "ken", "miko", "vibe"))
+            activeProviders.addAll(listOf("vibeube", "megatube", "vidtube", "megaplay", "koto", "neko", "ken", "miko", "vibe"))
         }
 
         val langs = mutableListOf("sub")
@@ -273,9 +260,11 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
-        // Minimal headers bypass the 2004 crash
+        // Added Origin header to fix the Cloudflare worker buffering issue
         val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
+            "Origin" to mainUrl,
+            "Accept" to "*/*",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
@@ -298,14 +287,14 @@ class AniKageProvider : MainAPI() {
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val isVidtube = provider == "vibeube"
-                            val isMegaPlay = provider == "megatube"
+                            val isVidtube = provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
+                            val isMegaPlay = provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
                             
-                            // Hacks CloudStream sorting: Vidtube is always #1, MegaPlay is always #2.
+                            // Re-sorted groups to ensure Vidtube is requested first by CloudStream
                             val sourceGroup = when {
                                 isVidtube -> "1. Vidtube"
-                                isMegaPlay -> "2. MegaPlay"
-                                else -> "3. ${provider.replaceFirstChar { it.uppercase() }}"
+                                isMegaPlay -> "3. MegaPlay" 
+                                else -> "2. ${provider.replaceFirstChar { it.uppercase() }}"
                             }
                             
                             callback(
@@ -315,7 +304,7 @@ class AniKageProvider : MainAPI() {
                                     url = cleanUrl,
                                     type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.quality = Qualities.Unknown.value // Uses unknown so it doesn't fake 1080p
+                                    this.quality = Qualities.Unknown.value 
                                     this.headers = videoHeaders
                                 }
                             )
@@ -331,13 +320,13 @@ class AniKageProvider : MainAPI() {
                             }
                             
                             for (link in extractedLinks) {
-                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider == "vibeube"
-                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider == "megatube"
+                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true)
+                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true)
                                 
                                 val sourceGroup = when {
                                     isVidtube -> "1. Vidtube"
-                                    isMegaPlay -> "2. MegaPlay"
-                                    else -> "3. ${link.source}"
+                                    isMegaPlay -> "3. MegaPlay"
+                                    else -> "2. ${link.source}"
                                 }
 
                                 callback(
@@ -372,13 +361,13 @@ class AniKageProvider : MainAPI() {
                     
                     callback(
                         newExtractorLink(
-                            source = "3. Direct",
+                            source = "4. Direct",
                             name = "Direct Stream",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
-                            quality = Qualities.Unknown.value
-                            headers = videoHeaders
+                            this.quality = Qualities.Unknown.value
+                            this.headers = videoHeaders
                         }
                     )
                     found = true
