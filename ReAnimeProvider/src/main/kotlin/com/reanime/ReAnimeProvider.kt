@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.json.JSONArray
+import org.json.JSONObject
 
 class ReAnimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
@@ -54,7 +55,6 @@ class ReAnimeProvider : MainAPI() {
         )
         
         for ((key, title) in sections) {
-            // SvelteKit stores the data arrays directly in the HTML script tag
             val regex = Regex(""""$key"\s*:\s*(\[.*?\])\s*,\s*"(?:[a-zA-Z0-9_]+_cursor|upcoming|new_on_site)"""")
             val match = regex.find(html)
             val items = parseAnimeArray(match?.groupValues?.get(1))
@@ -117,7 +117,6 @@ class ReAnimeProvider : MainAPI() {
         }
 
         val episodes = mutableListOf<Episode>()
-        // Re:Anime renders all episode links directly into the DOM
         document.select("a[href*=/watch/]").forEach { a ->
             val epHref = fixUrlNull(a.attr("href")) ?: return@forEach
             val epNum = a.attr("data-episode").toIntOrNull() ?: return@forEach
