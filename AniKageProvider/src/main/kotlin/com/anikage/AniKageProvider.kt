@@ -238,32 +238,35 @@ class AniKageProvider : MainAPI() {
 
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
+        val document = Jsoup.parse(cleanHtml)
 
-        val knownProviders = listOf(
-            "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "dib", "miko", 
+        // DYNAMIC SERVER HARVESTER: Scrapes every server button/attribute present on the page automatically
+        val activeProviders = mutableSetOf<String>()
+        
+        // 1. Scrape data attributes or classes referencing providers
+        document.select("[data-provider], [provider], .server-item, button, div[class*='server']").forEach { el ->
+            listOf(el.attr("data-provider"), el.attr("provider"), el.attr("data-server"), el.text()).forEach { attr ->
+                val cleanAttr = attr.trim().lowercase()
+                if (cleanAttr.isNotBlank() && cleanAttr.length < 15 && !cleanAttr.contains("server") && !cleanAttr.contains("sub") && !cleanAttr.contains("dub")) {
+                    activeProviders.add(cleanAttr)
+                }
+            }
+        }
+
+        // 2. Fallback to known common list if DOM parsing is minimal
+        val fallbackProviders = listOf(
+            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
         
-        val activeProviders = knownProviders.filter { provider ->
-            cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
-            cleanHtml.contains("provider=$provider", ignoreCase = true) ||
-            cleanHtml.contains("-$provider", ignoreCase = true) ||
-            cleanHtml.contains(">$provider<", ignoreCase = true)
-        }.toMutableList()
-
-        // Force primary servers into the query list to guarantee they are fetched
-        listOf("vibeube", "vidtube", "megatube", "megaplay").forEach {
-            if (!activeProviders.contains(it)) activeProviders.add(it)
-        }
-
-        // Sort so Vidtube is queried first, Megaplay last
-        activeProviders.sortBy { provider ->
-            when {
-                provider == "vibeube" || provider == "vidtube" -> 0
-                provider == "megatube" || provider == "megaplay" -> 2
-                else -> 1
+        fallbackProviders.forEach { 
+            if (cleanHtml.contains("\"$it\"", ignoreCase = true) || cleanHtml.contains("provider=$it", ignoreCase = true) || cleanHtml.contains("-$it", ignoreCase = true)) {
+                activeProviders.add(it)
             }
         }
+
+        // Guarantee core defaults are always checked
+        listOf("dib", "vibeube", "vidtube", "megaplay").forEach { activeProviders.add(it) }
 
         val langs = mutableListOf("sub")
         if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
@@ -294,28 +297,13 @@ class AniKageProvider : MainAPI() {
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
-                            val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
-                            
-                            val displayProviderName = when {
-                                isVidtube -> "Vidtube"
-                                isMegaPlay -> "MegaPlay"
-                                else -> provider.replaceFirstChar { it.uppercase() }
-                            }
-
-                            // CloudStream natively alphabetizes links with identical resolutions.
-                            // Prepending "1." and "3." forces Vidtube to sit above MegaPlay in the player list.
-                            val sourceGroup = when {
-                                isVidtube -> "1. Vidtube"
-                                isMegaPlay -> "3. MegaPlay"
-                                else -> "2. $displayProviderName"
-                            }
+                            val displayProviderName = provider.replaceFirstChar { it.uppercase() }
                             
                             val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
                             
                             callback(
                                 newExtractorLink(
-                                    source = sourceGroup,
+                                    source = displayProviderName,
                                     name = "$displayProviderName ($lang)",
                                     url = cleanUrl,
                                     type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
@@ -335,18 +323,10 @@ class AniKageProvider : MainAPI() {
                             }
                             
                             for (link in extractedLinks) {
-                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
-                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
-                                
-                                val sourceGroup = when {
-                                    isVidtube -> "1. Vidtube"
-                                    isMegaPlay -> "3. MegaPlay"
-                                    else -> "2. ${link.source}"
-                                }
-
+                                val displayProviderName = provider.replaceFirstChar { it.uppercase() }
                                 callback(
                                     newExtractorLink(
-                                        source = sourceGroup,
+                                        source = displayProviderName,
                                         name = link.name,
                                         url = link.url,
                                         type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
@@ -376,7 +356,7 @@ class AniKageProvider : MainAPI() {
                     
                     callback(
                         newExtractorLink(
-                            source = "2. Direct Stream",
+                            source = "Direct Stream",
                             name = "Direct Stream",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
