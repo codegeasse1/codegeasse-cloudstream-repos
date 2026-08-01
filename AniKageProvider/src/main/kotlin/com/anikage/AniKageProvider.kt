@@ -240,11 +240,10 @@ class AniKageProvider : MainAPI() {
         val cleanHtml = html.replace("\\/", "/")
         val document = Jsoup.parse(cleanHtml)
 
-        // DYNAMIC SERVER HARVESTER: Scrapes every server button/attribute present on the page automatically
         val activeProviders = mutableSetOf<String>()
         
-        // 1. Scrape data attributes or classes referencing providers
-        document.select("[data-provider], [provider], .server-item, button, div[class*='server']").forEach { el ->
+        // 1. DOM attribute collection
+        document.select("[data-provider], [provider], .server-item, button, div[class*='server'], li").forEach { el ->
             listOf(el.attr("data-provider"), el.attr("provider"), el.attr("data-server"), el.text()).forEach { attr ->
                 val cleanAttr = attr.trim().lowercase()
                 if (cleanAttr.isNotBlank() && cleanAttr.length < 15 && !cleanAttr.contains("server") && !cleanAttr.contains("sub") && !cleanAttr.contains("dub")) {
@@ -253,20 +252,26 @@ class AniKageProvider : MainAPI() {
             }
         }
 
-        // 2. Fallback to known common list if DOM parsing is minimal
+        // 2. Deep Script Object Scraper for single-server mappings (captures "dib", etc.)
+        try {
+            val scriptContent = document.select("script").html()
+            val providerKeys = Regex("""["']?provider["']?\s*[:=]\s*["']([a-zA-Z0-9_-]+)["']""").findAll(scriptContent)
+            for (match in providerKeys) {
+                val key = match.groupValues[1].lowercase()
+                if (key.isNotBlank()) activeProviders.add(key)
+            }
+            val tokenMatches = Regex("""["']([a-z0-9_-]{2,10})["']\s*:\s*\{[^}]*["']name["']""").findAll(scriptContent)
+            for (match in tokenMatches) {
+                activeProviders.add(match.groupValues[1].lowercase())
+            }
+        } catch (e: Exception) {}
+
+        // Baseline fallback providers including Dib
         val fallbackProviders = listOf(
             "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish", "server1"
         )
-        
-        fallbackProviders.forEach { 
-            if (cleanHtml.contains("\"$it\"", ignoreCase = true) || cleanHtml.contains("provider=$it", ignoreCase = true) || cleanHtml.contains("-$it", ignoreCase = true)) {
-                activeProviders.add(it)
-            }
-        }
-
-        // Guarantee core defaults are always checked
-        listOf("dib", "vibeube", "vidtube", "megaplay").forEach { activeProviders.add(it) }
+        fallbackProviders.forEach { activeProviders.add(it) }
 
         val langs = mutableListOf("sub")
         if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
@@ -275,6 +280,7 @@ class AniKageProvider : MainAPI() {
 
         val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
+            "Origin" to mainUrl,
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
@@ -286,27 +292,27 @@ class AniKageProvider : MainAPI() {
 
                 try {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+                    if (responseText.isBlank() || responseText.contains("error", true) || responseText.length < 15) continue
+                    
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
                     
                     for (match in matches) {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
                         
-                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                        val isProxyStream = cleanUrl.contains("prox.anicore.tv") || cleanUrl.contains("prox.anikage.cc") || cleanUrl.contains("workers.dev")
+                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || isProxyStream
                         val isDirectMp4 = cleanUrl.contains(".mp4")
-                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
                         
-                        if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                        if (isDirectM3u8 || isDirectMp4) {
                             val displayProviderName = provider.replaceFirstChar { it.uppercase() }
-                            
-                            val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
                             
                             callback(
                                 newExtractorLink(
                                     source = displayProviderName,
                                     name = "$displayProviderName ($lang)",
                                     url = cleanUrl,
-                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    type = if (isDirectM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.quality = Qualities.Unknown.value 
                                     this.headers = videoHeaders
@@ -341,7 +347,7 @@ class AniKageProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Ignore missing endpoints quietly
+                    // Suppress and continue
                 }
             }
         }
@@ -352,14 +358,12 @@ class AniKageProvider : MainAPI() {
                 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
-                    
                     callback(
                         newExtractorLink(
-                            source = "Direct Stream",
-                            name = "Direct Stream",
+                            source = "Dib Proxy",
+                            name = "Dib Proxy Stream",
                             url = extractedUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = ExtractorLinkType.M3U8
                         ) {
                             this.quality = Qualities.Unknown.value
                             this.headers = videoHeaders
