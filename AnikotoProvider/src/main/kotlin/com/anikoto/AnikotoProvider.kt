@@ -36,9 +36,11 @@ class AnikotoProvider : MainAPI() {
                 ?: element.selectFirst("a.name, a.title, .info a")?.text()?.trim()
                 ?: "Unknown"
 
+            // Handle data-src vs src safely
             var poster = element.selectFirst("img")?.attr("data-src")?.ifBlank { null }
                 ?: element.selectFirst("img")?.attr("src")?.ifBlank { null }
 
+            // Fallback for trending background-images
             if (poster.isNullOrBlank()) {
                 val style = element.selectFirst(".image div, .poster div, div[style*=background]")?.attr("style") ?: ""
                 poster = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1)
@@ -82,37 +84,68 @@ class AnikotoProvider : MainAPI() {
         val plot = document.selectFirst(".synopsis .content")?.text()?.trim() ?: ""
 
         val episodes = mutableListOf<Episode>()
-        
-        // 1. Parse released episodes directly from the HTML (#w-episodes)
-        var epLinks = document.select("#w-episodes a[href*=/watch/], .episodes a[href*=/watch/], ul.ep-range a")
-        
-        // 2. Fallback: If on details page without #w-episodes, fetch the ep-1 page
-        if (epLinks.isEmpty()) {
-            val slug = url.substringAfter("/watch/").substringBefore("/ep-").substringBefore("?")
-            try {
-                val watchHtml = app.get("$mainUrl/watch/$slug/ep-1").text
-                val watchDoc = Jsoup.parse(watchHtml)
-                epLinks = watchDoc.select("#w-episodes a[href*=/watch/], .episodes a[href*=/watch/], ul.ep-range a")
-            } catch (e: Exception) {
-                e.printStackTrace()
+        val animeId = document.selectFirst("#watch-main")?.attr("data-id") ?: ""
+        val slug = url.substringAfter("/watch/").substringBefore("/ep-").substringBefore("?")
+
+        // 1. Fetch exact aired episodes dynamically using Anikoto's AJAX APIs
+        if (animeId.isNotBlank()) {
+            val ajaxHeaders = mapOf("X-Requested-With" to "XMLHttpRequest", "Referer" to url)
+            val endpoints = listOf(
+                "$mainUrl/ajax/episode/list/$animeId",
+                "$mainUrl/ajax/v2/episode/list/$animeId",
+                "$mainUrl/ajax/episode/list?id=$animeId"
+            )
+
+            for (epUrl in endpoints) {
+                try {
+                    val res = app.get(epUrl, headers = ajaxHeaders).text
+                    val htmlString = if (res.trim().startsWith("{")) {
+                        val json = JSONObject(res)
+                        json.optString("html", json.optString("result", res))
+                    } else res
+                    
+                    val epDoc = Jsoup.parse(htmlString)
+                    val links = epDoc.select("a[data-num], a[data-slug], a[href*=/watch/]")
+                    
+                    for (a in links) {
+                        val href = fixUrlNull(a.attr("href")) ?: continue
+                        val epNum = a.attr("data-num").toIntOrNull() 
+                            ?: a.attr("data-slug").toIntOrNull()
+                            ?: Regex("""/ep-(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                            ?: continue
+                        val epName = a.attr("title").ifBlank { a.text().trim() }.ifBlank { "Episode $epNum" }
+                        val dataIds = a.attr("data-ids")
+
+                        val finalUrl = if (dataIds.isNotBlank()) "$href#dataids=$dataIds" else href
+
+                        episodes.add(
+                            newEpisode(finalUrl) {
+                                this.name = epName
+                                this.episode = epNum
+                            }
+                        )
+                    }
+                    if (episodes.isNotEmpty()) break
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
 
-        for (a in epLinks) {
-            val href = fixUrlNull(a.attr("href")) ?: continue
-            val epNum = a.attr("data-num").toIntOrNull() 
-                ?: a.attr("data-slug").toIntOrNull()
-                ?: Regex("""/ep-(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
-                ?: 1
-            val epName = a.attr("title").ifBlank { "Episode $epNum" }
-            val dataIds = a.attr("data-ids")
-
-            episodes.add(
-                newEpisode("$href#dataids=$dataIds") {
-                    this.name = epName
-                    this.episode = epNum
-                }
-            )
+        // 2. Absolute Fallback to prevent "Coming Soon" if the AJAX blocks us
+        if (episodes.isEmpty()) {
+            val infoBlock = document.selectFirst(".binfo, #w-info, .anime-info")
+            val epsDiv = infoBlock?.select("div.meta > div")?.firstOrNull { it.text().contains("Episodes:") }
+            val totalEps = epsDiv?.selectFirst("span")?.text()?.replace(Regex("[^0-9]"), "")?.toIntOrNull() ?: 1
+            
+            for (i in 1..totalEps) {
+                episodes.add(
+                    newEpisode("$mainUrl/watch/$slug/ep-$i") {
+                        this.name = "Episode $i"
+                        this.episode = i
+                    }
+                )
+            }
         }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
@@ -135,7 +168,6 @@ class AnikotoProvider : MainAPI() {
         val html = app.get(cleanData).text
         val document = Jsoup.parse(html)
 
-        // Grab data-ids from the current episode element if absent in URL
         val activeEp = document.selectFirst("#w-episodes a.active, .episodes a.active")
         val dataIds = dataIdsFromUrl.ifBlank { activeEp?.attr("data-ids") ?: "" }
 
@@ -147,7 +179,6 @@ class AnikotoProvider : MainAPI() {
 
         val linkIds = mutableSetOf<String>()
 
-        // Call server list API using exact parameter name found in screenshot: servers=
         if (dataIds.isNotBlank()) {
             try {
                 val res = app.get("$mainUrl/ajax/server/list?servers=$dataIds", headers = ajaxHeaders).text
@@ -168,7 +199,7 @@ class AnikotoProvider : MainAPI() {
             }
         }
 
-        // Direct iframe fallback from HTML
+        // Direct iframe fallback
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
             if (src.isNotBlank() && src.startsWith("http")) {
@@ -191,34 +222,40 @@ class AnikotoProvider : MainAPI() {
                     ?: json.optString("url")
                 
                 if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
-                    val isEmbedServer = streamUrl.contains("megaplay.buzz") || streamUrl.contains("vidtube.site") || streamUrl.contains("mewcdn.online") || streamUrl.contains("kwik")
+                    val isCloneEmbed = streamUrl.contains("megaplay") || streamUrl.contains("vidtube") || streamUrl.contains("mewcdn") || streamUrl.contains("kwik") || streamUrl.contains("vidplay")
                     
-                    if (isEmbedServer) {
-                        val embedHtml = app.get(streamUrl, headers = videoHeaders).text.replace("\\/", "/")
-                        val m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(embedHtml)
+                    if (isCloneEmbed) {
+                        // 1. URL SPOOFING: Trick Cloudstream's native extractors into decrypting aliases automatically
+                        val vidplayUrl = streamUrl.replace(Regex("""https?://[^/]+"""), "https://vidplay.site")
+                        val megacloudUrl = streamUrl.replace(Regex("""https?://[^/]+"""), "https://megacloud.tv")
+                        val rabbitUrl = streamUrl.replace(Regex("""https?://[^/]+"""), "https://rabbitstream.net")
                         
-                        if (m3u8Match != null) {
-                            val mediaUrl = m3u8Match.value
-                            callback(
-                                newExtractorLink(
-                                    source = "Anikoto",
-                                    name = when {
-                                        streamUrl.contains("vidtube") -> "Vidtube"
-                                        streamUrl.contains("megaplay") -> "MegaPlay"
-                                        else -> "Server Stream"
-                                    },
-                                    url = mediaUrl,
-                                    type = if (mediaUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("Referer" to streamUrl)
-                                }
-                            )
-                            found = true
-                        } else {
-                            if (loadExtractor(streamUrl, cleanData, subtitleCallback, callback)) found = true
+                        if (loadExtractor(vidplayUrl, cleanData, subtitleCallback, callback)) found = true
+                        if (loadExtractor(megacloudUrl, cleanData, subtitleCallback, callback)) found = true
+                        if (loadExtractor(rabbitUrl, cleanData, subtitleCallback, callback)) found = true
+                        
+                        // 2. ABSOLUTE FALLBACK: Scan embed HTML manually if decryptors fail
+                        if (!found) {
+                            val embedHtml = app.get(streamUrl, headers = videoHeaders).text.replace("\\/", "/")
+                            val m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(embedHtml)
+                            
+                            if (m3u8Match != null) {
+                                callback(
+                                    newExtractorLink(
+                                        source = "Anikoto Native",
+                                        name = "Direct Stream",
+                                        url = m3u8Match.value,
+                                        type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = Qualities.Unknown.value
+                                        this.headers = mapOf("Referer" to streamUrl)
+                                    }
+                                )
+                                found = true
+                            }
                         }
                     } else {
+                        // Let Cloudstream natively handle Streamwish, Filemoon, Dood, etc.
                         if (loadExtractor(streamUrl, cleanData, subtitleCallback, callback)) found = true
                     }
                 }
