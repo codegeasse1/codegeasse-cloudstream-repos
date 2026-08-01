@@ -3,6 +3,7 @@ package com.anikage
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import org.json.JSONObject
 
 class AniKageProvider : MainAPI() {
     override var mainUrl = "https://anikage.cc"
@@ -252,7 +253,7 @@ class AniKageProvider : MainAPI() {
             }
         }
 
-        // 2. Deep Script Object Scraper for single-server mappings (captures "dib", etc.)
+        // 2. Deep Script Object Scraper for single-server mappings
         try {
             val scriptContent = document.select("script").html()
             val providerKeys = Regex("""["']?provider["']?\s*[:=]\s*["']([a-zA-Z0-9_-]+)["']""").findAll(scriptContent)
@@ -266,7 +267,7 @@ class AniKageProvider : MainAPI() {
             }
         } catch (e: Exception) {}
 
-        // Baseline fallback providers including Dib
+        // Fallback providers including Dib
         val fallbackProviders = listOf(
             "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish", "server1"
@@ -292,12 +293,27 @@ class AniKageProvider : MainAPI() {
 
                 try {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                    if (responseText.isBlank() || responseText.contains("error", true) || responseText.length < 15) continue
+                    if (responseText.isBlank() || responseText.contains("error", true) || responseText.length < 10) continue
                     
-                    val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
-                    
-                    for (match in matches) {
-                        val cleanUrl = match.value.replace("\\/", "/")
+                    // JSON Deep Extraction Safeguard
+                    val streamCandidates = mutableSetOf<String>()
+                    try {
+                        val json = JSONObject(responseText)
+                        fun parseJson(obj: Any) {
+                            when (obj) {
+                                is JSONObject -> obj.keys().forEach { key -> parseJson(obj.get(key)) }
+                                is org.json.JSONArray -> for (i in 0 until obj.length()) parseJson(obj.get(i))
+                                is String -> if (obj.startsWith("http") || obj.contains("prox.")) streamCandidates.add(obj)
+                            }
+                        }
+                        parseJson(json)
+                    } catch (e: Exception) {
+                        // If not valid JSON, use regex matching on plain response text
+                        Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { streamCandidates.add(it.value) }
+                    }
+
+                    for (rawUrl in streamCandidates) {
+                        val cleanUrl = rawUrl.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
                         
                         val isProxyStream = cleanUrl.contains("prox.anicore.tv") || cleanUrl.contains("prox.anikage.cc") || cleanUrl.contains("workers.dev")
@@ -321,7 +337,6 @@ class AniKageProvider : MainAPI() {
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
                             val extractedLinks = mutableListOf<ExtractorLink>()
-                            
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
                                 extractedLinks.add(link)
                             }) {
@@ -352,10 +367,10 @@ class AniKageProvider : MainAPI() {
             }
         }
 
+        // Final HTML Document Sweep for any embedded proxy streams
         if (!found) {
             try {
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
-                
                 for (match in matches) {
                     val extractedUrl = match.value
                     callback(
