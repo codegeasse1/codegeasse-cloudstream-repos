@@ -92,7 +92,6 @@ class AniKageProvider : MainAPI() {
 
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-            
             val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
@@ -146,41 +145,6 @@ class AniKageProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        if (items.isEmpty()) {
-            try {
-                val html = app.get("$mainUrl/browse?search=$query").text
-                val scriptData = Jsoup.parse(html).select("script").html()
-                val parts = scriptData.split("slug:\"")
-                
-                for (i in 1 until parts.size) {
-                    val part = parts[i]
-                    val slug = part.substringBefore("\"")
-                    if (slug.isBlank() || slug.length > 200) continue
-                    
-                    val window = part.take(1500)
-                    val titleBlock = window.substringAfter("title:{", "").substringBefore("}")
-                    var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
-                    if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
-                    if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
-                    if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
-                    
-                    val coverBlock = window.substringAfter("coverImage:{", "").substringBefore("}")
-                    var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
-                    if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
-                    if (poster == coverBlock) poster = ""
-                    
-                    val url = "$mainUrl/anime/info/$slug"
-                    if (items.none { it.url == url }) {
-                        items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
-                            this.posterUrl = poster
-                        })
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-        
         return items
     }
 
@@ -208,7 +172,6 @@ class AniKageProvider : MainAPI() {
         val availableEpisodes = if (currentEps > 0) currentEps else totalEps
 
         val episodes = mutableListOf<Episode>()
-        
         val limit = if (availableEpisodes > 0) availableEpisodes else 1
         for (i in 1..limit) {
             episodes.add(newEpisode("$mainUrl/anime/watch/$slug?ep=$i") {
@@ -243,23 +206,20 @@ class AniKageProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // 1. Direct Page Render Scraping (Captures hlsjs-video src / proxy URLs embedded in HTML instantly)
+        // 1. Direct Page Render Scrape (Captures embedded proxy tags like hlsjs-video and video sources)
         try {
             val html = app.get(cleanData, headers = videoHeaders).text.replace("\\/", "/")
             val document = Jsoup.parse(html)
 
-            // Look inside custom video tags or script states
-            val videoTags = document.select("hlsjs-video, video, source")
-            for (el in videoTags) {
+            document.select("hlsjs-video, video, source").forEach { el ->
                 val src = el.attr("src").ifBlank { el.attr("data-src") }
                 if (src.isNotBlank() && (src.contains("prox.") || src.contains(".m3u8") || src.startsWith("http"))) {
-                    val isM3u8 = src.contains(".m3u8") || src.contains("prox.")
                     callback(
                         newExtractorLink(
                             source = "AniKage Direct",
                             name = "Direct Stream",
                             url = src,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = if (src.contains(".m3u8") || src.contains("prox.")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.quality = Qualities.Unknown.value
                             this.headers = videoHeaders
@@ -269,15 +229,13 @@ class AniKageProvider : MainAPI() {
                 }
             }
 
-            // Regex sweep for proxy strings directly in HTML
-            val proxyMatches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(html)
-            for (m in proxyMatches) {
-                val pUrl = m.value
+            // Fallback direct regex sweep for proxy paths inside HTML
+            Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(html).forEach { m ->
                 callback(
                     newExtractorLink(
                         source = "Dib / Proxy",
                         name = "Proxy Stream",
-                        url = pUrl,
+                        url = m.value,
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = Qualities.Unknown.value
@@ -290,8 +248,8 @@ class AniKageProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // 2. Focused API Provider Sweep (Prioritizing "dib", "vidtube", "megaplay", and dynamic names)
-        val targetProviders = listOf("dib", "vidtube", "vibeube", "megaplay", "megatube", "koto", "wave", "miko", "neko", "ken")
+        // 2. Comprehensive Provider Endpoint Sweep
+        val targetProviders = listOf("dib", "vidtube", "vibeube", "megaplay", "megatube", "koto", "wave", "miko", "neko", "ken", "server1")
         
         for (lang in listOf("sub", "dub")) {
             for (provider in targetProviders) {
@@ -300,14 +258,22 @@ class AniKageProvider : MainAPI() {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     if (responseText.isBlank() || responseText.length < 10 || responseText.contains("error", true)) continue
 
-                    // Parse JSON payload efficiently
-                    val json = JSONObject(responseText)
-                    val urlField = json.optString("url").ifBlank { json.optString("file") }.ifBlank { json.optString("src") }
-                    
                     val candidates = mutableSetOf<String>()
-                    if (urlField.isNotBlank()) candidates.add(urlField)
                     
-                    // Fallback regex matching on the response text
+                    // Safely extract text nodes or JSON values without crashing the container container parser
+                    try {
+                        val json = JSONObject(responseText)
+                        val keys = listOf("url", "file", "src", "link", "stream")
+                        for (k in keys) {
+                            if (json.has(k)) {
+                                val v = json.optString(k)
+                                if (v.isNotBlank()) candidates.add(v)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Not JSON, ignore and rely on regex match below
+                    }
+
                     Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { candidates.add(it.value) }
 
                     for (rawUrl in candidates) {
@@ -332,7 +298,7 @@ class AniKageProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Quietly continue loop on miss
+                    // Skip invalid provider endpoints smoothly
                 }
             }
         }
