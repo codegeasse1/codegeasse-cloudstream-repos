@@ -101,6 +101,7 @@ class ReAnimeProvider : MainAPI() {
             var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?native["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
             if (title.isBlank()) title = animeId.replace("-", " ").replaceFirstChar { it.uppercase() }
 
             var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
@@ -223,27 +224,36 @@ class ReAnimeProvider : MainAPI() {
         // Helper function to scan HTML for any unencrypted video host URLs
         suspend fun scanHtmlForLinks(htmlData: String) {
             try {
-                // 1. Direct M3U8/MP4 streams (Bypassing FlixCloud)
-                val directRegex = Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*""")
+                // 1. Direct M3U8/MP4 streams (Including FlixCloud fetch links)
+                val directRegex = Regex("""https?://[^\s"'\\]+\.(?:m3u8|mp4)(?:\?[^\s"'\\]*)?""")
                 val directMatches = directRegex.findAll(htmlData)
                 for (match in directMatches) {
                     val streamUrl = match.value
-                    if (!extractedUrls.contains(streamUrl) && !streamUrl.contains("flixcloud")) {
-                        extractedUrls.add(streamUrl)
-                        val isM3u8 = streamUrl.contains(".m3u8", true)
-                        callback(
-                            newExtractorLink(
-                                source = "Re:Anime Direct",
-                                name = "Direct Stream",
-                                url = streamUrl,
-                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        found = true
+                    // Skip blob URLs but ALLOW flixcloud fetch URLs
+                    if (streamUrl.contains("blob:")) continue
+                    if (extractedUrls.contains(streamUrl)) continue
+
+                    extractedUrls.add(streamUrl)
+                    val isM3u8 = streamUrl.contains(".m3u8", true)
+                    val qualityName = when {
+                        streamUrl.contains("master", true) -> "Master"
+                        streamUrl.contains("audio", true) -> "Audio"
+                        else -> "Direct"
                     }
+
+                    callback(
+                        newExtractorLink(
+                            source = "FlixCloud",
+                            name = qualityName,
+                            url = streamUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = mainUrl
+                            this.headers = mapOf("Referer" to mainUrl, "Origin" to mainUrl)
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    found = true
                 }
 
                 // 2. Scan for Known Alternate Hosts (Vidhide, Streamwish, etc.)
