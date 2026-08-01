@@ -200,11 +200,16 @@ class ReAnimeProvider : MainAPI() {
     //  LINKS
     // =====================================================================
 
-    private fun note(callback: (ExtractorLink) -> Unit, msg: String) {
+    // NOTE: must be `suspend` — newExtractorLink is a suspend function
+    private suspend fun note(callback: (ExtractorLink) -> Unit, msg: String) {
         if (!DEBUG) return
         callback(
-            newExtractorLink(name, "DBG ${msg.take(90)}",
-                "https://127.0.0.1/none.m3u8", ExtractorLinkType.M3U8) {
+            newExtractorLink(
+                source = name,
+                name = "DBG ${msg.take(90)}",
+                url = "https://127.0.0.1/none.m3u8",
+                type = ExtractorLinkType.M3U8
+            ) {
                 this.quality = Qualities.Unknown.value
             }
         )
@@ -224,7 +229,8 @@ class ReAnimeProvider : MainAPI() {
 
         val seen = hashSetOf<String>()
 
-        fun push(rawUrl: String, label: String): Boolean {
+        // NOTE: must be `suspend` — newExtractorLink is a suspend function
+        suspend fun push(rawUrl: String, label: String): Boolean {
             val u = rawUrl.unesc().trim().trimEnd(',', ';', ')', '"', '\'')
             if (u.isBlank() || u.startsWith("blob:") || !seen.add(u)) return false
             callback(
