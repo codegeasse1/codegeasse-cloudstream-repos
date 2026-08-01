@@ -3,8 +3,6 @@ package com.reanime
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
-import org.json.JSONArray
-import org.json.JSONObject
 
 class ReAnimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
@@ -14,31 +12,51 @@ class ReAnimeProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    private fun parseAnimeArray(jsonArrayStr: String?): List<SearchResponse> {
-        if (jsonArrayStr.isNullOrBlank()) return emptyList()
+    private fun extractSectionArray(html: String, key: String): List<SearchResponse> {
+        val match = Regex("""["']?$key["']?\s*:\s*\[""").find(html) ?: return emptyList()
+        val startIdx = html.indexOf('[', match.range.first)
+        if (startIdx == -1) return emptyList()
+
+        var bracketCount = 0
+        var endIdx = -1
+        for (i in startIdx until html.length) {
+            if (html[i] == '[') bracketCount++
+            else if (html[i] == ']') bracketCount--
+
+            if (bracketCount == 0) {
+                endIdx = i + 1
+                break
+            }
+        }
+        if (endIdx == -1) return emptyList()
+
+        val arrayStr = html.substring(startIdx, endIdx)
         val items = mutableListOf<SearchResponse>()
-        try {
-            val arr = JSONArray(jsonArrayStr)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val id = obj.optString("anime_id")
-                if (id.isBlank()) continue
-                
-                val titleObj = obj.optJSONObject("title")
-                val title = titleObj?.optString("english")?.ifBlank { null }
-                    ?: titleObj?.optString("user_preferred")?.ifBlank { null }
-                    ?: titleObj?.optString("romaji") ?: id
-                    
-                val coverObj = obj.optJSONObject("cover_image")
-                val poster = coverObj?.optString("extra_large")?.ifBlank { null }
-                    ?: coverObj?.optString("large") ?: ""
-                    
-                items.add(newAnimeSearchResponse(title, "$mainUrl/anime/$id", TvType.Anime) {
+        val parts = arrayStr.split(Regex("""["']?anime_id["']?\s*:\s*["']"""))
+
+        for (i in 1 until parts.size) {
+            val part = parts[i]
+            val animeId = part.substringBefore("\"").substringBefore("'")
+            if (animeId.isBlank() || animeId.length > 200) continue
+
+            val window = part.take(2000).replace("\\/", "/")
+
+            var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?native["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = animeId.replace("-", " ").replaceFirstChar { it.uppercase() }
+
+            var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?medium["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+
+            val url = "$mainUrl/anime/$animeId"
+            if (items.none { it.url == url }) {
+                items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
                     this.posterUrl = poster.replace("\\/", "/")
                 })
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
         return items
     }
@@ -46,51 +64,50 @@ class ReAnimeProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get("$mainUrl/home").text
         val homeItems = mutableListOf<HomePageList>()
-        
+
         val sections = listOf(
             "latest_aired" to "Latest Episodes",
             "new_on_site" to "New on Site",
             "trending" to "Trending",
             "upcoming" to "Upcoming"
         )
-        
+
         for ((key, title) in sections) {
-            // SvelteKit stores the data arrays directly in the HTML script tag
-            val regex = Regex(""""$key"\s*:\s*(\[.*?\])\s*,\s*"(?:[a-zA-Z0-9_]+_cursor|upcoming|new_on_site)"""")
-            val match = regex.find(html)
-            val items = parseAnimeArray(match?.groupValues?.get(1))
+            val items = extractSectionArray(html, key)
             if (items.isNotEmpty()) {
                 homeItems.add(HomePageList(title, items))
             }
         }
-        
+
         return newHomePageResponse(homeItems)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val html = app.get("$mainUrl/search?q=$query").text
-        val parts = html.split(Regex("""["']?anime_id["']?\s*:\s*["']"""))
         val items = mutableListOf<SearchResponse>()
-        
+        val parts = html.split(Regex("""["']?anime_id["']?\s*:\s*["']"""))
+
         for (i in 1 until parts.size) {
             val part = parts[i]
-            val id = part.substringBefore("\"").substringBefore("'")
-            if (id.isBlank() || id.length > 200) continue
-            
-            val window = part.take(1500).replace("\\/", "/")
-            
-            var title = Regex(""""english"\s*:\s*"([^"]+)"""").find(window)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = Regex(""""user_preferred"\s*:\s*"([^"]+)"""").find(window)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = Regex(""""romaji"\s*:\s*"([^"]+)"""").find(window)?.groupValues?.get(1) ?: ""
-            if (title.isBlank()) title = id.replace("-", " ").replaceFirstChar { it.uppercase() }
-            
-            var poster = Regex(""""extra_large"\s*:\s*"([^"]+)"""").find(window)?.groupValues?.get(1) ?: ""
-            if (poster.isBlank()) poster = Regex(""""large"\s*:\s*"([^"]+)"""").find(window)?.groupValues?.get(1) ?: ""
-            
-            val url = "$mainUrl/anime/$id"
+            val animeId = part.substringBefore("\"").substringBefore("'")
+            if (animeId.isBlank() || animeId.length > 200) continue
+
+            val window = part.take(2000).replace("\\/", "/")
+
+            var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?romaji["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = Regex("""["']?native["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (title.isBlank()) title = animeId.replace("-", " ").replaceFirstChar { it.uppercase() }
+
+            var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?large["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) poster = Regex("""["']?medium["']?\s*:\s*["']([^"']+)""").find(window)?.groupValues?.get(1) ?: ""
+
+            val url = "$mainUrl/anime/$animeId"
             if (items.none { it.url == url }) {
                 items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
-                    this.posterUrl = poster
+                    this.posterUrl = poster.replace("\\/", "/")
                 })
             }
         }
@@ -100,16 +117,18 @@ class ReAnimeProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val html = app.get(url).text
         val document = Jsoup.parse(html)
-        
-        var title = Regex(""""english"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
-        if (title.isNullOrBlank()) title = Regex(""""user_preferred"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
-        if (title.isNullOrBlank()) title = document.selectFirst("h1")?.text()?.trim() ?: "Unknown"
 
-        var poster = Regex(""""extra_large"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+        val animeId = url.substringAfter("/anime/").substringBefore("?")
+
+        var title = Regex("""["']?english["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
+        if (title.isNullOrBlank()) title = Regex("""["']?user_preferred["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
+        if (title.isNullOrBlank()) title = document.selectFirst("h1")?.text()?.trim() ?: animeId.replace("-", " ").replaceFirstChar { it.uppercase() }
+
+        var poster = Regex("""["']?extra_large["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
         if (poster.isNullOrBlank()) poster = document.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
         poster = poster.replace("\\/", "/")
 
-        var plot = Regex(""""description"\s*:\s*"((?:[^"\\]|\\.)*)"""").find(html)?.groupValues?.get(1)
+        var plot = Regex("""["']?description["']?\s*:\s*["']((?:[^"'\\]|\\.)*)["']""").find(html)?.groupValues?.get(1)
             ?.replace("\\n", "\n")?.replace("\\u003C", "<")
         if (plot.isNullOrBlank()) {
             plot = document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
@@ -118,12 +137,13 @@ class ReAnimeProvider : MainAPI() {
         }
 
         val episodes = mutableListOf<Episode>()
-        // Re:Anime renders all episode links directly into the DOM
         document.select("a[href*=/watch/]").forEach { a ->
             val epHref = fixUrlNull(a.attr("href")) ?: return@forEach
-            val epNum = a.attr("data-episode").toIntOrNull() ?: return@forEach
+            val epNum = Regex("""[?&]ep=(\d+)""").find(epHref)?.groupValues?.get(1)?.toIntOrNull()
+                ?: a.attr("data-episode").toIntOrNull()
+                ?: 1
             val epName = a.selectFirst(".text-[13px] span")?.text() ?: "Episode $epNum"
-            
+
             episodes.add(
                 newEpisode(epHref) {
                     name = epName
@@ -146,63 +166,63 @@ class ReAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = app.get(data).text
+        val cleanData = data.substringBefore("#")
+        val html = app.get(cleanData).text
         var found = false
 
-        // 1. Hunt for FlixCloud URLs inside the page source
-        val flixCloudMatches = Regex("""https?://(?:fetch7\.)?flixcloud\.cc[^\s"'<>\\]+""").findAll(html)
-        flixCloudMatches.forEach { match ->
-            val flixUrl = match.value.replace("\\/", "/")
-            if (flixUrl.contains(".m3u8")) {
-                if (!loadExtractor(flixUrl, data, subtitleCallback, callback)) {
-                    callback(
-                        newExtractorLink(
-                            source = "FlixCloud",
-                            name = "FlixCloud",
-                            url = flixUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("Referer" to "$mainUrl/")
-                        }
-                    )
-                }
+        val videoHeaders = mapOf(
+            "Referer" to "$mainUrl/",
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+
+        // 1. Hunt for direct M3U8 links in page source
+        val m3u8Matches = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(html.replace("\\/", "/"))
+        for (match in m3u8Matches) {
+            val m3u8Url = match.value
+            if (m3u8Url.contains("flixcloud") || m3u8Url.contains("megacloud") || m3u8Url.contains("master.m3u8")) {
+                callback(
+                    newExtractorLink(
+                        source = "Re:Anime",
+                        name = "FlixCloud",
+                        url = m3u8Url,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.headers = videoHeaders
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
                 found = true
             }
         }
 
-        // 2. Extract Subtitles (VTT) if available
-        val vttMatches = Regex("""https?://(?:fetch\.)?flixcloud\.cc/thumbnails_vtt/[^\s"'<>\\]+""").findAll(html)
-        vttMatches.forEach { match ->
-            val vttUrl = match.value.replace("\\/", "/")
+        // 2. Extract Subtitles (VTT)
+        val vttMatches = Regex("""https?://[^\s"'<>\\]+\.vtt[^\s"'<>\\]*""").findAll(html.replace("\\/", "/"))
+        for (match in vttMatches) {
+            val vttUrl = match.value
             subtitleCallback(SubtitleFile("English", vttUrl))
         }
 
-        // 3. Fallback: Search for standard video APIs
+        // 3. Fallback: Search for API endpoints
         if (!found) {
-            val slug = data.substringAfter("/watch/").substringBefore("?")
-            val ep = Regex("""[?&]ep=(\d+)""").find(data)?.groupValues?.get(1) ?: "1"
+            val slug = cleanData.substringAfter("/watch/").substringBefore("?")
+            val ep = Regex("""[?&]ep=(\d+)""").find(cleanData)?.groupValues?.get(1) ?: "1"
 
             try {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=flixcloud&lang=sub"
-                val response = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                
-                val m3u8Regex = Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""")
-                m3u8Regex.findAll(response).forEach { match ->
-                    val cleanUrl = match.value.replace("\\/", "/")
-                    if (!loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
-                        callback(
-                            newExtractorLink(
-                                source = "ReAnime",
-                                name = "Direct Stream",
-                                url = cleanUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf("Referer" to "$mainUrl/")
-                            }
-                        )
-                    }
+                val response = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text.replace("\\/", "/")
+
+                Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").findAll(response).forEach { match ->
+                    callback(
+                        newExtractorLink(
+                            source = "Re:Anime",
+                            name = "FlixCloud",
+                            url = match.value,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.headers = videoHeaders
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
                     found = true
                 }
             } catch (e: Exception) {
