@@ -241,7 +241,7 @@ class AniKageProvider : MainAPI() {
 
         val knownProviders = listOf(
             "vibeube", "megatube", "koto", "e-koto", "wave", "dib", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish", "vidtube", "megaplay"
         )
         
         val activeProviders = knownProviders.filter { provider ->
@@ -252,7 +252,7 @@ class AniKageProvider : MainAPI() {
         }.toMutableList()
 
         if (activeProviders.isEmpty()) {
-            activeProviders.addAll(listOf("vibeube", "megatube", "koto", "neko", "ken", "miko", "vibe"))
+            activeProviders.addAll(listOf("vibeube", "megatube", "vidtube", "megaplay", "koto", "neko", "ken", "miko", "vibe"))
         }
 
         val langs = mutableListOf("sub")
@@ -260,9 +260,11 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
+        // Added strict Origin/Accept headers so Cloudflare workers don't drop the TS chunk requests
         val videoHeaders = mapOf(
-            "Referer" to "$mainUrl/",
             "Origin" to mainUrl,
+            "Referer" to "$mainUrl/",
+            "Accept" to "*/*",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
@@ -289,9 +291,9 @@ class AniKageProvider : MainAPI() {
                             val isMegaPlay = provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
                             
                             val sourceGroup = when {
-                                isVidtube -> "Vidtube"
-                                isMegaPlay -> "MegaPlay"
-                                else -> provider.replaceFirstChar { it.uppercase() }
+                                isVidtube -> "1. Vidtube"
+                                isMegaPlay -> "3. MegaPlay" 
+                                else -> "2. ${provider.replaceFirstChar { it.uppercase() }}"
                             }
                             
                             // FORCES CloudStream to auto-play Vidtube first by manipulating the Quality tag
@@ -306,9 +308,12 @@ class AniKageProvider : MainAPI() {
                                     source = sourceGroup,
                                     name = "${provider.replaceFirstChar { it.uppercase() }} ($lang)",
                                     url = cleanUrl,
-                                    type = if (isDirectM3u8 || cleanUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    // CRITICAL: Passing VIDEO type instead of M3U8 forces ExoPlayer to handle the adaptive stream natively.
+                                    // This stops CloudStream from parsing the M3U8 and destroying our faked quality sorting, 
+                                    // and it also fixes the infinite buffering on the TS chunks.
+                                    type = ExtractorLinkType.VIDEO
                                 ) {
-                                    this.quality = forcedQuality
+                                    this.quality = forcedQuality 
                                     this.headers = videoHeaders
                                 }
                             )
@@ -328,15 +333,14 @@ class AniKageProvider : MainAPI() {
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true)
                                 
                                 val sourceGroup = when {
-                                    isVidtube -> "Vidtube"
-                                    isMegaPlay -> "MegaPlay"
-                                    else -> link.source
+                                    isVidtube -> "1. Vidtube"
+                                    isMegaPlay -> "3. MegaPlay"
+                                    else -> "2. ${link.source}"
                                 }
 
-                                // FORCES CloudStream to auto-play Vidtube first by manipulating the Quality tag
                                 val forcedQuality = when {
-                                    isVidtube -> Qualities.P1080.value // Puts it at the top
-                                    isMegaPlay -> Qualities.P144.value // Puts it at the absolute bottom
+                                    isVidtube -> Qualities.P1080.value
+                                    isMegaPlay -> Qualities.P144.value
                                     else -> link.quality
                                 }
 
@@ -345,7 +349,8 @@ class AniKageProvider : MainAPI() {
                                         source = sourceGroup,
                                         name = link.name,
                                         url = link.url,
-                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        // Same here, force VIDEO type
+                                        type = ExtractorLinkType.VIDEO
                                     ) {
                                         this.quality = forcedQuality
                                         this.headers = videoHeaders
@@ -368,16 +373,29 @@ class AniKageProvider : MainAPI() {
                 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/")
                     
+                    val isVidtubeUrl = extractedUrl.contains("vibe", ignoreCase = true) || extractedUrl.contains("vidtube", ignoreCase = true)
+                    val isMegaPlayUrl = extractedUrl.contains("mega", ignoreCase = true)
+
+                    val sourceGroup = when {
+                        isVidtubeUrl -> "1. Vidtube Direct"
+                        isMegaPlayUrl -> "3. MegaPlay Direct"
+                        else -> "2. Direct Stream"
+                    }
+                    val forcedQuality = when {
+                        isVidtubeUrl -> Qualities.P1080.value
+                        isMegaPlayUrl -> Qualities.P144.value
+                        else -> Qualities.P720.value
+                    }
+
                     callback(
                         newExtractorLink(
-                            source = "Direct",
+                            source = sourceGroup,
                             name = "Direct Stream",
                             url = extractedUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = ExtractorLinkType.VIDEO
                         ) {
-                            this.quality = Qualities.P720.value
+                            this.quality = forcedQuality
                             this.headers = videoHeaders
                         }
                     )
