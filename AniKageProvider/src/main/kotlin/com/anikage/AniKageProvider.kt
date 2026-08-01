@@ -237,148 +237,29 @@ class AniKageProvider : MainAPI() {
             ?: Regex("""/(\d+)""").find(cleanData)?.groupValues?.get(1)
             ?: "1"
 
-        val html = app.get(cleanData).text
-        val cleanHtml = html.replace("\\/", "/")
-        val document = Jsoup.parse(cleanHtml)
-
-        val activeProviders = mutableSetOf<String>()
-        
-        // 1. DOM attribute collection
-        document.select("[data-provider], [provider], .server-item, button, div[class*='server'], li").forEach { el ->
-            listOf(el.attr("data-provider"), el.attr("provider"), el.attr("data-server"), el.text()).forEach { attr ->
-                val cleanAttr = attr.trim().lowercase()
-                if (cleanAttr.isNotBlank() && cleanAttr.length < 15 && !cleanAttr.contains("server") && !cleanAttr.contains("sub") && !cleanAttr.contains("dub")) {
-                    activeProviders.add(cleanAttr)
-                }
-            }
-        }
-
-        // 2. Deep Script Object Scraper for single-server mappings
-        try {
-            val scriptContent = document.select("script").html()
-            val providerKeys = Regex("""["']?provider["']?\s*[:=]\s*["']([a-zA-Z0-9_-]+)["']""").findAll(scriptContent)
-            for (match in providerKeys) {
-                val key = match.groupValues[1].lowercase()
-                if (key.isNotBlank()) activeProviders.add(key)
-            }
-            val tokenMatches = Regex("""["']([a-z0-9_-]{2,10})["']\s*:\s*\{[^}]*["']name["']""").findAll(scriptContent)
-            for (match in tokenMatches) {
-                activeProviders.add(match.groupValues[1].lowercase())
-            }
-        } catch (e: Exception) {}
-
-        // Fallback providers including Dib
-        val fallbackProviders = listOf(
-            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish", "server1"
-        )
-        fallbackProviders.forEach { activeProviders.add(it) }
-
-        val langs = mutableListOf("sub")
-        if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
-            langs.add("dub")
-        }
-
         val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
             "Origin" to mainUrl,
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        
-        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
-        for (lang in langs) {
-            for (provider in activeProviders) {
-                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+        // 1. Direct Page Render Scraping (Captures hlsjs-video src / proxy URLs embedded in HTML instantly)
+        try {
+            val html = app.get(cleanData, headers = videoHeaders).text.replace("\\/", "/")
+            val document = Jsoup.parse(html)
 
-                try {
-                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                    if (responseText.isBlank() || responseText.contains("error", true) || responseText.length < 10) continue
-                    
-                    // JSON Deep Extraction Safeguard
-                    val streamCandidates = mutableSetOf<String>()
-                    try {
-                        val json = JSONObject(responseText)
-                        fun parseJson(obj: Any) {
-                            when (obj) {
-                                is JSONObject -> obj.keys().forEach { key -> parseJson(obj.get(key)) }
-                                is org.json.JSONArray -> for (i in 0 until obj.length()) parseJson(obj.get(i))
-                                is String -> if (obj.startsWith("http") || obj.contains("prox.")) streamCandidates.add(obj)
-                            }
-                        }
-                        parseJson(json)
-                    } catch (e: Exception) {
-                        // If not valid JSON, use regex matching on plain response text
-                        Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { streamCandidates.add(it.value) }
-                    }
-
-                    for (rawUrl in streamCandidates) {
-                        val cleanUrl = rawUrl.replace("\\/", "/")
-                        if (exclusions.any { cleanUrl.contains(it) }) continue
-                        
-                        val isProxyStream = cleanUrl.contains("prox.anicore.tv") || cleanUrl.contains("prox.anikage.cc") || cleanUrl.contains("workers.dev")
-                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || isProxyStream
-                        val isDirectMp4 = cleanUrl.contains(".mp4")
-                        
-                        if (isDirectM3u8 || isDirectMp4) {
-                            val displayProviderName = provider.replaceFirstChar { it.uppercase() }
-                            
-                            callback(
-                                newExtractorLink(
-                                    source = displayProviderName,
-                                    name = "$displayProviderName ($lang)",
-                                    url = cleanUrl,
-                                    type = if (isDirectM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = Qualities.Unknown.value 
-                                    this.headers = videoHeaders
-                                }
-                            )
-                            found = true
-                        } else if (cleanUrl.startsWith("http")) {
-                            val extractedLinks = mutableListOf<ExtractorLink>()
-                            if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
-                                extractedLinks.add(link)
-                            }) {
-                                found = true
-                            }
-                            
-                            for (link in extractedLinks) {
-                                val displayProviderName = provider.replaceFirstChar { it.uppercase() }
-                                callback(
-                                    newExtractorLink(
-                                        source = displayProviderName,
-                                        name = link.name,
-                                        url = link.url,
-                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.quality = link.quality
-                                        this.headers = videoHeaders
-                                        this.extractorData = link.extractorData
-                                        this.referer = link.referer
-                                    }
-                                )
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Suppress and continue
-                }
-            }
-        }
-
-        // Final HTML Document Sweep for any embedded proxy streams
-        if (!found) {
-            try {
-                val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
-                for (match in matches) {
-                    val extractedUrl = match.value
+            // Look inside custom video tags or script states
+            val videoTags = document.select("hlsjs-video, video, source")
+            for (el in videoTags) {
+                val src = el.attr("src").ifBlank { el.attr("data-src") }
+                if (src.isNotBlank() && (src.contains("prox.") || src.contains(".m3u8") || src.startsWith("http"))) {
+                    val isM3u8 = src.contains(".m3u8") || src.contains("prox.")
                     callback(
                         newExtractorLink(
-                            source = "Dib Proxy",
-                            name = "Dib Proxy Stream",
-                            url = extractedUrl,
-                            type = ExtractorLinkType.M3U8
+                            source = "AniKage Direct",
+                            name = "Direct Stream",
+                            url = src,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.quality = Qualities.Unknown.value
                             this.headers = videoHeaders
@@ -386,8 +267,73 @@ class AniKageProvider : MainAPI() {
                     )
                     found = true
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
+            }
+
+            // Regex sweep for proxy strings directly in HTML
+            val proxyMatches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(html)
+            for (m in proxyMatches) {
+                val pUrl = m.value
+                callback(
+                    newExtractorLink(
+                        source = "Dib / Proxy",
+                        name = "Proxy Stream",
+                        url = pUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = videoHeaders
+                    }
+                )
+                found = true
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 2. Focused API Provider Sweep (Prioritizing "dib", "vidtube", "megaplay", and dynamic names)
+        val targetProviders = listOf("dib", "vidtube", "vibeube", "megaplay", "megatube", "koto", "wave", "miko", "neko", "ken")
+        
+        for (lang in listOf("sub", "dub")) {
+            for (provider in targetProviders) {
+                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+                try {
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+                    if (responseText.isBlank() || responseText.length < 10 || responseText.contains("error", true)) continue
+
+                    // Parse JSON payload efficiently
+                    val json = JSONObject(responseText)
+                    val urlField = json.optString("url").ifBlank { json.optString("file") }.ifBlank { json.optString("src") }
+                    
+                    val candidates = mutableSetOf<String>()
+                    if (urlField.isNotBlank()) candidates.add(urlField)
+                    
+                    // Fallback regex matching on the response text
+                    Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).forEach { candidates.add(it.value) }
+
+                    for (rawUrl in candidates) {
+                        val cleanUrl = rawUrl.replace("\\/", "/")
+                        if (cleanUrl.contains("jquery") || cleanUrl.contains("anilist")) continue
+
+                        val isProxy = cleanUrl.contains("prox.") || cleanUrl.contains(".m3u8") || cleanUrl.contains("workers.dev")
+                        if (isProxy || cleanUrl.startsWith("http")) {
+                            val displayName = provider.replaceFirstChar { it.uppercase() }
+                            callback(
+                                newExtractorLink(
+                                    source = displayName,
+                                    name = "$displayName ($lang)",
+                                    url = cleanUrl,
+                                    type = if (cleanUrl.contains(".m3u8") || cleanUrl.contains("prox.")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = videoHeaders
+                                }
+                            )
+                            found = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Quietly continue loop on miss
+                }
             }
         }
 
