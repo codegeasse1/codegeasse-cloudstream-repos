@@ -145,14 +145,15 @@ class AnikotoProvider : MainAPI() {
                         
                         if (m3u8Match != null) {
                             callback(
-                                ExtractorLink(
+                                newExtractorLink(
                                     source = "Anikoto",
                                     name = if (streamUrl.contains("vidtube")) "Vidtube" else "MegaPlay",
                                     url = m3u8Match.value,
-                                    referer = streamUrl,
-                                    quality = Qualities.Unknown.value,
                                     type = ExtractorLinkType.M3U8
-                                )
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf("Referer" to streamUrl)
+                                }
                             )
                             found = true
                         } else {
