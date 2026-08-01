@@ -2,8 +2,18 @@ package com.anikoto
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.Plugin
+import android.content.Context
 import org.jsoup.Jsoup
 import org.json.JSONObject
+
+@CloudstreamPlugin
+class AnikotoPlugin : Plugin() {
+    override fun load(context: Context) {
+        registerMainAPI(AnikotoProvider())
+    }
+}
 
 class AnikotoProvider : MainAPI() {
     override var mainUrl = "https://anikototv.to"
@@ -63,7 +73,6 @@ class AnikotoProvider : MainAPI() {
         val episodes = mutableListOf<Episode>()
         val slug = url.substringAfter("/watch/").substringBefore("/ep-").substringBefore("?")
         
-        // Extract total episodes from info text
         val episodesCountStr = document.select("div.meta:contains(Episodes:) span").text().replace(Regex("[^0-9]"), "")
         val totalEps = episodesCountStr.toIntOrNull() ?: 1
 
@@ -132,7 +141,6 @@ class AnikotoProvider : MainAPI() {
                 val res = app.get("$mainUrl/ajax/server?get=$id").text
                 val json = JSONObject(res)
                 
-                // Usually returns {"status": 200, "result": {"url": "https://megaplay.buzz/..."}}
                 val streamUrl = json.optJSONObject("result")?.optString("url") ?: json.optString("url")
                 
                 if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
@@ -145,15 +153,14 @@ class AnikotoProvider : MainAPI() {
                         
                         if (m3u8Match != null) {
                             callback(
-                                newExtractorLink(
+                                ExtractorLink(
                                     source = "Anikoto",
                                     name = if (streamUrl.contains("vidtube")) "Vidtube" else "MegaPlay",
                                     url = m3u8Match.value,
+                                    referer = streamUrl,
+                                    quality = Qualities.Unknown.value,
                                     type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("Referer" to streamUrl)
-                                }
+                                )
                             )
                             found = true
                         } else {
