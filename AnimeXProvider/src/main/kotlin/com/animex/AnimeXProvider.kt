@@ -389,3 +389,4 @@ class AnimeXProvider : MainAPI() {
 
         return found
     }
+}
