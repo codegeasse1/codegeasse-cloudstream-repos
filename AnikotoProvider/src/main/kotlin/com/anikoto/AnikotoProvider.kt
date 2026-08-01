@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import android.content.Context
 import org.jsoup.Jsoup
 import org.json.JSONObject
+import kotlin.math.max
 
 @CloudstreamPlugin
 class AnikotoPlugin : Plugin() {
@@ -32,7 +33,13 @@ class AnikotoProvider : MainAPI() {
             val a = element.selectFirst("a.name, a.title, .info a") ?: element.selectFirst("a") ?: continue
             val url = fixUrlNull(a.attr("href")) ?: continue
             val title = a.text().trim()
-            val poster = element.selectFirst("img")?.attr("src") ?: ""
+            
+            // Handles standard <img> tags AND CSS background-image elements
+            val style = element.selectFirst(".image div")?.attr("style") ?: ""
+            var poster = Regex("""url\(['"]?(.*?)['"]?\)""").find(style)?.groupValues?.get(1) ?: ""
+            if (poster.isBlank()) {
+                poster = element.selectFirst("img")?.attr("data-src") ?: element.selectFirst("img")?.attr("src") ?: ""
+            }
             
             items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
                 this.posterUrl = poster
@@ -73,10 +80,23 @@ class AnikotoProvider : MainAPI() {
         val episodes = mutableListOf<Episode>()
         val slug = url.substringAfter("/watch/").substringBefore("/ep-").substringBefore("?")
         
-        val episodesCountStr = document.select("div.meta:contains(Episodes:) span").text().replace(Regex("[^0-9]"), "")
-        val totalEps = episodesCountStr.toIntOrNull() ?: 1
+        // Safely extract total episodes without accidentally grabbing the Review Count
+        val epsDiv = document.select("div.meta > div").firstOrNull { it.text().contains("Episodes:") }
+        var totalEps = epsDiv?.selectFirst("span")?.text()?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
 
-        for (i in 1..totalEps) {
+        // Fallback for ongoing series (where episodes might equal "? Eps")
+        if (totalEps == null || totalEps <= 1) {
+            val badgeEps = document.select(".ep-status.sub span, .ep-status.dub span")
+                .mapNotNull { it.text().trim().toIntOrNull() }
+                .maxOrNull()
+            if (badgeEps != null && badgeEps > 1) {
+                totalEps = badgeEps
+            }
+        }
+        
+        val finalEpCount = totalEps ?: 1
+
+        for (i in 1..finalEpCount) {
             episodes.add(
                 newEpisode("$mainUrl/watch/$slug/ep-$i") {
                     this.name = "Episode $i"
@@ -103,23 +123,26 @@ class AnikotoProvider : MainAPI() {
         val html = app.get(cleanData).text
         val document = Jsoup.parse(html)
 
-        val animeId = document.selectFirst("#watch-main")?.attr("data-id") ?: ""
-        val epNum = Regex("""/ep-(\d+)""").find(cleanData)?.groupValues?.get(1) ?: "1"
+        val episodeId = document.selectFirst("#watch-main")?.attr("data-id") ?: ""
+        if (episodeId.isBlank()) return false
 
-        if (animeId.isBlank()) return false
+        val ajaxHeaders = mapOf(
+            "X-Requested-With" to "XMLHttpRequest",
+            "Referer" to cleanData
+        )
 
-        // 1. Guess the correct server list endpoints based on typical Clone architectures
+        // Hit multiple possible API endpoints to retrieve the server lists
         val endpoints = listOf(
-            "$mainUrl/ajax/server/list?anime_id=$animeId&ep=$epNum",
-            "$mainUrl/ajax/server/list?manga_id=$animeId&ep=$epNum",
-            "$mainUrl/ajax/episode/servers?episodeId=$animeId"
+            "$mainUrl/ajax/server/list?id=$episodeId",
+            "$mainUrl/ajax/server/list?episodeId=$episodeId",
+            "$mainUrl/ajax/server/list?anime_id=$episodeId"
         )
 
         val linkIds = mutableSetOf<String>()
 
         for (endpoint in endpoints) {
             try {
-                val res = app.get(endpoint).text
+                val res = app.get(endpoint, headers = ajaxHeaders).text
                 val matches = Regex("""data-link-id=["']([^"']+)["']""").findAll(res)
                 for (match in matches) {
                     linkIds.add(match.groupValues[1])
@@ -135,10 +158,10 @@ class AnikotoProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // 2. Fetch the stream URLs from the encrypted IDs
+        // Fetch the stream URLs from the encrypted IDs
         for (id in linkIds) {
             try {
-                val res = app.get("$mainUrl/ajax/server?get=$id").text
+                val res = app.get("$mainUrl/ajax/server?get=$id", headers = ajaxHeaders).text
                 val json = JSONObject(res)
                 
                 val streamUrl = json.optJSONObject("result")?.optString("url") ?: json.optString("url")
@@ -153,14 +176,15 @@ class AnikotoProvider : MainAPI() {
                         
                         if (m3u8Match != null) {
                             callback(
-                                ExtractorLink(
+                                newExtractorLink(
                                     source = "Anikoto",
                                     name = if (streamUrl.contains("vidtube")) "Vidtube" else "MegaPlay",
                                     url = m3u8Match.value,
-                                    referer = streamUrl,
-                                    quality = Qualities.Unknown.value,
                                     type = ExtractorLinkType.M3U8
-                                )
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf("Referer" to streamUrl)
+                                }
                             )
                             found = true
                         } else {
