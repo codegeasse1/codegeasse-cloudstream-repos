@@ -55,6 +55,7 @@ class ReAnimeProvider : MainAPI() {
         )
         
         for ((key, title) in sections) {
+            // SvelteKit stores the data arrays directly in the HTML script tag
             val regex = Regex(""""$key"\s*:\s*(\[.*?\])\s*,\s*"(?:[a-zA-Z0-9_]+_cursor|upcoming|new_on_site)"""")
             val match = regex.find(html)
             val items = parseAnimeArray(match?.groupValues?.get(1))
@@ -117,6 +118,7 @@ class ReAnimeProvider : MainAPI() {
         }
 
         val episodes = mutableListOf<Episode>()
+        // Re:Anime renders all episode links directly into the DOM
         document.select("a[href*=/watch/]").forEach { a ->
             val epHref = fixUrlNull(a.attr("href")) ?: return@forEach
             val epNum = a.attr("data-episode").toIntOrNull() ?: return@forEach
@@ -157,10 +159,11 @@ class ReAnimeProvider : MainAPI() {
                         source = "FlixCloud",
                         name = "FlixCloud",
                         url = flixUrl,
-                        referer = "$mainUrl/",
-                        quality = Qualities.Unknown.value,
                         type = ExtractorLinkType.M3U8
-                    )
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
                 found = true
             }
@@ -173,7 +176,7 @@ class ReAnimeProvider : MainAPI() {
             subtitleCallback(SubtitleFile("English", vttUrl))
         }
 
-        // 3. Fallback: Search for standard video APIs (matching AniKage's architecture)
+        // 3. Fallback: Search for standard video APIs
         if (!found) {
             val slug = data.substringAfter("/watch/").substringBefore("?")
             val ep = Regex("""[?&]ep=(\d+)""").find(data)?.groupValues?.get(1) ?: "1"
@@ -189,10 +192,11 @@ class ReAnimeProvider : MainAPI() {
                             source = "ReAnime",
                             name = "Direct Stream",
                             url = match.value.replace("\\/", "/"),
-                            referer = "$mainUrl/",
-                            quality = Qualities.Unknown.value,
                             type = ExtractorLinkType.M3U8
-                        )
+                        ) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        }
                     )
                     found = true
                 }
