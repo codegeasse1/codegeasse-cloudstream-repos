@@ -33,7 +33,6 @@ class AniwavesProvider : MainAPI() {
         val document = Jsoup.parse(html)
         val homeItems = mutableListOf<HomePageList>()
 
-        // Scrape Top Carousel (Trending) - Flagged as Horizontal to prevent stretching
         if (request.name == "Home") {
             val sliderItems = document.select(".swiper-wrapper .swiper-slide.item").mapNotNull { parseSliderItem(it) }
             if (sliderItems.isNotEmpty()) {
@@ -41,7 +40,6 @@ class AniwavesProvider : MainAPI() {
             }
         }
 
-        // Scrape Standard Grid Items
         val gridElements = document.select(".ani.items .item, .top-table .item")
         val standardItems = gridElements.mapNotNull { parseStandardItem(it) }
         
@@ -145,12 +143,10 @@ class AniwavesProvider : MainAPI() {
             val serverUrl = "$mainUrl/ajax/server/list?servers=$animeId&eps=$epNum"
             val serverRes = app.get(serverUrl, headers = headers).text
             
-            // Clean the server response whether it's raw HTML or wrapped in JSON
             val serverJson = try { JSONObject(serverRes) } catch (e: Exception) { null }
             val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
             val serverDoc = Jsoup.parse(serverHtml)
 
-            // Aggressively capture all server tokens across different UI layouts
             val serverIds = mutableSetOf<String>()
             serverDoc.select("a, div, li, span").forEach { el ->
                 val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
@@ -160,47 +156,81 @@ class AniwavesProvider : MainAPI() {
             }
 
             for (id in serverIds) {
-                // Try multiple common AJAX source endpoints used by Aniwave clones
-                val sourceEndpoints = listOf(
-                    "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0",
-                    "$mainUrl/ajax/episode/sources?id=$id"
-                )
-                
-                for (sourceUrl in sourceEndpoints) {
-                    try {
-                        val sourceRes = app.get(sourceUrl, headers = headers).text
-                        if (!sourceRes.trim().startsWith("{")) continue
-                        
-                        val json = JSONObject(sourceRes)
-                        val result = json.optJSONObject("result") ?: json
-                        var embedUrl = result.optString("url").ifBlank { result.optString("link") }
-                        
-                        if (embedUrl.isNotBlank()) {
-                            embedUrl = embedUrl.replace("\\/", "/")
-                            if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
+                val sourceUrl = "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0"
+                try {
+                    val sourceRes = app.get(sourceUrl, headers = headers).text
+                    if (!sourceRes.trim().startsWith("{")) continue
+                    
+                    val json = JSONObject(sourceRes)
+                    val result = json.optJSONObject("result") ?: json
+                    var embedUrl = result.optString("url").ifBlank { result.optString("link") }
+                    
+                    if (embedUrl.isNotBlank()) {
+                        embedUrl = embedUrl.replace("\\/", "/")
+                        if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
+
+                        // HANDLER: Parse play.echovideo.ru directly
+                        if (embedUrl.contains("echovideo.ru")) {
+                            val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
+                            val echoApiUrl = "https://play.echovideo.ru/embed-20/getSources?id=$echoId"
                             
-                            // CORE FIX: Intercept Echovideo/Flixcloud URLs and forcefully translate the domain
-                            val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|\?id=)([\w-]+)""").find(embedUrl)
-                            if (embedIdMatch != null) {
-                                val embedId = embedIdMatch.groupValues[1]
+                            val echoRes = app.get(
+                                echoApiUrl,
+                                headers = mapOf(
+                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                    "Referer" to "https://play.echovideo.ru/",
+                                    "X-Requested-With" to "XMLHttpRequest"
+                                )
+                            ).text
+
+                            if (echoRes.trim().startsWith("{")) {
+                                val echoJson = JSONObject(echoRes)
+                                val sourcesObj = echoJson.optJSONObject("sources")
                                 
-                                // Route through CloudStream's verified built-in extractors
-                                val vidplayUrl = "https://vidplay.site/e/$embedId"
-                                val megacloudUrl = "https://megacloud.tv/embed-2/e-1/$embedId"
-                                val filemoonUrl = "https://filemoon.sx/e/$embedId"
-                                
-                                if (loadExtractor(vidplayUrl, data, subtitleCallback, callback)) found = true
-                                if (!found && loadExtractor(megacloudUrl, data, subtitleCallback, callback)) found = true
-                                if (!found && loadExtractor(filemoonUrl, data, subtitleCallback, callback)) found = true
+                                if (sourcesObj != null) {
+                                    val qualities = listOf("HD", "SD", "HQ")
+                                    for (q in qualities) {
+                                        val arr = sourcesObj.optJSONArray(q) ?: continue
+                                        for (i in 0 until arr.length()) {
+                                            var streamUrl = arr.getString(i).replace("\\/", "/")
+                                            if (streamUrl.isNotBlank()) {
+                                                val qualityInt = when (q) {
+                                                    "HD" -> Qualities.P1080.value
+                                                    "HQ" -> Qualities.P720.value
+                                                    "SD" -> Qualities.P480.value
+                                                    else -> Qualities.Unknown.value
+                                                }
+
+                                                val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+                                                callback(
+                                                    newExtractorLink(
+                                                        source = "EchoVideo ($q)",
+                                                        name = "EchoVideo $q",
+                                                        url = streamUrl,
+                                                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                                    ) {
+                                                        this.quality = qualityInt
+                                                        this.headers = mapOf(
+                                                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                                            "Referer" to "https://cdn.savedly.net/"
+                                                        )
+                                                    }
+                                                )
+                                                found = true
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            
-                            // Safety Fallback: Attempt to extract the raw unmodified URL
-                            if (!found && loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
                         }
-                    } catch (e: Exception) {
-                        continue
+
+                        // FALLBACK: Try native extractors if it's not echovideo
+                        if (!found) {
+                            if (loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
+                        }
                     }
-                    if (found) break // Prevent hitting redundant endpoints if one works
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
             }
         } catch (e: Exception) {
