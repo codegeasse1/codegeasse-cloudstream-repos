@@ -308,9 +308,8 @@ class ReAnimeProvider : MainAPI() {
 
             val isFlix = u.contains("flixcloud", true) || u.contains("fetch", true)
 
-            // Direct M3U8 Streams: Passes fresh token directly to ExoPlayer with exact headers
+            // Direct M3U8 Streams
             if (u.contains(".m3u8", ignoreCase = true)) {
-                // Header Variant 1: FlixCloud Referer
                 callback(
                     newExtractorLink(
                         source = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct",
@@ -326,7 +325,6 @@ class ReAnimeProvider : MainAPI() {
                     }
                 )
 
-                // Header Variant 2: Re:Anime Referer
                 callback(
                     newExtractorLink(
                         source = if (isFlix) "FlixCloud (ReAnime)" else "Re:Anime Alt",
@@ -342,7 +340,6 @@ class ReAnimeProvider : MainAPI() {
                     }
                 )
 
-                // Header Variant 3: Direct User-Agent Only
                 callback(
                     newExtractorLink(
                         source = if (isFlix) "FlixCloud (Native)" else "Re:Anime Native",
@@ -393,7 +390,7 @@ class ReAnimeProvider : MainAPI() {
                 continue
             }
 
-            // Collect Embed/Video IDs
+            // Collect Video/Embed IDs
             val embedIdMatch = Regex("""/(?:embed|e|v|watch|player|api/m3u8|e-1|embed-2|embed-4)/([A-Za-z0-9_-]{6,})""").find(u)
             if (embedIdMatch != null) {
                 videoIds.add(embedIdMatch.groupValues)
@@ -409,7 +406,7 @@ class ReAnimeProvider : MainAPI() {
             }
         }
 
-        // De-obfuscation Fallback for FlixCloud / MegaCloud / RabbitStream / RapidCloud
+        // De-obfuscation Fallback
         if (!found || videoIds.isNotEmpty()) {
             for (id in videoIds) {
                 val fallbackUrls = listOf(
