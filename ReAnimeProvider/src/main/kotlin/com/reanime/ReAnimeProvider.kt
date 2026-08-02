@@ -306,39 +306,57 @@ class ReAnimeProvider : MainAPI() {
         for (u in extractedUrls) {
             if (!seenLinks.add(u)) continue
 
-            // Direct M3U8 Streams
+            val isFlix = u.contains("flixcloud", true) || u.contains("fetch", true)
+
+            // Direct M3U8 Streams: Passes fresh token directly to ExoPlayer with exact headers
             if (u.contains(".m3u8", ignoreCase = true)) {
-                val isFlix = u.contains("flixcloud", true)
-                try {
-                    M3u8Helper.generateM3u8(
-                        source = if (isFlix) "FlixCloud" else "Re:Anime",
-                        streamUrl = u,
-                        referer = if (isFlix) "https://flixcloud.cc/" else "$mainUrl/",
-                        headers = mapOf(
+                // Header Variant 1: FlixCloud Referer
+                callback(
+                    newExtractorLink(
+                        source = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct",
+                        name = if (isFlix) "FlixCloud Server" else "Direct Stream",
+                        url = u,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
                             "User-Agent" to UA,
-                            "Referer" to if (isFlix) "https://flixcloud.cc/" else "$mainUrl/",
-                            "Origin" to if (isFlix) "https://flixcloud.cc" else mainUrl
+                            "Referer" to "https://flixcloud.cc/"
                         )
-                    ).forEach(callback)
-                    found = true
-                } catch (e: Exception) {
-                    callback(
-                        newExtractorLink(
-                            source = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct",
-                            name = if (isFlix) "FlixCloud Master" else "Direct Stream",
-                            url = u,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf(
-                                "User-Agent" to UA,
-                                "Referer" to if (isFlix) "https://flixcloud.cc/" else "$mainUrl/",
-                                "Origin" to if (isFlix) "https://flixcloud.cc" else mainUrl
-                            )
-                        }
-                    )
-                    found = true
-                }
+                    }
+                )
+
+                // Header Variant 2: Re:Anime Referer
+                callback(
+                    newExtractorLink(
+                        source = if (isFlix) "FlixCloud (ReAnime)" else "Re:Anime Alt",
+                        name = if (isFlix) "FlixCloud Alt" else "Direct Alt",
+                        url = u,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
+                            "User-Agent" to UA,
+                            "Referer" to "$mainUrl/"
+                        )
+                    }
+                )
+
+                // Header Variant 3: Direct User-Agent Only
+                callback(
+                    newExtractorLink(
+                        source = if (isFlix) "FlixCloud (Native)" else "Re:Anime Native",
+                        name = if (isFlix) "FlixCloud Native" else "Direct Native",
+                        url = u,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
+                            "User-Agent" to UA
+                        )
+                    }
+                )
+                found = true
                 continue
             }
 
@@ -378,10 +396,10 @@ class ReAnimeProvider : MainAPI() {
             // Collect Embed/Video IDs
             val embedIdMatch = Regex("""/(?:embed|e|v|watch|player|api/m3u8|e-1|embed-2|embed-4)/([A-Za-z0-9_-]{6,})""").find(u)
             if (embedIdMatch != null) {
-                videoIds.add(embedIdMatch.groupValues[1])
+                videoIds.add(embedIdMatch.groupValues)
             }
 
-            // Try CloudStream Built-in Extractors
+            // Built-in CloudStream Extractors
             try {
                 if (loadExtractor(u, cleanData, subtitleCallback, callback)) {
                     found = true
@@ -391,7 +409,7 @@ class ReAnimeProvider : MainAPI() {
             }
         }
 
-        // Fallback for FlixCloud / MegaCloud / RabbitStream / RapidCloud / DokiCloud
+        // De-obfuscation Fallback for FlixCloud / MegaCloud / RabbitStream / RapidCloud
         if (!found || videoIds.isNotEmpty()) {
             for (id in videoIds) {
                 val fallbackUrls = listOf(
