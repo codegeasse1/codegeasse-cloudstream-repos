@@ -193,11 +193,6 @@ class AniwavesProvider : MainAPI() {
                                 val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
                                 val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
 
-                                // Confirmed via devtools: the getSources call reuses
-                                // the SAME embed segment number that appears in the
-                                // original source url (e.g. "embed-1"), not a fixed
-                                // "embed-20" as before — that mismatch was the root
-                                // cause of every request here silently failing.
                                 val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
                                 val echoApiUrl = "$domain/$embedSegment/getSources?id=$echoId"
                                 
@@ -212,13 +207,12 @@ class AniwavesProvider : MainAPI() {
 
                                 if (echoRes.trim().startsWith("{")) {
                                     val echoJson = JSONObject(echoRes)
-
-                                    // Confirmed real response shape: "sources" is a
-                                    // single string URL, NOT an object with HD/SD/HQ
-                                    // quality arrays as previously assumed.
                                     val streamUrl = echoJson.optString("sources", "").replace("\\/", "/")
 
                                     if (streamUrl.isNotBlank()) {
+                                        // CRITICAL: Extract the actual proxy host (e.g. gn1r5n.org) to use as Origin/Referer
+                                        val streamHost = "https://" + java.net.URI(streamUrl).host
+
                                         val finalRes = app.get(
                                             streamUrl,
                                             headers = mapOf(
@@ -239,12 +233,18 @@ class AniwavesProvider : MainAPI() {
                                                     type = ExtractorLinkType.M3U8
                                                 ) {
                                                     this.quality = Qualities.Unknown.value
-                                                    this.headers = mapOf("Referer" to finalUrl)
+                                                    // FIX: Inject the exact required headers for the SprintCDN edge server
+                                                    this.headers = mapOf(
+                                                        "Origin" to streamHost,
+                                                        "Referer" to "$streamHost/",
+                                                        "User-Agent" to headers["User-Agent"]!!,
+                                                        "Accept" to "*/*"
+                                                    )
                                                 }
                                             )
                                             found = true
                                         } else {
-                                            // B. Iframe Proxy (e.g. Vidhide/Voe wrapper)
+                                            // B. Iframe Proxy
                                             val doc = Jsoup.parse(text)
                                             val iframeSrc = doc.selectFirst("iframe")?.attr("src")
 
@@ -270,12 +270,16 @@ class AniwavesProvider : MainAPI() {
                                                             type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                                         ) {
                                                             this.quality = Qualities.Unknown.value
-                                                            this.headers = mapOf("Referer" to finalUrl)
+                                                            this.headers = mapOf(
+                                                                "Origin" to streamHost,
+                                                                "Referer" to "$streamHost/",
+                                                                "User-Agent" to headers["User-Agent"]!!,
+                                                                "Accept" to "*/*"
+                                                            )
                                                         }
                                                     )
                                                     found = true
                                                 } else {
-                                                    // D. Pass to Native Extractors as final resort
                                                     if (loadExtractor(finalUrl, data, subtitleCallback, callback)) found = true
                                                 }
                                             }
@@ -346,7 +350,7 @@ class AniwavesProvider : MainAPI() {
                     
                     if (found) break
                 }
-                if (found) break
+                // Removed the second "if (found) break" to allow extraction of ALL available servers instead of stopping at the first one.
             }
         } catch (e: Exception) {
             e.printStackTrace()
