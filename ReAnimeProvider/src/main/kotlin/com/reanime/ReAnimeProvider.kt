@@ -247,7 +247,6 @@ class ReAnimeProvider : MainAPI() {
                     val unescaped = res.unesc()
                     pages.add(unescaped)
                     
-                    // Harvest proprietary server tokens
                     Regex("""["'](?:server_id|id)["']\s*:\s*["']([A-Za-z0-9_-]+)["']""").findAll(unescaped).forEach { m ->
                         val id = m.groupValues[1]
                         if (id.length > 4 && !id.contains("episode", true)) serverIds.add(id)
@@ -256,7 +255,6 @@ class ReAnimeProvider : MainAPI() {
             } catch (e: Exception) {}
         }
 
-        // Query the secondary server APIs
         for (id in serverIds) {
             val serverEndpoints = listOf(
                 "$mainUrl/api/v1/servers/$id/watch",
@@ -274,45 +272,38 @@ class ReAnimeProvider : MainAPI() {
         val extractedUrls = mutableSetOf<String>()
 
         for (page in pages) {
-            try {
-                // Strict JSON Parsing to extract pristine URLs without regex artifacts
-                if (page.trim().startsWith("{") || page.trim().startsWith("[")) {
-                    val jsonStr = page.trim()
-                    if (jsonStr.startsWith("{")) {
-                        val json = JSONObject(jsonStr)
-                        val categories = listOf("sub", "dub", "raw", "servers", "data", "episodes", "source", "file")
-                        for (cat in categories) {
-                            val objOrArr = json.opt(cat)
-                            if (objOrArr is JSONArray) {
-                                for (i in 0 until objOrArr.length()) {
-                                    val obj = objOrArr.optJSONObject(i) ?: continue
-                                    val link = obj.optString("dataLink").ifBlank { obj.optString("link").ifBlank { obj.optString("url").ifBlank { obj.optString("embedUrl").ifBlank { obj.optString("src", "").ifBlank { obj.optString("file", "") } } } } }
-                                    if (link.isNotBlank()) extractedUrls.add(link)
-                                }
-                            } else if (objOrArr is JSONObject) {
-                                val link = objOrArr.optString("dataLink").ifBlank { objOrArr.optString("link").ifBlank { objOrArr.optString("url").ifBlank { objOrArr.optString("embedUrl").ifBlank { objOrArr.optString("src", "").ifBlank { objOrArr.optString("file", "") } } } } }
-                                if (link.isNotBlank()) extractedUrls.add(link)
-                            } else if (objOrArr is String && objOrArr.startsWith("http")) {
-                                extractedUrls.add(objOrArr)
-                            }
-                        }
-                        val rootLink = json.optString("url").ifBlank { json.optString("file") }.ifBlank { json.optString("link") }
-                        if (rootLink.startsWith("http")) extractedUrls.add(rootLink)
-                    } else if (jsonStr.startsWith("[")) {
-                        val arr = JSONArray(jsonStr)
-                        for (i in 0 until arr.length()) {
-                            val obj = arr.optJSONObject(i) ?: continue
-                            val link = obj.optString("dataLink").ifBlank { obj.optString("link").ifBlank { obj.optString("url").ifBlank { obj.optString("embedUrl").ifBlank { obj.optString("src", "").ifBlank { obj.optString("file", "") } } } } }
-                            if (link.isNotBlank()) extractedUrls.add(link)
-                        }
-                    }
+            // THE ULTIMATE REGEX: Extracts M3U8 and MP4 links purely, completely ignoring any JSON/HTML syntax.
+            // This guarantees no trailing commas or quotes cause the "bad http" crash.
+            val mediaRegex = Regex("""https?://[^"'\s\\]+?\.(?:m3u8|mp4)(?:[?&][^"'\s\\]*)?""")
+            mediaRegex.findAll(page).forEach { m ->
+                var rawUrl = m.value
+                
+                // Surgical Sanitization: Rip out any trailing artifacts immediately
+                rawUrl = rawUrl.substringBefore("\"").substringBefore("'").substringBefore("\\")
+                rawUrl = rawUrl.substringBefore("<").substringBefore(">")
+                rawUrl = rawUrl.substringBefore(",").substringBefore("}").substringBefore("]")
+                
+                if (rawUrl.isNotBlank()) {
+                    extractedUrls.add(rawUrl)
                 }
-            } catch (e: Exception) {}
+            }
 
-            // Robust Regex Sweep: Safely trims JSON syntax formatting to prevent "Bad HTTP" crashes
-            Regex("""https?://[a-zA-Z0-9_.-]+(?:\.[a-zA-Z]{2,})+(?:/[^\s"'<>\\]*)?""").findAll(page).forEach { m ->
-                val cleanUrl = m.value.trimEnd(',', ';', '}', ']', ')', '"', '\'')
-                extractedUrls.add(cleanUrl)
+            // Extract Subtitles
+            Regex("""https?://[^"'\s\\]+?\.(?:vtt|srt|ass)(?:[?&][^"'\s\\]*)?""").findAll(page).forEach { m ->
+                var subUrl = m.value
+                subUrl = subUrl.substringBefore("\"").substringBefore("'").substringBefore("\\").substringBefore(",").substringBefore("}")
+                
+                val low = subUrl.lowercase()
+                if (!low.contains("thumbnail") && !low.contains("sprite") && !low.contains("preview")) {
+                    val lang = when {
+                        low.contains("eng") -> "English"
+                        low.contains("spa") -> "Spanish"
+                        low.contains("fre") || low.contains("fra") -> "French"
+                        low.contains("ger") || low.contains("deu") -> "German"
+                        else -> "Subtitle"
+                    }
+                    subtitleCallback(newSubtitleFile(lang, subUrl))
+                }
             }
         }
 
@@ -323,15 +314,26 @@ class ReAnimeProvider : MainAPI() {
 
             val isFlix = u.contains("flixcloud", true) || u.contains("fetch", true)
 
-            // Inject Cleaned M3U8 Master Playlists to ExoPlayer
+            // Direct Playlists (M3U8)
             if (u.contains(".m3u8", ignoreCase = true)) {
-                val streamName = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct"
+                val streamName = if (isFlix) "FlixCloud Server" else "Re:Anime Direct"
                 
-                // Specific header requirements to bypass server-side rejection
-                val headerMap = if (isFlix) {
-                    mapOf("User-Agent" to UA, "Referer" to "https://flixcloud.cc/", "Origin" to "https://flixcloud.cc", "Accept" to "*/*")
+                // FLIXCLOUD FIREWALL BYPASS: Force the Origin and Referer exactly to FlixCloud.
+                // ReAnime's referer will cause FlixCloud's CDN to instantly throw a 400 Bad Request.
+                val streamHeaders = if (isFlix) {
+                    mapOf(
+                        "Origin" to "https://flixcloud.cc",
+                        "Referer" to "https://flixcloud.cc/",
+                        "User-Agent" to UA,
+                        "Accept" to "*/*"
+                    )
                 } else {
-                    mapOf("User-Agent" to UA, "Referer" to "$mainUrl/", "Origin" to mainUrl, "Accept" to "*/*")
+                    mapOf(
+                        "Origin" to mainUrl,
+                        "Referer" to "$mainUrl/",
+                        "User-Agent" to UA,
+                        "Accept" to "*/*"
+                    )
                 }
 
                 callback(
@@ -342,14 +344,14 @@ class ReAnimeProvider : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = Qualities.Unknown.value
-                        this.headers = headerMap
+                        this.headers = streamHeaders
                     }
                 )
                 found = true
                 continue
             }
 
-            // Direct MP4 Streams
+            // Direct Video Files (MP4)
             if (u.contains(".mp4", ignoreCase = true) && !u.contains("/ads", true)) {
                 callback(
                     newExtractorLink(
@@ -366,23 +368,7 @@ class ReAnimeProvider : MainAPI() {
                 continue
             }
 
-            // Subtitles (.vtt, .srt, .ass)
-            val low = u.lowercase()
-            if ((low.endsWith(".vtt") || low.endsWith(".srt") || low.endsWith(".ass") || low.contains(".vtt?") || low.contains(".srt?"))
-                && !low.contains("thumbnail") && !low.contains("sprite") && !low.contains("preview")) {
-                val lang = when {
-                    low.contains("eng") -> "English"
-                    low.contains("spa") -> "Spanish"
-                    low.contains("ind") -> "Indonesian"
-                    low.contains("fre") || low.contains("fra") -> "French"
-                    low.contains("ger") || low.contains("deu") -> "German"
-                    else -> "Subtitle"
-                }
-                subtitleCallback(newSubtitleFile(lang, u))
-                continue
-            }
-
-            // Route standard 3rd party mirrors safely
+            // Third-Party Mirrors (Vidhide, Streamwish, Filemoon, etc.)
             if (KNOWN_HOSTS.any { u.contains(it, true) }) {
                 try {
                     if (loadExtractor(u, cleanData, subtitleCallback, callback)) {
