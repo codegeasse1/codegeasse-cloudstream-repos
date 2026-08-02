@@ -16,6 +16,7 @@ class ReAnimeProvider : MainAPI() {
 
     companion object {
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        private val KNOWN_HOSTS = listOf("vidhide", "streamwish", "filemoon", "dood", "voe", "ok.ru", "vk.com", "mixdrop", "mp4upload", "megaup", "anicore")
     }
 
     private fun String.unesc(): String = this
@@ -223,6 +224,7 @@ class ReAnimeProvider : MainAPI() {
             "X-Requested-With" to "XMLHttpRequest"
         )
 
+        // Exhaustive collection of all potential API endpoints holding the source
         val endpoints = listOf(
             cleanData,
             "$mainUrl/api/v1/servers/$slug/$epNum",
@@ -236,12 +238,36 @@ class ReAnimeProvider : MainAPI() {
         )
 
         val pages = mutableListOf<String>()
+        val serverIds = mutableSetOf<String>()
+
         for (ep in endpoints) {
             try {
                 val res = app.get(ep, headers = siteHeaders).text
-                if (res.isNotBlank()) pages.add(res.unesc())
-            } catch (e: Exception) {
-                e.printStackTrace()
+                if (res.isNotBlank()) {
+                    val unescaped = res.unesc()
+                    pages.add(unescaped)
+                    
+                    // Harvest proprietary server tokens
+                    Regex("""["'](?:server_id|id)["']\s*:\s*["']([A-Za-z0-9_-]+)["']""").findAll(unescaped).forEach { m ->
+                        val id = m.groupValues[1]
+                        if (id.length > 4 && !id.contains("episode", true)) serverIds.add(id)
+                    }
+                }
+            } catch (e: Exception) {}
+        }
+
+        // Query the secondary server APIs
+        for (id in serverIds) {
+            val serverEndpoints = listOf(
+                "$mainUrl/api/v1/servers/$id/watch",
+                "$mainUrl/api/v1/watch?server_id=$id",
+                "$mainUrl/api/v1/server/$id"
+            )
+            for (sep in serverEndpoints) {
+                try {
+                    val res = app.get(sep, headers = siteHeaders).text
+                    if (res.isNotBlank()) pages.add(res.unesc())
+                } catch (e: Exception) {}
             }
         }
 
@@ -249,108 +275,74 @@ class ReAnimeProvider : MainAPI() {
 
         for (page in pages) {
             try {
+                // Strict JSON Parsing to extract pristine URLs without regex artifacts
                 if (page.trim().startsWith("{") || page.trim().startsWith("[")) {
                     val jsonStr = page.trim()
                     if (jsonStr.startsWith("{")) {
                         val json = JSONObject(jsonStr)
-                        val categories = listOf("sub", "dub", "raw", "servers", "data", "episodes")
+                        val categories = listOf("sub", "dub", "raw", "servers", "data", "episodes", "source", "file")
                         for (cat in categories) {
-                            val arr = json.optJSONArray(cat) ?: continue
-                            for (i in 0 until arr.length()) {
-                                val obj = arr.optJSONObject(i) ?: continue
-                                val link = obj.optString("dataLink").ifBlank {
-                                    obj.optString("link").ifBlank {
-                                        obj.optString("url").ifBlank {
-                                            obj.optString("embedUrl").ifBlank {
-                                                obj.optString("src", "")
-                                            }
-                                        }
-                                    }
+                            val objOrArr = json.opt(cat)
+                            if (objOrArr is JSONArray) {
+                                for (i in 0 until objOrArr.length()) {
+                                    val obj = objOrArr.optJSONObject(i) ?: continue
+                                    val link = obj.optString("dataLink").ifBlank { obj.optString("link").ifBlank { obj.optString("url").ifBlank { obj.optString("embedUrl").ifBlank { obj.optString("src", "").ifBlank { obj.optString("file", "") } } } } }
+                                    if (link.isNotBlank()) extractedUrls.add(link)
                                 }
-                                if (link.isNotBlank()) {
-                                    extractedUrls.add(link.unesc())
-                                }
+                            } else if (objOrArr is JSONObject) {
+                                val link = objOrArr.optString("dataLink").ifBlank { objOrArr.optString("link").ifBlank { objOrArr.optString("url").ifBlank { objOrArr.optString("embedUrl").ifBlank { objOrArr.optString("src", "").ifBlank { objOrArr.optString("file", "") } } } } }
+                                if (link.isNotBlank()) extractedUrls.add(link)
+                            } else if (objOrArr is String && objOrArr.startsWith("http")) {
+                                extractedUrls.add(objOrArr)
                             }
                         }
-                    } else {
+                        val rootLink = json.optString("url").ifBlank { json.optString("file") }.ifBlank { json.optString("link") }
+                        if (rootLink.startsWith("http")) extractedUrls.add(rootLink)
+                    } else if (jsonStr.startsWith("[")) {
                         val arr = JSONArray(jsonStr)
                         for (i in 0 until arr.length()) {
                             val obj = arr.optJSONObject(i) ?: continue
-                            val link = obj.optString("dataLink").ifBlank {
-                                obj.optString("link").ifBlank {
-                                    obj.optString("url").ifBlank {
-                                        obj.optString("embedUrl").ifBlank {
-                                            obj.optString("src", "")
-                                        }
-                                    }
-                                }
-                            }
-                            if (link.isNotBlank()) {
-                                extractedUrls.add(link.unesc())
-                            }
+                            val link = obj.optString("dataLink").ifBlank { obj.optString("link").ifBlank { obj.optString("url").ifBlank { obj.optString("embedUrl").ifBlank { obj.optString("src", "").ifBlank { obj.optString("file", "") } } } } }
+                            if (link.isNotBlank()) extractedUrls.add(link)
                         }
                     }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) {}
 
-            Regex("""https?://[^\s"'<>\\]+""").findAll(page).forEach { m ->
-                extractedUrls.add(m.value.unesc())
+            // Robust Regex Sweep: Safely trims JSON syntax formatting to prevent "Bad HTTP" crashes
+            Regex("""https?://[a-zA-Z0-9_.-]+(?:\.[a-zA-Z]{2,})+(?:/[^\s"'<>\\]*)?""").findAll(page).forEach { m ->
+                val cleanUrl = m.value.trimEnd(',', ';', '}', ']', ')', '"', '\'')
+                extractedUrls.add(cleanUrl)
             }
         }
 
         val seenLinks = mutableSetOf<String>()
-        val videoIds = mutableSetOf<String>()
 
         for (u in extractedUrls) {
             if (!seenLinks.add(u)) continue
 
             val isFlix = u.contains("flixcloud", true) || u.contains("fetch", true)
 
-            // Direct M3U8 Streams
+            // Inject Cleaned M3U8 Master Playlists to ExoPlayer
             if (u.contains(".m3u8", ignoreCase = true)) {
-                callback(
-                    newExtractorLink(
-                        source = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct",
-                        name = if (isFlix) "FlixCloud Server" else "Direct Stream",
-                        url = u,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "User-Agent" to UA,
-                            "Referer" to "https://flixcloud.cc/"
-                        )
-                    }
-                )
+                val streamName = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct"
+                
+                // Specific header requirements to bypass server-side rejection
+                val headerMap = if (isFlix) {
+                    mapOf("User-Agent" to UA, "Referer" to "https://flixcloud.cc/", "Origin" to "https://flixcloud.cc", "Accept" to "*/*")
+                } else {
+                    mapOf("User-Agent" to UA, "Referer" to "$mainUrl/", "Origin" to mainUrl, "Accept" to "*/*")
+                }
 
                 callback(
                     newExtractorLink(
-                        source = if (isFlix) "FlixCloud (ReAnime)" else "Re:Anime Alt",
-                        name = if (isFlix) "FlixCloud Alt" else "Direct Alt",
+                        source = streamName,
+                        name = streamName,
                         url = u,
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "User-Agent" to UA,
-                            "Referer" to "$mainUrl/"
-                        )
-                    }
-                )
-
-                callback(
-                    newExtractorLink(
-                        source = if (isFlix) "FlixCloud (Native)" else "Re:Anime Native",
-                        name = if (isFlix) "FlixCloud Native" else "Direct Native",
-                        url = u,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "User-Agent" to UA
-                        )
+                        this.headers = headerMap
                     }
                 )
                 found = true
@@ -390,42 +382,13 @@ class ReAnimeProvider : MainAPI() {
                 continue
             }
 
-            // Collect Video/Embed IDs
-            val embedIdMatch = Regex("""/(?:embed|e|v|watch|player|api/m3u8|e-1|embed-2|embed-4)/([A-Za-z0-9_-]{6,})""").find(u)
-            if (embedIdMatch != null) {
-                videoIds.add(embedIdMatch.groupValues[1])
-            }
-
-            // Built-in CloudStream Extractors
-            try {
-                if (loadExtractor(u, cleanData, subtitleCallback, callback)) {
-                    found = true
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        // De-obfuscation Fallback
-        if (!found || videoIds.isNotEmpty()) {
-            for (id in videoIds) {
-                val fallbackUrls = listOf(
-                    "https://megacloud.tv/embed-2/e-1/$id",
-                    "https://rabbitstream.net/embed-4/$id",
-                    "https://flixcloud.cc/e/$id",
-                    "https://rapid-cloud.ru/embed-6/$id",
-                    "https://dokicloud.one/embed-4/$id"
-                )
-
-                for (fbUrl in fallbackUrls) {
-                    try {
-                        if (loadExtractor(fbUrl, cleanData, subtitleCallback, callback)) {
-                            found = true
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+            // Route standard 3rd party mirrors safely
+            if (KNOWN_HOSTS.any { u.contains(it, true) }) {
+                try {
+                    if (loadExtractor(u, cleanData, subtitleCallback, callback)) {
+                        found = true
                     }
-                }
+                } catch (e: Exception) {}
             }
         }
 
