@@ -17,6 +17,11 @@ class ReAnimeProvider : MainAPI() {
     companion object {
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         private val KNOWN_HOSTS = listOf("vidhide", "streamwish", "filemoon", "dood", "voe", "ok.ru", "vk.com", "mixdrop", "mp4upload", "megaup", "anicore")
+        private val UUID_REGEX = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
+        private val M3U8_REGEX = Regex("""https?://[^\s"'\\<>()\[\]]+\.m3u8[^\s"'\\<>()\[\]]*""")
+        private val MP4_REGEX = Regex("""https?://[^\s"'\\<>()\[\]]+\.mp4[^\s"'\\<>()\[\]]*""")
+        private val SUB_REGEX = Regex("""https?://[^\s"'\\<>()\[\]]+\.(?:vtt|srt|ass)[^\s"'\\<>()\[\]]*""")
+        private val EMBED_ID_REGEX = Regex("""flixcloud\.cc/(?:embed|e|v|watch|player|api/m3u8)/([A-Za-z0-9_-]{8,})""")
     }
 
     private fun String.unesc(): String = this
@@ -214,96 +219,121 @@ class ReAnimeProvider : MainAPI() {
             "X-Requested-With" to "XMLHttpRequest"
         )
 
-        // Step 1: Aggressively harvest all internal API endpoints that contain the streaming URLs
+        // 1. Fetch internal ReAnime watch & server metadata endpoints
         val endpoints = listOf(
             cleanData,
+            "$mainUrl/watch/$slug?ep=$epNum",
             "$mainUrl/api/v1/anime/$slug/episodes/$epNum",
             "$mainUrl/api/v1/anime/$slug/episodes/$epNum/servers",
             "$mainUrl/api/v1/episode/$slug-episode-$epNum/servers",
             "$mainUrl/api/v1/watch/$slug?ep=$epNum"
         )
 
-        val candidates = mutableSetOf<String>()
-        val serverIds = mutableSetOf<String>()
-
-        for (endpoint in endpoints) {
+        val pages = mutableListOf<String>()
+        for (ep in endpoints) {
             try {
-                val response = app.get(endpoint, headers = siteHeaders).text
-                
-                // Pull out any direct URLs (m3u8, mp4, embedded iframes)
-                Regex("""https?://[^\s"'<>\\]+""").findAll(response).forEach {
-                    candidates.add(it.value.replace("\\/", "/"))
-                }
-                
-                // Pull out any proprietary server_id tokens that require secondary resolution
-                Regex("""["'](?:server_id|id)["']\s*:\s*["']([A-Za-z0-9_-]+)["']""").findAll(response).forEach {
-                    val id = it.groupValues[1]
-                    if (id.length > 4 && !id.contains("episode", true)) serverIds.add(id)
-                }
+                val res = app.get(ep, headers = siteHeaders).text
+                if (res.isNotBlank()) pages.add(res.unesc())
             } catch (e: Exception) {}
         }
 
-        // Step 2: Resolve secondary server tokens
-        for (id in serverIds) {
-            try {
-                val serverRes = app.get("$mainUrl/api/v1/servers/$id/watch", headers = siteHeaders).text
-                Regex("""https?://[^\s"'<>\\]+""").findAll(serverRes).forEach {
-                    candidates.add(it.value.replace("\\/", "/"))
+        val videoIds = mutableSetOf<String>()
+        val seenLinks = mutableSetOf<String>()
+
+        for (page in pages) {
+            // A. Direct Signed M3U8 Master Streams (e.g. fetch7.flixcloud.cc)
+            M3U8_REGEX.findAll(page).forEach { m ->
+                val u = m.value.unesc()
+                if (seenLinks.add(u)) {
+                    val isFlix = u.contains("flixcloud", true)
+                    callback(
+                        newExtractorLink(
+                            source = if (isFlix) "FlixCloud Direct" else "Re:Anime Direct",
+                            name = if (isFlix) "FlixCloud Master" else "Direct Stream",
+                            url = u,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf(
+                                "User-Agent" to UA,
+                                "Referer" to if (isFlix) "https://flixcloud.cc/" else "$mainUrl/",
+                                "Origin" to if (isFlix) "https://flixcloud.cc" else mainUrl
+                            )
+                        }
+                    )
+                    found = true
                 }
-            } catch (e: Exception) {}
-        }
+            }
 
-        // Filters to strip out useless UI links
-        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org", "png", "jpg", "jpeg", "webp")
+            // B. Direct MP4s
+            MP4_REGEX.findAll(page).forEach { m ->
+                val u = m.value.unesc()
+                if (!u.contains("/ads", true) && seenLinks.add(u)) {
+                    callback(
+                        newExtractorLink(
+                            source = "Re:Anime MP4",
+                            name = "Direct MP4",
+                            url = u,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = siteHeaders
+                        }
+                    )
+                    found = true
+                }
+            }
 
-        // Step 3: Iterate through harvested candidates and aggressively bypass encryption
-        for (rawUrl in candidates) {
-            val url = rawUrl.trimEnd('.', ',', '"', '\'')
-            if (exclusions.any { url.contains(it, true) }) continue
-
-            val isM3u8 = url.contains(".m3u8")
-            val isMp4 = url.contains(".mp4")
-
-            if (isM3u8 || isMp4) {
-                val streamName = if (url.contains("flixcloud", true)) "FlixCloud Direct" else "Direct Stream"
-                callback(
-                    newExtractorLink(
-                        source = streamName,
-                        name = streamName,
-                        url = url,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.headers = siteHeaders
+            // C. Extract Subtitles
+            SUB_REGEX.findAll(page).forEach { m ->
+                val u = m.value.unesc()
+                val low = u.lowercase()
+                if (!low.contains("thumbnail") && !low.contains("sprite") && !low.contains("preview")) {
+                    val lang = when {
+                        low.contains("eng") -> "English"
+                        low.contains("spa") -> "Spanish"
+                        else -> "Subtitle"
                     }
-                )
-                found = true
-            } else if (url.contains("flixcloud", true)) {
-                // DOMAIN SPOOFING BYPASS: FlixCloud recently upgraded to RabbitStream's obfuscation payload logic.
-                // We spoof the URL in-memory to Megacloud and Rabbitstream domains so Cloudstream's native internal decryptors crack it automatically.
-                val megacloudUrl = url.replace(Regex("""https?://[^/]+"""), "https://megacloud.tv")
-                val rabbitUrl = url.replace(Regex("""https?://[^/]+"""), "https://rabbitstream.net")
-                val vidplayUrl = url.replace(Regex("""https?://[^/]+"""), "https://vidplay.site")
-                
-                if (loadExtractor(url, cleanData, subtitleCallback, callback)) found = true
-                if (!found && loadExtractor(megacloudUrl, cleanData, subtitleCallback, callback)) found = true
-                if (!found && loadExtractor(rabbitUrl, cleanData, subtitleCallback, callback)) found = true
-                if (!found && loadExtractor(vidplayUrl, cleanData, subtitleCallback, callback)) found = true
-            } else if (KNOWN_HOSTS.any { url.contains(it, true) }) {
-                if (loadExtractor(url, cleanData, subtitleCallback, callback)) found = true
+                    subtitleCallback(newSubtitleFile(lang, u))
+                }
+            }
+
+            // D. Collect FlixCloud video IDs for domain spoofing fallback
+            EMBED_ID_REGEX.findAll(page).forEach { videoIds.add(it.groupValues[1]) }
+            UUID_REGEX.findAll(page).forEach { m ->
+                val start = maxOf(0, m.range.first - 10)
+                if (!page.substring(start, m.range.first).contains("blob:")) {
+                    videoIds.add(m.value)
+                }
+            }
+
+            // E. Third-party mirrors
+            Regex("""https?://[^\s"'<>\\]+""").findAll(page).forEach { m ->
+                val u = m.value
+                if (KNOWN_HOSTS.any { u.contains(it, true) } && seenLinks.add(u)) {
+                    try {
+                        if (loadExtractor(u, cleanData, subtitleCallback, callback)) found = true
+                    } catch (e: Exception) {}
+                }
             }
         }
 
-        // Step 4: Harvest VTT/SRT subtitle tracks
-        try {
-            val watchHtml = app.get(cleanData, headers = siteHeaders).text
-            Regex("""https?://[^\s"'<>\\]+\.(?:vtt|srt|ass)[^\s"'<>\\]*""").findAll(watchHtml).forEach {
-                val subUrl = it.value.replace("\\/", "/")
-                if (!subUrl.contains("thumbnail", true) && !subUrl.contains("sprite", true)) {
-                    subtitleCallback(newSubtitleFile("English", subUrl))
-                }
+        // 2. Domain Spoofing Fallback: De-obfuscate FlixCloud via Megacloud/Rabbitstream extractors
+        if (!found && videoIds.isNotEmpty()) {
+            for (id in videoIds) {
+                val megacloudUrl = "https://megacloud.tv/embed-2/e-1/$id"
+                val rabbitUrl = "https://rabbitstream.net/embed-4/$id"
+                val flixEmbedUrl = "https://flixcloud.cc/e/$id"
+
+                try {
+                    if (loadExtractor(megacloudUrl, cleanData, subtitleCallback, callback)) found = true
+                    if (!found && loadExtractor(rabbitUrl, cleanData, subtitleCallback, callback)) found = true
+                    if (!found && loadExtractor(flixEmbedUrl, cleanData, subtitleCallback, callback)) found = true
+                } catch (e: Exception) {}
+
+                if (found) break
             }
-        } catch (e: Exception) {}
+        }
 
         return found
     }
