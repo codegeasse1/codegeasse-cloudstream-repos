@@ -33,7 +33,7 @@ class AniwavesProvider : MainAPI() {
         val document = Jsoup.parse(html)
         val homeItems = mutableListOf<HomePageList>()
 
-        // 1. Scrape Top Carousel (Trending) - Flagged as Horizontal to prevent stretching
+        // Scrape Top Carousel (Trending) - Flagged as Horizontal to prevent stretching
         if (request.name == "Home") {
             val sliderItems = document.select(".swiper-wrapper .swiper-slide.item").mapNotNull { parseSliderItem(it) }
             if (sliderItems.isNotEmpty()) {
@@ -41,7 +41,7 @@ class AniwavesProvider : MainAPI() {
             }
         }
 
-        // 2. Scrape Standard Grid Items
+        // Scrape Standard Grid Items
         val gridElements = document.select(".ani.items .item, .top-table .item")
         val standardItems = gridElements.mapNotNull { parseStandardItem(it) }
         
@@ -104,7 +104,6 @@ class AniwavesProvider : MainAPI() {
             val cleanEpHtml = if (epHtml.trim().startsWith("{")) JSONObject(epHtml).optString("result", epHtml) else epHtml
             val epDoc = Jsoup.parse(cleanEpHtml)
             
-            // Universal episode scraper to handle any attribute variant (data-num, data-ep, or raw text)
             epDoc.select("a").forEach { el ->
                 val rawNum = el.attr("data-num").ifBlank { el.attr("data-ep") }.ifBlank { el.text() }
                 val epNum = Regex("""\d+""").find(rawNum)?.value?.toIntOrNull() ?: return@forEach
@@ -139,7 +138,6 @@ class AniwavesProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        
         val animeId = Regex("""animeId=([^&]+)""").find(data)?.groupValues?.get(1) ?: return false
         val epNum = Regex("""epNum=([^&]+)""").find(data)?.groupValues?.get(1) ?: "1"
 
@@ -147,38 +145,62 @@ class AniwavesProvider : MainAPI() {
             val serverUrl = "$mainUrl/ajax/server/list?servers=$animeId&eps=$epNum"
             val serverRes = app.get(serverUrl, headers = headers).text
             
-            val cleanServerHtml = if (serverRes.trim().startsWith("{")) JSONObject(serverRes).optString("result", serverRes) else serverRes
-            val serverDoc = Jsoup.parse(cleanServerHtml)
+            // Clean the server response whether it's raw HTML or wrapped in JSON
+            val serverJson = try { JSONObject(serverRes) } catch (e: Exception) { null }
+            val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
+            val serverDoc = Jsoup.parse(serverHtml)
 
-            val serverTokens = serverDoc.select("[data-link]").map { it.attr("data-link") }.filter { it.isNotBlank() }
+            // Aggressively capture all server tokens across different UI layouts
+            val serverIds = mutableSetOf<String>()
+            serverDoc.select("a, div, li, span").forEach { el ->
+                val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
+                if (id.isNotBlank() && id.length > 3) {
+                    serverIds.add(id)
+                }
+            }
 
-            for (token in serverTokens) {
-                try {
-                    val sourceUrl = "$mainUrl/ajax/sources?id=$token&asi=0&autoPlay=0"
-                    val sourceRes = app.get(sourceUrl, headers = headers).text
-                    
-                    if (sourceRes.isBlank() || !sourceRes.trim().startsWith("{")) continue
-                    
-                    val json = JSONObject(sourceRes)
-                    val resultObj = json.optJSONObject("result") ?: json
-                    var embedUrl = resultObj.optString("url", "").replace("\\/", "/")
-                    
-                    if (embedUrl.isNotBlank()) {
-                        // Extract the raw ID bypassing specific /embed-20/ or /e/ paths
-                        val embedId = embedUrl.substringBefore("?").substringAfterLast("/")
+            for (id in serverIds) {
+                // Try multiple common AJAX source endpoints used by Aniwave clones
+                val sourceEndpoints = listOf(
+                    "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0",
+                    "$mainUrl/ajax/episode/sources?id=$id"
+                )
+                
+                for (sourceUrl in sourceEndpoints) {
+                    try {
+                        val sourceRes = app.get(sourceUrl, headers = headers).text
+                        if (!sourceRes.trim().startsWith("{")) continue
                         
-                        // Force rewrite the entire domain AND path so native extractors trigger properly
-                        val vidplayUrl = "https://vidplay.site/e/$embedId"
-                        val megacloudUrl = "https://megacloud.tv/embed-2/e-1/$embedId"
-                        val rabbitUrl = "https://rabbitstream.net/embed-4/$embedId"
+                        val json = JSONObject(sourceRes)
+                        val result = json.optJSONObject("result") ?: json
+                        var embedUrl = result.optString("url").ifBlank { result.optString("link") }
                         
-                        if (loadExtractor(vidplayUrl, data, subtitleCallback, callback)) found = true
-                        if (!found && loadExtractor(megacloudUrl, data, subtitleCallback, callback)) found = true
-                        if (!found && loadExtractor(rabbitUrl, data, subtitleCallback, callback)) found = true
-                        if (!found && loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
+                        if (embedUrl.isNotBlank()) {
+                            embedUrl = embedUrl.replace("\\/", "/")
+                            if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
+                            
+                            // CORE FIX: Intercept Echovideo/Flixcloud URLs and forcefully translate the domain
+                            val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|\?id=)([\w-]+)""").find(embedUrl)
+                            if (embedIdMatch != null) {
+                                val embedId = embedIdMatch.groupValues[1]
+                                
+                                // Route through CloudStream's verified built-in extractors
+                                val vidplayUrl = "https://vidplay.site/e/$embedId"
+                                val megacloudUrl = "https://megacloud.tv/embed-2/e-1/$embedId"
+                                val filemoonUrl = "https://filemoon.sx/e/$embedId"
+                                
+                                if (loadExtractor(vidplayUrl, data, subtitleCallback, callback)) found = true
+                                if (!found && loadExtractor(megacloudUrl, data, subtitleCallback, callback)) found = true
+                                if (!found && loadExtractor(filemoonUrl, data, subtitleCallback, callback)) found = true
+                            }
+                            
+                            // Safety Fallback: Attempt to extract the raw unmodified URL
+                            if (!found && loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
+                        }
+                    } catch (e: Exception) {
+                        continue
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                    if (found) break // Prevent hitting redundant endpoints if one works
                 }
             }
         } catch (e: Exception) {
