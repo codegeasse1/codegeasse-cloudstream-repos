@@ -29,19 +29,19 @@ class AniwavesProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val html = app.get(request.data).text
+        val html = app.get(request.data, headers = headers).text
         val document = Jsoup.parse(html)
         val homeItems = mutableListOf<HomePageList>()
 
-        // Scrape Top Carousel (Hotest)
+        // 1. Scrape Top Carousel (Trending) - Flagged as Horizontal to prevent stretching
         if (request.name == "Home") {
             val sliderItems = document.select(".swiper-wrapper .swiper-slide.item").mapNotNull { parseSliderItem(it) }
             if (sliderItems.isNotEmpty()) {
-                homeItems.add(HomePageList("Trending Now", sliderItems))
+                homeItems.add(HomePageList("Trending Now", sliderItems, isHorizontalImages = true))
             }
         }
 
-        // Scrape Grid Items
+        // 2. Scrape Standard Grid Items
         val gridElements = document.select(".ani.items .item, .top-table .item")
         val standardItems = gridElements.mapNotNull { parseStandardItem(it) }
         
@@ -84,7 +84,7 @@ class AniwavesProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/filter?keyword=$query"
-        val document = Jsoup.parse(app.get(searchUrl).text)
+        val document = Jsoup.parse(app.get(searchUrl, headers = headers).text)
         return document.select(".ani.items .item").mapNotNull { parseStandardItem(it) }
     }
 
@@ -92,25 +92,27 @@ class AniwavesProvider : MainAPI() {
         val html = app.get(url, headers = headers).text
         val document = Jsoup.parse(html)
 
-        // 1. Extract Metadata
         val title = document.selectFirst("h1")?.text()?.trim() ?: "Unknown"
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
         val plot = document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
         
-        // 2. Extract Anime ID from URL (e.g., one-piece-81553 -> 81553)
         val animeId = url.substringAfterLast("-")
-
-        // 3. Fetch AJAX Episode List
         val episodes = mutableListOf<Episode>()
+
         try {
             val epHtml = app.get("$mainUrl/ajax/episode/list/$animeId?vrf=", headers = headers).text
             val cleanEpHtml = if (epHtml.trim().startsWith("{")) JSONObject(epHtml).optString("result", epHtml) else epHtml
-            
             val epDoc = Jsoup.parse(cleanEpHtml)
             
-            epDoc.select("a[data-ep]").forEach { el ->
-                val epNum = el.attr("data-ep").toIntOrNull() ?: return@forEach
-                val epName = el.attr("title").ifBlank { "Episode $epNum" }
+            // Universal episode scraper to handle any attribute variant (data-num, data-ep, or raw text)
+            epDoc.select("a").forEach { el ->
+                val rawNum = el.attr("data-num").ifBlank { el.attr("data-ep") }.ifBlank { el.text() }
+                val epNum = Regex("""\d+""").find(rawNum)?.value?.toIntOrNull() ?: return@forEach
+                
+                var epName = el.attr("title").ifBlank { el.text() }.trim()
+                if (epName.isBlank() || epName.matches(Regex("""^\d+$"""))) {
+                    epName = "Episode $epNum"
+                }
                 
                 episodes.add(
                     newEpisode("$mainUrl/watch?animeId=$animeId&epNum=$epNum") {
@@ -126,7 +128,7 @@ class AniwavesProvider : MainAPI() {
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
-            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.episode })
         }
     }
 
@@ -138,22 +140,18 @@ class AniwavesProvider : MainAPI() {
     ): Boolean {
         var found = false
         
-        // Extract internal ID map from the payload we built in load()
         val animeId = Regex("""animeId=([^&]+)""").find(data)?.groupValues?.get(1) ?: return false
         val epNum = Regex("""epNum=([^&]+)""").find(data)?.groupValues?.get(1) ?: "1"
 
         try {
-            // 1. Fetch Server List mapped to the specific Episode
             val serverUrl = "$mainUrl/ajax/server/list?servers=$animeId&eps=$epNum"
             val serverRes = app.get(serverUrl, headers = headers).text
             
             val cleanServerHtml = if (serverRes.trim().startsWith("{")) JSONObject(serverRes).optString("result", serverRes) else serverRes
             val serverDoc = Jsoup.parse(cleanServerHtml)
 
-            // Extract the encrypted tokens for each server
             val serverTokens = serverDoc.select("[data-link]").map { it.attr("data-link") }.filter { it.isNotBlank() }
 
-            // 2. Fetch Embed Source for each token
             for (token in serverTokens) {
                 try {
                     val sourceUrl = "$mainUrl/ajax/sources?id=$token&asi=0&autoPlay=0"
@@ -162,19 +160,21 @@ class AniwavesProvider : MainAPI() {
                     if (sourceRes.isBlank() || !sourceRes.trim().startsWith("{")) continue
                     
                     val json = JSONObject(sourceRes)
-                    var embedUrl = json.optJSONObject("result")?.optString("url") ?: json.optString("url", "")
+                    val resultObj = json.optJSONObject("result") ?: json
+                    var embedUrl = resultObj.optString("url", "").replace("\\/", "/")
                     
                     if (embedUrl.isNotBlank()) {
-                        embedUrl = embedUrl.replace("\\/", "/")
+                        // Extract the raw ID bypassing specific /embed-20/ or /e/ paths
+                        val embedId = embedUrl.substringBefore("?").substringAfterLast("/")
                         
-                        // 3. DOMAIN SPOOFING (The Fix for Echovideo / FlixCloud)
-                        // Converts proprietary domains into recognizable CloudStream Extractors
-                        val vidplayUrl = embedUrl.replace(Regex("""https?://[^/]+"""), "https://vidplay.site")
-                        val megacloudUrl = embedUrl.replace(Regex("""https?://[^/]+"""), "https://megacloud.tv")
+                        // Force rewrite the entire domain AND path so native extractors trigger properly
+                        val vidplayUrl = "https://vidplay.site/e/$embedId"
+                        val megacloudUrl = "https://megacloud.tv/embed-2/e-1/$embedId"
+                        val rabbitUrl = "https://rabbitstream.net/embed-4/$embedId"
                         
-                        // Pass URLs to CloudStream's native decryption extractors
                         if (loadExtractor(vidplayUrl, data, subtitleCallback, callback)) found = true
                         if (!found && loadExtractor(megacloudUrl, data, subtitleCallback, callback)) found = true
+                        if (!found && loadExtractor(rabbitUrl, data, subtitleCallback, callback)) found = true
                         if (!found && loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
                     }
                 } catch (e: Exception) {
