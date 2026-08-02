@@ -1,16 +1,6 @@
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-        maven("https://jitpack.io")
-    }
-    dependencies {
-        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0")
-    }
+plugins {
+    id("com.lagradost.cloudstream3.gradle")
 }
-
-apply(plugin = "com.lagradost.cloudstream3.gradle")
 
 cloudstream {
     name = "Aniwaves"
@@ -18,12 +8,6 @@ cloudstream {
     version = 1
     authors = listOf("Codegeasse")
     mainProject = true
-}
-
-repositories {
-    mavenCentral()
-    google()
-    maven("https://jitpack.io")
 }
 
 dependencies {
