@@ -393,7 +393,7 @@ class ReAnimeProvider : MainAPI() {
             // Collect Video/Embed IDs
             val embedIdMatch = Regex("""/(?:embed|e|v|watch|player|api/m3u8|e-1|embed-2|embed-4)/([A-Za-z0-9_-]{6,})""").find(u)
             if (embedIdMatch != null) {
-                videoIds.add(embedIdMatch.groupValues)
+                videoIds.add(embedIdMatch.groupValues[1])
             }
 
             // Built-in CloudStream Extractors
