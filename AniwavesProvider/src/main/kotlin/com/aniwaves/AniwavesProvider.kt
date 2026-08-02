@@ -155,23 +155,15 @@ class AniwavesProvider : MainAPI() {
                 }
             }
             
-            // Regex fallback for server IDs
             if (serverIds.isEmpty()) {
                 Regex("""data-(?:link-)?id=["']([^"']+)["']""").findAll(serverHtml).forEach { m ->
                     serverIds.add(m.groupValues[1])
                 }
             }
 
-            val videoHeaders = mapOf(
-                "Referer" to "$mainUrl/",
-                "User-Agent" to headers["User-Agent"]!!
-            )
-
             for (id in serverIds) {
-                // Testing multiple known clone API endpoints
                 val apiEndpoints = listOf(
                     "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0",
-                    "$mainUrl/ajax/server?get=$id",
                     "$mainUrl/ajax/episode/sources?id=$id"
                 )
                 
@@ -188,83 +180,59 @@ class AniwavesProvider : MainAPI() {
                             embedUrl = embedUrl.replace("\\/", "/")
                             if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
 
-                            // 1. Try Native CloudStream Extractors (Domain Spoofing for Vidplay)
-                            val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|\?id=)([\w-]+)""").find(embedUrl)
-                            if (embedIdMatch != null) {
-                                val embedId = embedIdMatch.groupValues[1]
-                                if (embedUrl.contains("echovideo") || embedUrl.contains("vidplay")) {
-                                    if (loadExtractor("https://vidplay.site/e/$embedId", data, subtitleCallback, callback)) found = true
-                                    if (!found && loadExtractor("https://megacloud.tv/embed-2/e-1/$embedId", data, subtitleCallback, callback)) found = true
+                            // 1. Direct Echovideo/Vidplay API Bypass
+                            if (embedUrl.contains("echovideo.ru") || embedUrl.contains("vidplay")) {
+                                val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
+                                val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
+                                val echoApiUrl = "$domain/embed-20/getSources?id=$echoId"
+                                
+                                val echoRes = app.get(
+                                    echoApiUrl,
+                                    headers = mapOf(
+                                        "User-Agent" to headers["User-Agent"]!!,
+                                        "Referer" to embedUrl,
+                                        "X-Requested-With" to "XMLHttpRequest"
+                                    )
+                                ).text
+
+                                if (echoRes.trim().startsWith("{")) {
+                                    val echoJson = JSONObject(echoRes)
+                                    val sourcesObj = echoJson.optJSONObject("sources")
+                                    
+                                    if (sourcesObj != null) {
+                                        val qualities = listOf("HD", "SD", "HQ")
+                                        for (q in qualities) {
+                                            val arr = sourcesObj.optJSONArray(q) ?: continue
+                                            for (i in 0 until arr.length()) {
+                                                val streamUrl = arr.getString(i).replace("\\/", "/")
+                                                if (streamUrl.isNotBlank()) {
+                                                    val qualityInt = when (q) {
+                                                        "HD" -> Qualities.P1080.value
+                                                        "HQ" -> Qualities.P720.value
+                                                        "SD" -> Qualities.P480.value
+                                                        else -> Qualities.Unknown.value
+                                                    }
+
+                                                    // Pass the raw savedly.net URL straight to ExoPlayer
+                                                    callback(
+                                                        newExtractorLink(
+                                                            source = "Aniwaves $q",
+                                                            name = "Aniwaves $q",
+                                                            url = streamUrl,
+                                                            referer = embedUrl,
+                                                            quality = qualityInt,
+                                                            type = ExtractorLinkType.M3U8
+                                                        )
+                                                    )
+                                                    found = true
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             
-                            // 2. Anikoto Brute-Force Extraction Method
-                            if (!found) {
-                                try {
-                                    val embedHtml = app.get(embedUrl, headers = videoHeaders).text.replace("\\/", "/")
-                                    var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(embedHtml)
-                                    
-                                    // Unpack JS
-                                    if (m3u8Match == null && embedHtml.contains("eval(function(p,a,c,k,e,d)")) {
-                                        try {
-                                            val unpacked = getAndUnpack(embedHtml)
-                                            m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
-                                        } catch (e: Exception) {}
-                                    }
-
-                                    // Base64 Decode
-                                    if (m3u8Match == null) {
-                                        val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(embedHtml)
-                                        for (b64 in base64Regex) {
-                                            try {
-                                                val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
-                                                if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                                    m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(decoded)
-                                                    break
-                                                }
-                                            } catch (e: Exception) {}
-                                        }
-                                    }
-
-                                    // Internal API Calls
-                                    if (m3u8Match == null) {
-                                        val host = "https://" + java.net.URI(embedUrl).host
-                                        val dataId = Regex("""data-id=["']([^"']+)["']""").find(embedHtml)?.groupValues?.get(1)
-                                            ?: Regex("""['"]?id['"]?\s*:\s*['"]([^"']+)['"]""").find(embedHtml)?.groupValues?.get(1)
-                                            ?: embedUrl.substringAfterLast("/").substringBefore("?")
-                                        
-                                        if (dataId.isNotBlank() && dataId.length > 2) {
-                                            val apis = listOf("/ajax/embed-4/getSources?id=", "/ajax/embed-5/getSources?id=", "/api/source/")
-                                            for (api in apis) {
-                                                try {
-                                                    val apiRes = app.get("$host$api$dataId", headers = mapOf("X-Requested-With" to "XMLHttpRequest")).text.replace("\\/", "/")
-                                                    m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(apiRes)
-                                                    if (m3u8Match != null) break
-                                                } catch (e: Exception) {}
-                                            }
-                                        }
-                                    }
-
-                                    // Push Extracted Link
-                                    if (m3u8Match != null) {
-                                        val mediaUrl = m3u8Match.value
-                                        callback(
-                                            newExtractorLink(
-                                                source = "Aniwaves Native",
-                                                name = java.net.URI(embedUrl).host.substringBeforeLast("."),
-                                                url = mediaUrl,
-                                                type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                            ) {
-                                                this.quality = Qualities.Unknown.value
-                                                this.headers = mapOf("Referer" to embedUrl)
-                                            }
-                                        )
-                                        found = true
-                                    }
-                                } catch (e: Exception) {}
-                            }
-                            
-                            // 3. Absolute Fallback
+                            // 2. Fallback to Native Extractors
                             if (!found) {
                                 if (loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
                             }
