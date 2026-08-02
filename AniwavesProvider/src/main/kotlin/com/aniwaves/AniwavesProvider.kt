@@ -193,6 +193,11 @@ class AniwavesProvider : MainAPI() {
                                 val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
                                 val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
 
+                                // Confirmed via devtools: the getSources call reuses
+                                // the SAME embed segment number that appears in the
+                                // original source url (e.g. "embed-1"), not a fixed
+                                // "embed-20" as before — that mismatch was the root
+                                // cause of every request here silently failing.
                                 val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
                                 val echoApiUrl = "$domain/$embedSegment/getSources?id=$echoId"
                                 
@@ -207,6 +212,10 @@ class AniwavesProvider : MainAPI() {
 
                                 if (echoRes.trim().startsWith("{")) {
                                     val echoJson = JSONObject(echoRes)
+
+                                    // Confirmed real response shape: "sources" is a
+                                    // single string URL, NOT an object with HD/SD/HQ
+                                    // quality arrays as previously assumed.
                                     val streamUrl = echoJson.optString("sources", "").replace("\\/", "/")
 
                                     if (streamUrl.isNotBlank()) {
@@ -230,12 +239,7 @@ class AniwavesProvider : MainAPI() {
                                                     type = ExtractorLinkType.M3U8
                                                 ) {
                                                     this.quality = Qualities.Unknown.value
-                                                    // FIX: Enforce the origin domain rather than the finalUrl to stop the 2001 network drop
-                                                    this.headers = mapOf(
-                                                        "Origin" to domain,
-                                                        "Referer" to "$domain/",
-                                                        "User-Agent" to headers["User-Agent"]!!
-                                                    )
+                                                    this.headers = mapOf("Referer" to finalUrl)
                                                 }
                                             )
                                             found = true
@@ -266,12 +270,7 @@ class AniwavesProvider : MainAPI() {
                                                             type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                                         ) {
                                                             this.quality = Qualities.Unknown.value
-                                                            // FIX: Apply proper headers to unpacked streams as well
-                                                            this.headers = mapOf(
-                                                                "Origin" to domain,
-                                                                "Referer" to "$domain/",
-                                                                "User-Agent" to headers["User-Agent"]!!
-                                                            )
+                                                            this.headers = mapOf("Referer" to finalUrl)
                                                         }
                                                     )
                                                     found = true
