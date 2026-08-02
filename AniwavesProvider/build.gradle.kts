@@ -4,27 +4,26 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
+version = 1
+
 cloudstream {
+    description = "Aniwaves Extension"
+    authors = listOf("Codegeasse")
+    status = 1
+    tvTypes = listOf("Anime")
+    iconUrl = "https://www.google.com/s2/favicons?domain=aniwaves.ru&sz=%size%"
 }
 
 android {
     namespace = "com.aniwaves"
-    compileSdk = 35
+    compileSdk = 33
     defaultConfig {
         minSdk = 21
-        targetSdk = 35
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
-    kotlinOptions {
-        jvmTarget = "1.8"
     }
 }
 
 dependencies {
-    val cloudstreamApi = "com.github.recloudstream.cloudstream:library:-SNAPSHOT"
+    val cloudstreamApi = "com.github.recloudstream:cloudstream:master-SNAPSHOT"
     compileOnly(cloudstreamApi)
     implementation("org.jsoup:jsoup:1.15.3")
     implementation("org.json:json:20230227")
