@@ -169,16 +169,17 @@ class AniwavesProvider : MainAPI() {
                         embedUrl = embedUrl.replace("\\/", "/")
                         if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
 
-                        // HANDLER: Parse play.echovideo.ru directly
-                        if (embedUrl.contains("echovideo.ru")) {
+                        // CORE FIX: Intercept EchoVideo / Vidplay variants
+                        if (embedUrl.contains("echovideo.ru") || embedUrl.contains("vidplay")) {
                             val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
-                            val echoApiUrl = "https://play.echovideo.ru/embed-20/getSources?id=$echoId"
+                            val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
+                            val echoApiUrl = "$domain/embed-20/getSources?id=$echoId"
                             
                             val echoRes = app.get(
                                 echoApiUrl,
                                 headers = mapOf(
                                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                    "Referer" to "https://play.echovideo.ru/",
+                                    "Referer" to embedUrl,
                                     "X-Requested-With" to "XMLHttpRequest"
                                 )
                             ).text
@@ -192,8 +193,18 @@ class AniwavesProvider : MainAPI() {
                                     for (q in qualities) {
                                         val arr = sourcesObj.optJSONArray(q) ?: continue
                                         for (i in 0 until arr.length()) {
-                                            var streamUrl = arr.getString(i).replace("\\/", "/")
-                                            if (streamUrl.isNotBlank()) {
+                                            val proxyUrl = arr.getString(i).replace("\\/", "/")
+                                            if (proxyUrl.isNotBlank()) {
+                                                
+                                                // 1. Manually Follow the cdn.savedly.net Redirect
+                                                val finalRedirectRes = app.get(
+                                                    proxyUrl, 
+                                                    headers = mapOf("Referer" to embedUrl)
+                                                )
+                                                
+                                                // 2. Extract the true master.m3u8 CDN URL
+                                                val trueStreamUrl = finalRedirectRes.url
+                                                
                                                 val qualityInt = when (q) {
                                                     "HD" -> Qualities.P1080.value
                                                     "HQ" -> Qualities.P720.value
@@ -201,18 +212,18 @@ class AniwavesProvider : MainAPI() {
                                                     else -> Qualities.Unknown.value
                                                 }
 
-                                                val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
                                                 callback(
                                                     newExtractorLink(
                                                         source = "EchoVideo ($q)",
                                                         name = "EchoVideo $q",
-                                                        url = streamUrl,
-                                                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                                        url = trueStreamUrl,
+                                                        type = ExtractorLinkType.M3U8
                                                     ) {
                                                         this.quality = qualityInt
                                                         this.headers = mapOf(
                                                             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                                            "Referer" to "https://cdn.savedly.net/"
+                                                            "Origin" to domain,
+                                                            "Referer" to "$domain/"
                                                         )
                                                     }
                                                 )
@@ -224,7 +235,7 @@ class AniwavesProvider : MainAPI() {
                             }
                         }
 
-                        // FALLBACK: Try native extractors if it's not echovideo
+                        // FALLBACK: Load standard third-party mirrors (Filemoon, Streamwish, Mp4upload)
                         if (!found) {
                             if (loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
                         }
