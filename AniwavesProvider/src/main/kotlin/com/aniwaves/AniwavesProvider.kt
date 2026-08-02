@@ -210,13 +210,6 @@ class AniwavesProvider : MainAPI() {
                                     val streamUrl = echoJson.optString("sources", "").replace("\\/", "/")
 
                                     if (streamUrl.isNotBlank()) {
-                                        // CRITICAL FIX: Extract the actual host (e.g. gn1r5n.org) to build the correct headers
-                                        val streamHost = try {
-                                            "https://" + java.net.URI(streamUrl).host
-                                        } catch (e: Exception) {
-                                            "https://play.echovideo.ru"
-                                        }
-
                                         val finalRes = app.get(
                                             streamUrl,
                                             headers = mapOf(
@@ -237,12 +230,11 @@ class AniwavesProvider : MainAPI() {
                                                     type = ExtractorLinkType.M3U8
                                                 ) {
                                                     this.quality = Qualities.Unknown.value
-                                                    // Dynamic header injection to bypass the 2001 SprintCDN error
+                                                    // FIX: Enforce the origin domain rather than the finalUrl to stop the 2001 network drop
                                                     this.headers = mapOf(
-                                                        "Origin" to streamHost,
-                                                        "Referer" to "$streamHost/",
-                                                        "User-Agent" to headers["User-Agent"]!!,
-                                                        "Accept" to "*/*"
+                                                        "Origin" to domain,
+                                                        "Referer" to "$domain/",
+                                                        "User-Agent" to headers["User-Agent"]!!
                                                     )
                                                 }
                                             )
@@ -274,12 +266,11 @@ class AniwavesProvider : MainAPI() {
                                                             type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                                         ) {
                                                             this.quality = Qualities.Unknown.value
-                                                            // Dynamic header injection applied here as well
+                                                            // FIX: Apply proper headers to unpacked streams as well
                                                             this.headers = mapOf(
-                                                                "Origin" to streamHost,
-                                                                "Referer" to "$streamHost/",
-                                                                "User-Agent" to headers["User-Agent"]!!,
-                                                                "Accept" to "*/*"
+                                                                "Origin" to domain,
+                                                                "Referer" to "$domain/",
+                                                                "User-Agent" to headers["User-Agent"]!!
                                                             )
                                                         }
                                                     )
