@@ -192,7 +192,14 @@ class AniwavesProvider : MainAPI() {
                             if (embedUrl.contains("echovideo.ru")) {
                                 val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
                                 val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
-                                val echoApiUrl = "$domain/embed-20/getSources?id=$echoId"
+
+                                // Confirmed via devtools: the getSources call reuses
+                                // the SAME embed segment number that appears in the
+                                // original source url (e.g. "embed-1"), not a fixed
+                                // "embed-20" as before — that mismatch was the root
+                                // cause of every request here silently failing.
+                                val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
+                                val echoApiUrl = "$domain/$embedSegment/getSources?id=$echoId"
                                 
                                 val echoRes = app.get(
                                     echoApiUrl,
@@ -205,83 +212,71 @@ class AniwavesProvider : MainAPI() {
 
                                 if (echoRes.trim().startsWith("{")) {
                                     val echoJson = JSONObject(echoRes)
-                                    val sourcesObj = echoJson.optJSONObject("sources")
-                                    
-                                    if (sourcesObj != null) {
-                                        val qualities = listOf("HD", "SD", "HQ")
-                                        for (q in qualities) {
-                                            val arr = sourcesObj.optJSONArray(q) ?: continue
-                                            for (i in 0 until arr.length()) {
-                                                val streamUrl = arr.getString(i).replace("\\/", "/")
-                                                if (streamUrl.isNotBlank()) {
-                                                    val qualityInt = when (q) {
-                                                        "HD" -> Qualities.P1080.value
-                                                        "HQ" -> Qualities.P720.value
-                                                        "SD" -> Qualities.P480.value
-                                                        else -> Qualities.Unknown.value
-                                                    }
 
-                                                    val finalRes = app.get(
-                                                        streamUrl, 
-                                                        headers = mapOf(
-                                                            "Referer" to embedUrl,
-                                                            "User-Agent" to headers["User-Agent"]!!
-                                                        )
-                                                    )
-                                                    val finalUrl = finalRes.url
-                                                    val text = finalRes.text
+                                    // Confirmed real response shape: "sources" is a
+                                    // single string URL, NOT an object with HD/SD/HQ
+                                    // quality arrays as previously assumed.
+                                    val streamUrl = echoJson.optString("sources", "").replace("\\/", "/")
 
-                                                    // A. Direct M3U8 Return
-                                                    if (text.contains("#EXTM3U") || finalUrl.contains(".m3u8", true)) {
-                                                        callback(
-                                                            newExtractorLink(
-                                                                source = "Aniwaves $q",
-                                                                name = "Aniwaves $q",
-                                                                url = finalUrl,
-                                                                type = ExtractorLinkType.M3U8
-                                                            ) {
-                                                                this.quality = qualityInt
-                                                                this.headers = mapOf("Referer" to finalUrl)
-                                                            }
-                                                        )
-                                                        found = true
-                                                    } else {
-                                                        // B. Iframe Proxy (e.g. Vidhide/Voe wrapper)
-                                                        val doc = Jsoup.parse(text)
-                                                        val iframeSrc = doc.selectFirst("iframe")?.attr("src")
-                                                        
-                                                        if (iframeSrc != null && iframeSrc.isNotBlank()) {
-                                                            val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-                                                            if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) found = true
-                                                        } 
-                                                        // C. Brute-Force JS Unpacking
-                                                        else {
-                                                            var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(text)
-                                                            if (m3u8Match == null && text.contains("eval(function(p,a,c,k,e,d)")) {
-                                                                try {
-                                                                    val unpacked = getAndUnpack(text)
-                                                                    m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
-                                                                } catch (e: Exception) {}
-                                                            }
-                                                            if (m3u8Match != null) {
-                                                                callback(
-                                                                    newExtractorLink(
-                                                                        source = "Aniwaves Unpacked",
-                                                                        name = "Aniwaves $q",
-                                                                        url = m3u8Match.value,
-                                                                        type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                                                    ) {
-                                                                        this.quality = qualityInt
-                                                                        this.headers = mapOf("Referer" to finalUrl)
-                                                                    }
-                                                                )
-                                                                found = true
-                                                            } else {
-                                                                // D. Pass to Native Extractors as final resort
-                                                                if (loadExtractor(finalUrl, data, subtitleCallback, callback)) found = true
-                                                            }
+                                    if (streamUrl.isNotBlank()) {
+                                        val finalRes = app.get(
+                                            streamUrl,
+                                            headers = mapOf(
+                                                "Referer" to embedUrl,
+                                                "User-Agent" to headers["User-Agent"]!!
+                                            )
+                                        )
+                                        val finalUrl = finalRes.url
+                                        val text = finalRes.text
+
+                                        // A. Direct M3U8 Return
+                                        if (text.contains("#EXTM3U") || finalUrl.contains(".m3u8", true)) {
+                                            callback(
+                                                newExtractorLink(
+                                                    source = "Aniwaves",
+                                                    name = "Aniwaves",
+                                                    url = finalUrl,
+                                                    type = ExtractorLinkType.M3U8
+                                                ) {
+                                                    this.quality = Qualities.Unknown.value
+                                                    this.headers = mapOf("Referer" to finalUrl)
+                                                }
+                                            )
+                                            found = true
+                                        } else {
+                                            // B. Iframe Proxy (e.g. Vidhide/Voe wrapper)
+                                            val doc = Jsoup.parse(text)
+                                            val iframeSrc = doc.selectFirst("iframe")?.attr("src")
+
+                                            if (iframeSrc != null && iframeSrc.isNotBlank()) {
+                                                val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+                                                if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) found = true
+                                            }
+                                            // C. Brute-Force JS Unpacking
+                                            else {
+                                                var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(text)
+                                                if (m3u8Match == null && text.contains("eval(function(p,a,c,k,e,d)")) {
+                                                    try {
+                                                        val unpacked = getAndUnpack(text)
+                                                        m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
+                                                    } catch (e: Exception) {}
+                                                }
+                                                if (m3u8Match != null) {
+                                                    callback(
+                                                        newExtractorLink(
+                                                            source = "Aniwaves Unpacked",
+                                                            name = "Aniwaves",
+                                                            url = m3u8Match.value,
+                                                            type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                                        ) {
+                                                            this.quality = Qualities.Unknown.value
+                                                            this.headers = mapOf("Referer" to finalUrl)
                                                         }
-                                                    }
+                                                    )
+                                                    found = true
+                                                } else {
+                                                    // D. Pass to Native Extractors as final resort
+                                                    if (loadExtractor(finalUrl, data, subtitleCallback, callback)) found = true
                                                 }
                                             }
                                         }
@@ -351,6 +346,7 @@ class AniwavesProvider : MainAPI() {
                     
                     if (found) break
                 }
+                if (found) break
             }
         } catch (e: Exception) {
             e.printStackTrace()
