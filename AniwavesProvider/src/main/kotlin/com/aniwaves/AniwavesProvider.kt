@@ -161,6 +161,11 @@ class AniwavesProvider : MainAPI() {
                 }
             }
 
+            val videoHeaders = mapOf(
+                "Referer" to "$mainUrl/",
+                "User-Agent" to headers["User-Agent"]!!
+            )
+
             for (id in serverIds) {
                 val apiEndpoints = listOf(
                     "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0",
@@ -216,7 +221,6 @@ class AniwavesProvider : MainAPI() {
                                                         else -> Qualities.Unknown.value
                                                     }
 
-                                                    // Fetch the proxy gateway (savedly.net) to find the true payload
                                                     val finalRes = app.get(
                                                         streamUrl, 
                                                         headers = mapOf(
@@ -234,10 +238,11 @@ class AniwavesProvider : MainAPI() {
                                                                 source = "Aniwaves $q",
                                                                 name = "Aniwaves $q",
                                                                 url = finalUrl,
-                                                                referer = finalUrl,
-                                                                quality = qualityInt,
                                                                 type = ExtractorLinkType.M3U8
-                                                            )
+                                                            ) {
+                                                                this.quality = qualityInt
+                                                                this.headers = mapOf("Referer" to finalUrl)
+                                                            }
                                                         )
                                                         found = true
                                                     } else {
@@ -264,10 +269,11 @@ class AniwavesProvider : MainAPI() {
                                                                         source = "Aniwaves Unpacked",
                                                                         name = "Aniwaves $q",
                                                                         url = m3u8Match.value,
-                                                                        referer = finalUrl,
-                                                                        quality = qualityInt,
                                                                         type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                                                    )
+                                                                    ) {
+                                                                        this.quality = qualityInt
+                                                                        this.headers = mapOf("Referer" to finalUrl)
+                                                                    }
                                                                 )
                                                                 found = true
                                                             } else {
@@ -328,10 +334,11 @@ class AniwavesProvider : MainAPI() {
                                                 source = "Aniwaves Native",
                                                 name = java.net.URI(embedUrl).host.substringBeforeLast("."),
                                                 url = mediaUrl,
-                                                referer = embedUrl,
-                                                quality = Qualities.Unknown.value,
                                                 type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                            )
+                                            ) {
+                                                this.quality = Qualities.Unknown.value
+                                                this.headers = mapOf("Referer" to embedUrl)
+                                            }
                                         )
                                         found = true
                                     } else {
