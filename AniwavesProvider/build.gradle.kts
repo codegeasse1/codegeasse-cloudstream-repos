@@ -1,3 +1,5 @@
+import com.lagradost.cloudstream3.gradle.CloudstreamExtensionConfiguration
+
 buildscript {
     repositories {
         google()
@@ -5,14 +7,14 @@ buildscript {
         maven("https://jitpack.io")
     }
     dependencies {
-        // Corrected JitPack path for the CloudStream Gradle Builder
-        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+        // Fetch the builder from the active recloudstream repository
+        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0")
     }
 }
 
-// Corrected plugin application ID
-apply(plugin = "com.github.recloudstream.gradle")
+// CRITICAL FIX: The plugin ID remains lagradost to properly register the cloudstream{} block
+apply(plugin = "com.lagradost.cloudstream3.gradle")
 
 cloudstream {
     name = "Aniwaves"
