@@ -1,5 +1,3 @@
-import com.lagradost.cloudstream3.gradle.CloudstreamExtensionConfiguration
-
 buildscript {
     repositories {
         google()
@@ -7,12 +5,14 @@ buildscript {
         maven("https://jitpack.io")
     }
     dependencies {
-        classpath("com.lagradost.cloudstream3.gradle:builder:1.0.4")
+        // Corrected JitPack path for the CloudStream Gradle Builder
+        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0")
     }
 }
 
-apply(plugin = "com.lagradost.cloudstream3.gradle")
+// Corrected plugin application ID
+apply(plugin = "com.github.recloudstream.gradle")
 
 cloudstream {
     name = "Aniwaves"
