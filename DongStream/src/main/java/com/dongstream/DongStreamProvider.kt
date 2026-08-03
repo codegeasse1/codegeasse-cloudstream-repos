@@ -30,11 +30,9 @@ class DongStreamProvider : MainAPI() {
         val homeItems = mutableListOf<HomePageList>()
         
         runCatching {
-            // Fetch raw JSON map safely
             val jsonText = app.get("$apiUrl/home?region=en").text
             val rootMap = AppUtils.parseJson<Map<String, Any>>(jsonText)
             
-            // Navigate safely into categories map
             val categories = rootMap["categories"] as? Map<*, *>
             val rawList = categories?.get(request.data) as? List<*> ?: emptyList<Any>()
             
@@ -49,21 +47,24 @@ class DongStreamProvider : MainAPI() {
                     ?: continue
 
                 val playlist = item["playlist"] as? Map<*, *>
-                val actualSlug = (playlist?.get("slug"] as? String) 
-                    ?: (item["playlist_slug"] as? String) 
-                    ?: (item["slug"] as? String) 
+                val playlistSlug = playlist?.get("slug") as? String
+                val itemPlaylistSlug = item["playlist_slug"] as? String
+                val itemSlug = item["slug"] as? String
+                
+                val actualSlug = playlistSlug ?: itemPlaylistSlug ?: itemSlug 
                     ?: title.lowercase().replace(Regex("\\s+"), "-").replace(Regex("[^a-z0-9\\-]"), "")
 
                 val rawImg = (item["thumbnail_url"] as? String) 
                     ?: (item["image_url"] as? String)
-                    ?: (playlist?.get("thumbnail_url"] as? String)
-                    ?: (playlist?.get("image_url"] as? String)
+                    ?: (playlist?.get("thumbnail_url") as? String)
+                    ?: (playlist?.get("image_url") as? String)
                 
                 val img = resolveImageUrl(rawImg)
 
                 val epNumStr = item["episode_number"]?.toString()
+                val playlistTitle = playlist?.get("title") as? String
                 val displayTitle = if (!epNumStr.isNullOrBlank() && !title.contains("Episode", true)) {
-                    "${playlist?.get("title") as? String ?: title} E${epNumStr.replace(".0", "")}"
+                    "${playlistTitle ?: title} E${epNumStr.replace(".0", "")}"
                 } else {
                     title
                 }
@@ -94,7 +95,8 @@ class DongStreamProvider : MainAPI() {
             rawList.forEach { item ->
                 val title = (item["title"] as? String) ?: (item["name"] as? String) ?: return@forEach
                 val slug = (item["slug"] as? String) ?: title.lowercase().replace(Regex("\\s+"), "-")
-                val img = resolveImageUrl((item["thumbnail_url"] as? String) ?: (item["image_url"] as? String))
+                val rawImg = (item["thumbnail_url"] as? String) ?: (item["image_url"] as? String)
+                val img = resolveImageUrl(rawImg)
 
                 results.add(
                     newAnimeSearchResponse(title, "$mainUrl/$slug", TvType.Anime) {
