@@ -76,31 +76,38 @@ class NarulDonghuaProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        val epElements = document.select(".episodelist ul li, .naveps a, .lister ul li")
-        if (epElements.isNotEmpty()) {
-            epElements.forEach { el ->
-                val a = el.selectFirst("a") ?: return@forEach
-                val epHref = fixUrl(a.attr("href"))
-                val epTitle = a.selectFirst("h3")?.text()?.trim() ?: a.text().trim()
-                val epNum = Regex("""(?:episode|ep\.?)\s*(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+        // 1. Scrape standard WordPress sidebar / grid episode containers
+        val epElements = document.select(".episodelist ul li, .lister ul li, .naveps a")
+        epElements.forEach { el ->
+            val a = el.selectFirst("a") ?: if (el.tagName() == "a") el else return@forEach
+            val epHref = fixUrl(a.attr("href"))
+            if (epHref.isBlank() || epHref == mainUrl) return@forEach
 
-                episodes.add(newEpisode(epHref) {
-                    this.name = epTitle
-                    this.episode = epNum
-                })
-            }
-        } else {
+            val epTitle = a.selectFirst("h3")?.text()?.trim() ?: a.text().trim()
+            val epNum = Regex("""(?:episode|ep\.?)\s*(\d+)""", RegexOption.IGNORE_CASE)
+                .find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+
+            episodes.add(newEpisode(epHref) {
+                this.name = epTitle
+                this.episode = epNum
+            })
+        }
+
+        // 2. Fallback: If no sidebar list exists, parse current page as a single/main episode
+        if (episodes.isEmpty()) {
             episodes.add(newEpisode(url) {
                 this.name = title
                 this.episode = 1
             })
         }
 
+        // Sort episodes reliably ascending by episode number to prevent backward playback order
+        val sortedEpisodes = episodes.sortedBy { it.episode ?: 0 }
+
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = fixUrlNull(poster)
             this.plot = plot
-            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.data })
+            addEpisodes(DubStatus.Subbed, sortedEpisodes.distinctBy { it.data })
         }
     }
 
@@ -113,6 +120,7 @@ class NarulDonghuaProvider : MainAPI() {
         var found = false
         val document = app.get(data).document
 
+        // Parse direct iframe payloads
         document.select(".player-embed iframe, iframe[src]").forEach { iframe ->
             val src = fixUrl(iframe.attr("src").ifBlank { iframe.attr("data-litespeed-src") })
             if (src.isNotBlank() && !src.contains("about:blank")) {
@@ -124,35 +132,41 @@ class NarulDonghuaProvider : MainAPI() {
             }
         }
 
+        // Parse base64 dropdown servers (Mirror selector)
         document.select("select.mirror option").forEach { option ->
             val base64Val = option.attr("value")
             if (base64Val.isNotBlank()) {
                 runCatching {
-                    val decodedHtml = String(Base64.getDecoder().decode(base64Val))
-                    val iframeSrc = Regex("src=[\"'](.*?)[\"']").find(decodedHtml)?.groupValues?.get(1) 
-                        ?: Regex("src=(.*?)(\\s|>)").find(decodedHtml)?.groupValues?.get(1)
+                    val decodedBytes = Base64.getDecoder().decode(base64Val)
+                    val decodedHtml = String(decodedBytes)
+                    
+                    val iframeSrc = Regex("src=[\"'](.*?)[\"']", RegexOption.IGNORE_CASE).find(decodedHtml)?.groupValues?.get(1) 
+                        ?: Regex("src=([^\\s>]+)", RegexOption.IGNORE_CASE).find(decodedHtml)?.groupValues?.get(1)
 
                     if (!iframeSrc.isNullOrBlank()) {
-                        val fixedSrc = fixUrl(iframeSrc.trim('"', '\''))
+                        val fixedSrc = fixUrl(iframeSrc.trim('"', '\'', ' '))
                         if (loadExtractor(fixedSrc, data, subtitleCallback, callback)) {
                             found = true
-                        } else if (fixedSrc.contains("p2pstream.vip") || fixedSrc.contains("abyssplayer")) {
-                            val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data)).text
+                        } else {
+                            // Deep extraction for custom embed domains
+                            val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data, "User-Agent" to "Mozilla/5.0")).text
                             val m3u8Match = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|txt|mp4)[^"']*)["']""").find(iframeText)
                             
                             m3u8Match?.groupValues?.get(1)?.let { streamUrl ->
                                 val cleanUrl = streamUrl.replace("\\/", "/")
-                                val safeUrl = if (cleanUrl.contains("txt") && !cleanUrl.contains(".m3u8")) "$cleanUrl#.m3u8" else cleanUrl
+                                val finalUrl = if (cleanUrl.startsWith("//")) "https:$cleanUrl" else cleanUrl
+                                val safeUrl = if (finalUrl.contains("txt") && !finalUrl.contains(".m3u8")) "$finalUrl#.m3u8" else finalUrl
                                 
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
                                         name = "Narul Stream",
                                         url = safeUrl,
-                                        type = if (safeUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        type = if (safeUrl.contains("m3u8") || safeUrl.contains("txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
                                         this.referer = fixedSrc
                                         this.quality = Qualities.Unknown.value
+                                        this.headers = mapOf("Referer" to fixedSrc, "Origin" to "https://naruldonghua.com")
                                     }
                                 )
                                 found = true
