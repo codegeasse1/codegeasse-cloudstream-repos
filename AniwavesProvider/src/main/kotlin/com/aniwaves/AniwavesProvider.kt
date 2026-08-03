@@ -173,6 +173,7 @@ class AniwavesProvider : MainAPI() {
                     "$mainUrl/ajax/episode/sources?id=$id"
                 )
                 
+                var serverFound = false
                 for (apiUrl in apiEndpoints) {
                     try {
                         val sourceRes = app.get(apiUrl, headers = headers).text
@@ -186,18 +187,9 @@ class AniwavesProvider : MainAPI() {
                             embedUrl = embedUrl.replace("\\/", "/")
                             if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
 
-                            // ======================================================
-                            // 1. ADVANCED ECHOVIDEO & SAVEDLY.NET HANDLER
-                            // ======================================================
                             if (embedUrl.contains("echovideo.ru")) {
                                 val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
                                 val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
-
-                                // Confirmed via devtools: the getSources call reuses
-                                // the SAME embed segment number that appears in the
-                                // original source url (e.g. "embed-1"), not a fixed
-                                // "embed-20" as before — that mismatch was the root
-                                // cause of every request here silently failing.
                                 val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
                                 val echoApiUrl = "$domain/$embedSegment/getSources?id=$echoId"
                                 
@@ -212,10 +204,6 @@ class AniwavesProvider : MainAPI() {
 
                                 if (echoRes.trim().startsWith("{")) {
                                     val echoJson = JSONObject(echoRes)
-
-                                    // Confirmed real response shape: "sources" is a
-                                    // single string URL, NOT an object with HD/SD/HQ
-                                    // quality arrays as previously assumed.
                                     val streamUrl = echoJson.optString("sources", "").replace("\\/", "/")
 
                                     if (streamUrl.isNotBlank()) {
@@ -229,12 +217,13 @@ class AniwavesProvider : MainAPI() {
                                         val finalUrl = finalRes.url
                                         val text = finalRes.text
 
-                                        // A. Direct M3U8 Return
                                         if (text.contains("#EXTM3U") || finalUrl.contains(".m3u8", true)) {
                                             callback(
                                                 newExtractorLink(
                                                     source = "Aniwaves",
-                                                    name = "Aniwaves",
+                                                    // distinct name per server so CloudStream's
+                                                    // Source picker shows each one separately
+                                                    name = "Aniwaves Server ${serverIds.indexOf(id) + 1}",
                                                     url = finalUrl,
                                                     type = ExtractorLinkType.M3U8
                                                 ) {
@@ -243,17 +232,18 @@ class AniwavesProvider : MainAPI() {
                                                 }
                                             )
                                             found = true
+                                            serverFound = true
                                         } else {
-                                            // B. Iframe Proxy (e.g. Vidhide/Voe wrapper)
                                             val doc = Jsoup.parse(text)
                                             val iframeSrc = doc.selectFirst("iframe")?.attr("src")
 
                                             if (iframeSrc != null && iframeSrc.isNotBlank()) {
                                                 val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-                                                if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) found = true
-                                            }
-                                            // C. Brute-Force JS Unpacking
-                                            else {
+                                                if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) {
+                                                    found = true
+                                                    serverFound = true
+                                                }
+                                            } else {
                                                 var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(text)
                                                 if (m3u8Match == null && text.contains("eval(function(p,a,c,k,e,d)")) {
                                                     try {
@@ -265,7 +255,7 @@ class AniwavesProvider : MainAPI() {
                                                     callback(
                                                         newExtractorLink(
                                                             source = "Aniwaves Unpacked",
-                                                            name = "Aniwaves",
+                                                            name = "Aniwaves Server ${serverIds.indexOf(id) + 1}",
                                                             url = m3u8Match.value,
                                                             type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                                         ) {
@@ -274,29 +264,32 @@ class AniwavesProvider : MainAPI() {
                                                         }
                                                     )
                                                     found = true
+                                                    serverFound = true
                                                 } else {
-                                                    // D. Pass to Native Extractors as final resort
-                                                    if (loadExtractor(finalUrl, data, subtitleCallback, callback)) found = true
+                                                    if (loadExtractor(finalUrl, data, subtitleCallback, callback)) {
+                                                        found = true
+                                                        serverFound = true
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            // ======================================================
-                            // 2. VIDPLAY / MEGACLOUD DOMAIN SPOOFING
-                            // ======================================================
                             else if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
                                 val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|\?id=)([\w-]+)""").find(embedUrl)
                                 if (embedIdMatch != null) {
                                     val embedId = embedIdMatch.groupValues[1]
-                                    if (loadExtractor("https://vidplay.site/e/$embedId", data, subtitleCallback, callback)) found = true
-                                    if (!found && loadExtractor("https://megacloud.tv/embed-2/e-1/$embedId", data, subtitleCallback, callback)) found = true
+                                    if (loadExtractor("https://vidplay.site/e/$embedId", data, subtitleCallback, callback)) {
+                                        found = true
+                                        serverFound = true
+                                    }
+                                    if (!serverFound && loadExtractor("https://megacloud.tv/embed-2/e-1/$embedId", data, subtitleCallback, callback)) {
+                                        found = true
+                                        serverFound = true
+                                    }
                                 }
                             }
-                            // ======================================================
-                            // 3. ANIKOTO GENERIC BRUTE-FORCE ENGINE
-                            // ======================================================
                             else {
                                 try {
                                     val embedHtml = app.get(embedUrl, headers = mapOf("Referer" to "$mainUrl/")).text.replace("\\/", "/")
@@ -327,7 +320,7 @@ class AniwavesProvider : MainAPI() {
                                         callback(
                                             newExtractorLink(
                                                 source = "Aniwaves Native",
-                                                name = java.net.URI(embedUrl).host.substringBeforeLast("."),
+                                                name = "Aniwaves Server ${serverIds.indexOf(id) + 1}",
                                                 url = mediaUrl,
                                                 type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                             ) {
@@ -336,17 +329,21 @@ class AniwavesProvider : MainAPI() {
                                             }
                                         )
                                         found = true
+                                        serverFound = true
                                     } else {
-                                        if (loadExtractor(embedUrl, data, subtitleCallback, callback)) found = true
+                                        if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
+                                            found = true
+                                            serverFound = true
+                                        }
                                     }
                                 } catch (e: Exception) {}
                             }
                         }
                     } catch (e: Exception) {}
                     
-                    if (found) break
+                    if (serverFound) break // only skip remaining endpoint guesses for THIS server
                 }
-                if (found) break
+                // no break here — always try every other server too
             }
         } catch (e: Exception) {
             e.printStackTrace()
