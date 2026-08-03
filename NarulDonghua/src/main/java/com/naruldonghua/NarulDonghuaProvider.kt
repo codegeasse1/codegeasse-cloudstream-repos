@@ -46,7 +46,7 @@ class NarulDonghuaProvider : MainAPI() {
 
         val imgEl = this.selectFirst("img")
         val poster = imgEl?.attr("data-src")?.ifBlank { imgEl.attr("src") }
-            ?: this.selectFirst(".backdrop")?.style()?.let { style ->
+            ?: this.selectFirst(".backdrop")?.attr("style")?.let { style ->
                 Regex("url\\(['\"]?(.*?)['\"]?\\)").find(style)?.groupValues?.get(1)
             }
 
@@ -76,7 +76,6 @@ class NarulDonghuaProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        // Scrape sidebar or pagination episode lists
         val epElements = document.select(".episodelist ul li, .naveps a, .lister ul li")
         if (epElements.isNotEmpty()) {
             epElements.forEach { el ->
@@ -92,7 +91,6 @@ class NarulDonghuaProvider : MainAPI() {
                 })
             }
         } else {
-            // If it's a standalone episode page without sidebar list, add itself
             episodes.add(newEpisode(url) {
                 this.name = title
                 this.episode = 1
@@ -115,7 +113,6 @@ class NarulDonghuaProvider : MainAPI() {
         var found = false
         val document = app.get(data).document
 
-        // 1. Extract direct iframes in player-embed
         document.select(".player-embed iframe, iframe[src]").forEach { iframe ->
             val src = fixUrl(iframe.attr("src").ifBlank { iframe.attr("data-litespeed-src") })
             if (src.isNotBlank() && !src.contains("about:blank")) {
@@ -127,12 +124,10 @@ class NarulDonghuaProvider : MainAPI() {
             }
         }
 
-        // 2. Extract mirrors from the <select class="mirror"> element options
         document.select("select.mirror option").forEach { option ->
             val base64Val = option.attr("value")
             if (base64Val.isNotBlank()) {
                 runCatching {
-                    // Decode base64 HTML string stored in option value
                     val decodedHtml = String(Base64.getDecoder().decode(base64Val))
                     val iframeSrc = Regex("src=[\"'](.*?)[\"']").find(decodedHtml)?.groupValues?.get(1) 
                         ?: Regex("src=(.*?)(\\s|>)").find(decodedHtml)?.groupValues?.get(1)
@@ -142,7 +137,6 @@ class NarulDonghuaProvider : MainAPI() {
                         if (loadExtractor(fixedSrc, data, subtitleCallback, callback)) {
                             found = true
                         } else if (fixedSrc.contains("p2pstream.vip") || fixedSrc.contains("abyssplayer")) {
-                            // Handle custom streaming domains via direct scraping
                             val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data)).text
                             val m3u8Match = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|txt|mp4)[^"']*)["']""").find(iframeText)
                             
