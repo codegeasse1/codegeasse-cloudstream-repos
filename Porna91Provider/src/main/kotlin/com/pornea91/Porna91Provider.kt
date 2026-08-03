@@ -1,11 +1,13 @@
 package com.pornea91
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class Porna91Provider : MainAPI() {
@@ -16,11 +18,8 @@ class Porna91Provider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
-    // No translation for this site – titles are mostly Chinese but we keep original
-    private suspend fun translateToEnglish(text: String?): String? = text
-
     // ---------------------------------------------------------------
-    // MAIN PAGE – all video sections from homepage + nav dropdowns
+    // MAIN PAGE – Homepage + all visible navigation sections
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -48,15 +47,10 @@ class Porna91Provider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val baseUrl = request.data
-        val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page".replace("?page=$page", "?page=$page") // handle both cases
+        val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
         val document = app.get(docUrl).document
 
-        // Homepage: both video items and the “黑料吃瓜爆料” articles exist.
-        // We only pick .video-item for movies. For articles we could create a separate type,
-        // but they can’t be played – we skip them to avoid clutter.
-        val items = document.select(".video-items .video-item, ul.video-items > li.video-item").mapNotNull { element ->
-            element.toSearchResult()
-        }
+        val items = document.select(".video-items .video-item, ul.video-items > li.video-item").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
 
@@ -72,6 +66,7 @@ class Porna91Provider : MainAPI() {
             ?: this.selectFirst(".line-clamp-2, .post-item-title")?.text()?.trim()
             ?: return null
 
+        // Use data-src (lazy load) or fallback to src
         val posterUrl = fixUrlNull(
             img?.attr("data-src")?.ifBlank { img.attr("src") }
         )
@@ -128,7 +123,7 @@ class Porna91Provider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS – try to find M3U8, then fallback to common player scripts
+    // LOAD LINKS – robust extraction for 91porna.com
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -139,31 +134,29 @@ class Porna91Provider : MainAPI() {
         var found = false
         val html = app.get(data).text
 
-        // 1. Direct M3U8 links (rare but possible)
-        val m3u8Regex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        // 1. Direct M3U8 links
+        val m3u8Regex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
         m3u8Regex.findAll(html).forEach { match ->
-            val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-            if (cleanUrl.isNotBlank()) {
-                callback(newExtractorLink(name, "$name M3U8", cleanUrl, ExtractorLinkType.M3U8) {
-                    this.referer = mainUrl
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
-            }
+            val url = match.value.replace("&amp;", "&")
+            callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
+                this.referer = mainUrl
+                this.quality = Qualities.Unknown.value
+            })
+            found = true
         }
 
-        // 2. Check for player_aaaa (common in Chinese AV sites)
+        // 2. player_aaaa JSON (common in MacCMS / Chinese AV sites)
         if (!found) {
-            val playerJsonRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
-            val match = playerJsonRegex.find(html)
+            val playerRegex = Regex("""player_aaaa\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
+            val match = playerRegex.find(html)
             if (match != null) {
                 try {
-                    val jsonStr = match.groupValues[1]
-                    val encrypt = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonStr)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    val urlEncoded = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonStr)?.groupValues?.get(1) ?: ""
+                    val json = match.groupValues[1]
+                    val encrypt = Regex(""""encrypt"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val urlEncoded = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: ""
                     val realUrl = when (encrypt) {
-                        1 -> android.util.Base64.decode(urlEncoded, android.util.Base64.DEFAULT).toString(Charsets.UTF_8)
-                        2 -> java.net.URLDecoder.decode(android.util.Base64.decode(urlEncoded, android.util.Base64.DEFAULT).toString(Charsets.UTF_8), "UTF-8")
+                        1 -> String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8)
+                        2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
                         else -> urlEncoded
                     }
                     if (realUrl.contains(".m3u8")) {
@@ -177,10 +170,10 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 3. Look for video URL in JavaScript variables (e.g., var video_url = '...')
+        // 3. Hidden JS variable (e.g. var video_url = '...';)
         if (!found) {
-            val jsUrlRegex = Regex("""(?:video_url|src)\s*[:=]\s*['"]([^'"]+)['"]""")
-            jsUrlRegex.findAll(html).forEach { match ->
+            val jsVarRegex = Regex("""(?:video_url|videoSrc|videoUrl)\s*[:=]\s*['"]([^'"]+)['"]""")
+            jsVarRegex.findAll(html).forEach { match ->
                 val url = match.groupValues[1]
                 if (url.contains(".m3u8") || url.contains(".mp4")) {
                     callback(newExtractorLink(name, "$name JS", url,
