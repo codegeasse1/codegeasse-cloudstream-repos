@@ -59,7 +59,6 @@ class DongStreamProvider : MainAPI() {
         
         return document.select(".ssr-home a, .ssr-search a, a[href^=/]").mapNotNull {
             val href = it.attr("href")
-            // Scrape the barebones SSR HTML links
             if (href.startsWith("/") && href.length > 2 && !href.contains("video")) {
                 newAnimeSearchResponse(it.text(), fixUrl(href), TvType.Anime)
             } else null
@@ -75,12 +74,10 @@ class DongStreamProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
         
-        // Find episode links from SSR HTML
         document.select("a[href*=/video/]").forEach { a ->
             val epUrl = fixUrl(a.attr("href"))
             val epTitle = a.text().trim()
             
-            // Try to extract the episode number from the URL or Title
             val epNum = Regex("""episode[s]?[-_]?(\d+)""").find(epUrl.lowercase())?.groupValues?.get(1)?.toIntOrNull() 
                 ?: Regex("""/(\d+)$""").find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
             
@@ -90,10 +87,11 @@ class DongStreamProvider : MainAPI() {
             })
         }
 
-        return newAnimeSearchResponse(title, finalUrl, TvType.Anime) {
+        // Fixed the return statement and corrected distinctBy { it.data }
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = fixUrlNull(poster)
             this.plot = plot
-            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.url })
+            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.data }) 
         }
     }
 
@@ -106,7 +104,6 @@ class DongStreamProvider : MainAPI() {
         var found = false
         val document = app.get(data).document
         
-        // The HTML contains a hidden JSON-LD schema with the direct embedUrl (FastSharePro, etc.)
         val jsonLd = document.selectFirst("script#json-ld-data")?.data()
         
         if (!jsonLd.isNullOrBlank()) {
@@ -114,16 +111,16 @@ class DongStreamProvider : MainAPI() {
                 val jsonData = parseJson<JsonLdData>(jsonLd)
                 
                 jsonData.embedUrl?.let { embedUrl ->
-                    // 1. First, let Cloudstream's built-in extractors try to handle it
                     if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
                         found = true
                     } else {
-                        // 2. Custom fallback to scrape the M3U8 from the iframe manually
                         val iframeHtml = app.get(embedUrl, headers = mapOf("Referer" to data)).text
                         val m3u8Match = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|mp4)[^"']*)["']""").find(iframeHtml)
                         
                         m3u8Match?.groupValues?.get(1)?.let { stream ->
                             val isM3u8 = stream.contains("m3u8")
+                            
+                            // Updated Extractor Builder Syntax
                             callback.invoke(
                                 newExtractorLink(
                                     source = name,
@@ -132,6 +129,7 @@ class DongStreamProvider : MainAPI() {
                                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = embedUrl
+                                    this.quality = Qualities.Unknown.value
                                 }
                             )
                             found = true
@@ -141,7 +139,6 @@ class DongStreamProvider : MainAPI() {
             }
         }
         
-        // Backup: Look for standard iframes if JSON-LD fails
         if (!found) {
             document.select("iframe[src]").forEach { iframe ->
                 val src = fixUrl(iframe.attr("src"))
