@@ -1,15 +1,14 @@
-package com.example.reanime
+package com.reanime
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import java.util.Base64
 
-class ReAnime : MainAPI() {
+class ReAnimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
     override var name = "ReAnime"
     override val supportedTypes = setOf(TvType.Anime)
@@ -29,14 +28,6 @@ class ReAnime : MainAPI() {
 
         val decrypted = cipher.doFinal(encrypted)
         return String(decrypted, Charsets.UTF_8)
-    }
-
-    override suspend fun getLoadMoreUrls(
-        page: Int,
-        url: String,
-        data: String?
-    ): LoadMoreResponse? {
-        return null
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -125,7 +116,6 @@ class ReAnime : MainAPI() {
                         val track = arr.getJSONObject(i)
                         val subUrl = track.optString("file", "")
                         val label = track.optString("label", "Unknown")
-                        val kind = track.optString("kind", "captions")
 
                         if (subUrl.isNotBlank()) {
                             subtitleCallback(SubtitleFile(label, subUrl))
