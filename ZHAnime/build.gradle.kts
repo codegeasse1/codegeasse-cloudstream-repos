@@ -1,44 +1,32 @@
 plugins {
     id("com.android.library")
-    kotlin("android")
+    id("kotlin-android")
     id("com.lagradost.cloudstream3.gradle")
 }
 
+version = 1
+
 cloudstream {
-    // The name of the extension repository
-    name = "ZHAnime"
-    // A brief description of what this provider does
     description = "Scraper for ZH Anime"
-    version = 1
-    // The type of media provided
-    tvTypes = listOf("Anime")
     authors = listOf("Codegeasse")
+    status = 1
+    tvTypes = listOf("Anime")
+    iconUrl = "https://www.google.com/s2/favicons?domain=zhanime.online&sz=%size%"
 }
 
 android {
     namespace = "com.zh.anime"
     compileSdk = 33
-
+    
     defaultConfig {
         minSdk = 21
-        targetSdk = 33
-    }
-    
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
-    
-    kotlinOptions {
-        jvmTarget = "1.8"
     }
 }
 
 dependencies {
-    // The Cloudstream API dependency (provided by the host app)
-    val csapi = "2.0.0" 
-    compileOnly("com.github.recloudstream:cloudstream:$csapi")
+    val cloudstreamApi = "com.github.recloudstream:cloudstream:master-SNAPSHOT"
+    compileOnly(cloudstreamApi)
     
-    // JSoup for HTML parsing
     implementation("org.jsoup:jsoup:1.15.3")
+    // implementation("org.json:json:20230227") // Uncomment if you end up needing JSON parsing
 }
