@@ -5,7 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
-class AsianGirlPornProvider : MainAPI() {
+class PppPornProvider : MainAPI() {
     override var mainUrl = "https://asiangirl.porn"
     override var name = "AsianGirlPorn"
     override val hasMainPage = true
