@@ -2,7 +2,6 @@ package com.zh.anime
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.AppUtils.parseJson
 import org.jsoup.nodes.Element
 
 class ZHAnimeProvider : MainAPI() {
@@ -73,7 +72,7 @@ class ZHAnimeProvider : MainAPI() {
 
         if (qtipStr.isNotBlank()) {
             runCatching {
-                val data = parseJson<QtipData>(qtipStr)
+                val data = AppUtils.parseJson<QtipData>(qtipStr)
                 title = data.title
                 animeSlug = data.slug
             }
