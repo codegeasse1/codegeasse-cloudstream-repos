@@ -20,11 +20,6 @@ class KanAVProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
-    // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
-    //   {"translate": true}
-    // Edit that file from your phone anytime — no rebuild needed.
-    // Cached for the lifetime of this provider instance (until the
-    // app fully restarts / plugin reloads).
     // ---------------------------------------------------------------
     private var cachedTranslateFlag: Boolean? = null
 
@@ -37,7 +32,7 @@ class KanAVProvider : MainAPI() {
             Regex(""""translate"\s*:\s*(true|false)""").find(json)
                 ?.groupValues?.get(1)?.toBoolean() ?: true
         } catch (e: Exception) {
-            true // fallback default if the fetch fails
+            true
         }
         cachedTranslateFlag = flag
         return flag
@@ -68,32 +63,44 @@ class KanAVProvider : MainAPI() {
             text
         }
     }
+
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // MAIN PAGE – All homepage sections exactly as they appear
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
-        "$mainUrl/index.php/vod/type/id/1.html" to "Recent Updates"
+        "$mainUrl/index.php/vod/type/id/1.html" to "Chinese Subtitles",
+        "$mainUrl/index.php/vod/type/id/2.html" to "Japan Censored",
+        "$mainUrl/index.php/vod/type/id/3.html" to "Japan Uncensored",
+        "$mainUrl/index.php/vod/type/id/4.html" to "Chinese AV",
+        "$mainUrl/index.php/vod/type/id/22.html" to "Leaked Selfie",
+        "$mainUrl/index.php/vod/type/id/20.html" to "Anime"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else request.data.replace(".html", "/page/$page.html")
-        val document = app.get(url).document
+        val url = request.data
 
-        val homeItems = document.select(".video-item").mapNotNull { element ->
-            element.toSearchResultAsync()
+        // Home tab – scrape the homepage’s “Featured” grid
+        if (url == "$mainUrl/") {
+            val document = app.get(url).document
+            val items = document.select("div.home-featured .video-item").mapNotNull { it.toSearchResultAsync() }
+            return newHomePageResponse(request.name, items)
         }
-        
-        return newHomePageResponse(request.name, homeItems)
+
+        // All other category tabs – standard MacCMS pagination
+        val docUrl = if (page == 1) url else url.replace(".html", "/page/$page.html")
+        val document = app.get(docUrl).document
+        val items = document.select(".video-item").mapNotNull { it.toSearchResultAsync() }
+        return newHomePageResponse(request.name, items)
     }
 
     // ---------------------------------------------------------------
-    // ITEM PARSING
+    // ITEM PARSING (works for all pages)
     // ---------------------------------------------------------------
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val aTag = this.selectFirst("a") ?: return null
         val href = fixUrlNull(aTag.attr("href")) ?: return null
-        
+
         val img = this.selectFirst("img")
         val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".entry-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
@@ -107,13 +114,7 @@ class KanAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
-    // Confirmed via devtools: search pagination follows the MacCMS
-    // path style, not ?wd=&page=N:
-    //   /index.php/vod/search/by/time_add/page/1/wd/<term>.html
-    //   /index.php/vod/search/by/time_add/page/2/wd/<term>.html
-    //   /index.php/vod/search/by/time_add/page/3/wd/<term>.html
-    // Loop pages 1..8, merge, stop early on an empty page.
+    // SEARCH (MacCMS pagination)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
@@ -170,7 +171,7 @@ class KanAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (MacCMS player_aaaa Decoder – FIXED)
+    // LOAD LINKS (MacCMS player_aaaa decoder)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
