@@ -191,17 +191,53 @@ class C51CGProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page) – WITH RANKING LIST DETECTION
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val pageHtml = document.outerHtml()
 
+        // ---------------------------------------------------------------
+        // 1. DETECT AND HANDLE RANKING / "melon list" PAGES
+        // ---------------------------------------------------------------
+        // A ranking page contains multiple <a class="btn btn-primary"> links
+        // directly inside the post content, each pointing to a real video.
+        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
+
+        if (rankingLinks.isNotEmpty()) {
+            val rawTitle = document.selectFirst("h1.post-title")?.text()?.trim()
+                ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
+                ?: "Ranking List"
+            val title = translateToEnglish(rawTitle) ?: "Ranking List"
+
+            val poster = document.selectFirst(".post-content img[data-xkrkllgl]")?.attr("data-xkrkllgl")
+                ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+
+            val episodes = rankingLinks.mapIndexed { index, a ->
+                val link = fixUrlNull(a.attr("href")) ?: return@mapIndexed null
+                // Try to get the title from the preceding <h2>, otherwise use link text
+                val epTitle = a.parent()?.previousElementSibling()?.text()?.trim()
+                    ?: a.text().trim()
+                newEpisode(link) {
+                    this.name = translateToEnglish(epTitle) ?: epTitle
+                    this.episode = index + 1
+                }
+            }.filterNotNull()
+
+            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.plot = "Top ${episodes.size} entries"
+                addEpisodes(DubStatus.Subbed, episodes)
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 2. NORMAL SINGLE-VIDEO PAGE
+        // ---------------------------------------------------------------
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val title = translateToEnglish(rawTitle) ?: "Video"
 
-        val contentImg = document.selectFirst(".post-content img, article p img")
-        var poster = contentImg?.let {
+        var poster = document.selectFirst(".post-content img, article p img")?.let {
             it.attr("z-image-loader-url").ifBlank {
                 it.attr("x-image-loader-url").ifBlank {
                     it.attr("data-xkrkllgl").ifBlank { it.attr("src") }
