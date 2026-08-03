@@ -3,7 +3,6 @@ package com.mrds
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -23,11 +22,6 @@ class MrdsProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
-    // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
-    //   {"translate": true}
-    // Edit that file from your phone anytime — no rebuild needed.
-    // Cached for the lifetime of this provider instance (until the
-    // app fully restarts / plugin reloads).
     // ---------------------------------------------------------------
     private var cachedTranslateFlag: Boolean? = null
 
@@ -40,14 +34,14 @@ class MrdsProvider : MainAPI() {
             Regex(""""translate"\s*:\s*(true|false)""").find(json)
                 ?.groupValues?.get(1)?.toBoolean() ?: true
         } catch (e: Exception) {
-            true // fallback default if the fetch fails
+            true
         }
         cachedTranslateFlag = flag
         return flag
     }
 
     // ---------------------------------------------------------------
-    // GOOGLE TRANSLATE HELPER (Free Endpoint)
+    // GOOGLE TRANSLATE HELPER
     // ---------------------------------------------------------------
     private suspend fun translateToEnglish(text: String?): String? {
         if (!isTranslationEnabled()) return text
@@ -58,10 +52,10 @@ class MrdsProvider : MainAPI() {
             val response = app.get(url).text
 
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map { 
+            val translated = matches.map {
                 it.groupValues[1]
                     .replace("\\\"", "\"")
-                    .replace("\\n", "\n") 
+                    .replace("\\n", "\n")
             }.joinToString("")
 
             if (translated.isNotBlank()) translated else text
@@ -94,21 +88,42 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // MAIN PAGE – all categories from the website
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
-        "$mainUrl/category/trending/" to "Trending"
+        "$mainUrl/category/mrds/" to "Daily Contest",
+        "$mainUrl/category/ztds/" to "Theme Contest",
+        "$mainUrl/category/rstt/" to "Hot Search",
+        "$mainUrl/category/xazd/" to "Campus Students",
+        "$mainUrl/category/blyp/" to "Must Watch",
+        "$mainUrl/category/fctg/" to "Leaked Secrets",
+        "$mainUrl/category/mhds/" to "Internet Celebrity",
+        "$mainUrl/category/lqdp/" to "Bizarre",
+        "$mainUrl/category/jdsj/" to "AV Movies",
+        "$mainUrl/category/mxwh/" to "Celebrity Contest",
+        "$mainUrl/category/smdh/" to "Anime & Manga",
+        "$mainUrl/category/dypd/" to "Film & Anime",
+        "$mainUrl/category/mtds/" to "Cosplay",
+        "$mainUrl/category/ysds/" to "ASMR",
+        "$mainUrl/category/czds/" to "Edging Challenge",
+        "$mainUrl/category/hjds/" to "PMV Mix",
+        "$mainUrl/category/tgds/" to "Original Submissions",
+        "$mainUrl/category/omjp/" to "Western Premium",
+        "$mainUrl/category/qwcs/" to "All Network",
+        "$mainUrl/category/aijc/" to "AI Theater",
+        "$mainUrl/category/sjbq/" to "World Cup Zone"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        val homeItems = document.select("article:has(.post-card) a").mapNotNull { element ->
+        // Skip ad-articles (class "ad-item") to avoid polluting the list
+        val homeItems = document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
-        
+
         return newHomePageResponse(request.name, homeItems)
     }
 
@@ -123,12 +138,12 @@ class MrdsProvider : MainAPI() {
         val cardHtml = this.outerHtml()
 
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
-        val fallbackImg = this.selectFirst("img")?.let { 
-            it.attr("z-image-loader-url").ifBlank { 
-                it.attr("x-image-loader-url").ifBlank { 
-                    it.attr("data-xkrkllgl").ifBlank { it.attr("src") } 
-                } 
-            } 
+        val fallbackImg = this.selectFirst("img")?.let {
+            it.attr("z-image-loader-url").ifBlank {
+                it.attr("x-image-loader-url").ifBlank {
+                    it.attr("data-xkrkllgl").ifBlank { it.attr("src") }
+                }
+            }
         }
         val rawPosterUrl = scriptImgMatch ?: fallbackImg
 
@@ -143,13 +158,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
-    // Confirmed via devtools: search pagination is path-based, NOT
-    // ?s= + /page/N/ like the blog listing. Real pattern is:
-    //   /search/<term>/       (page 1)
-    //   /search/<term>/2/     (page 2)
-    //   /search/<term>/3/     (page 3)
-    // Loop pages 1..8, merge results, stop early on an empty page.
+    // SEARCH (path-based pagination: /search/<term>/ / /page/N/)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -161,7 +170,7 @@ class MrdsProvider : MainAPI() {
             else
                 "$mainUrl/search/$encodedQuery/$page/"
             val document = app.get(url).document
-            return document.select("article:has(.post-card) a").mapNotNull { element ->
+            return document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
                 element.toSearchResultAsync()
             }
         }
@@ -176,7 +185,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page - Inside Thumbnail Fix + Translated Title & Plot)
+    // LOAD (Detail Page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -186,14 +195,14 @@ class MrdsProvider : MainAPI() {
         val pageHtml = document.outerHtml()
 
         val contentImg = document.selectFirst(".post-content img, article p img")
-        var poster = contentImg?.let { 
-            it.attr("z-image-loader-url").ifBlank { 
-                it.attr("x-image-loader-url").ifBlank { 
-                    it.attr("data-xkrkllgl").ifBlank { it.attr("src") } 
-                } 
-            } 
+        var poster = contentImg?.let {
+            it.attr("z-image-loader-url").ifBlank {
+                it.attr("x-image-loader-url").ifBlank {
+                    it.attr("data-xkrkllgl").ifBlank { it.attr("src") }
+                }
+            }
         }
-        
+
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
