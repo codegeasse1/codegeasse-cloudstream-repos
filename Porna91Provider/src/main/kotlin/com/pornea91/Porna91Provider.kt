@@ -24,7 +24,7 @@ class Porna91Provider : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.5"
     )
 
-    // Ensure session cookies are set
+    // Ensure session cookies are set before any other request
     private var sessionInitialized = false
     private suspend fun initSession() {
         if (!sessionInitialized) {
@@ -63,11 +63,11 @@ class Porna91Provider : MainAPI() {
         val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
         val document = app.get(docUrl, headers = headers).document
         val items = document.select(".video-items .video-item, ul.video-items > li.video-item")
-            .mapNotNull { it.toSearchResult() }   // no suspend, OK
+            .mapNotNull { it.toSearchResult() }   // non‑suspend, OK
         return newHomePageResponse(request.name, items)
     }
 
-    // Item parsing – raw URL only
+    // Item parsing – NO suspend keyword
     private fun Element.toSearchResult(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail?video_key=], a[href*=/avdetail?video_key=]") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
@@ -91,7 +91,7 @@ class Porna91Provider : MainAPI() {
                          else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
             val document = app.get(docUrl, headers = headers).document
             val items = document.select(".video-items .video-item")
-                .mapNotNull { it.toSearchResult() }
+                .mapNotNull { it.toSearchResult() }   // non‑suspend
             if (items.isEmpty()) break
             results.addAll(items)
         }
@@ -108,10 +108,12 @@ class Porna91Provider : MainAPI() {
             posterUrl = document.selectFirst(".poster img, .video-cover img")?.attr("data-src")
                 ?: document.selectFirst(".poster img, .video-cover img")?.attr("src")
         }
-        val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
+        val tags = document.select("a[href*=/search?keyword=]")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = fixUrlNull(posterUrl)
-            this.posterHeaders = mapOf("Referer" to "$mainUrl/")   // Referer for detail image
+            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
             this.plot = title
             this.tags = tags
         }
