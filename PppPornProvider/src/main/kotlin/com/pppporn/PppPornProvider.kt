@@ -1,121 +1,157 @@
-package com.pppporn
+package com.asiangirlporn
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
-class PppPornProvider : MainAPI() {
+class AsianGirlPornProvider : MainAPI() {
     override var mainUrl = "https://asiangirl.porn"
-    override var name = "ppp.porn"
+    override var name = "AsianGirlPorn"
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // MAIN PAGE TABS – exactly the sections you asked for
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Home",
-        "$mainUrl/latest-updates/" to "Latest Updates",
-        "$mainUrl/top-rated/" to "Top Rated",
-        "$mainUrl/most-popular/" to "Most Popular"
+        "$mainUrl/new/" to "Latest",
+        "$mainUrl/categories/china-av/" to "China Producer",
+        "$mainUrl/categories/japan-producer/" to "Japan Producer",
+        "$mainUrl/hot/" to "Weekly Hot",
+        "$mainUrl/" to "Being Watched",          // special AJAX‑pagination
+        "$mainUrl/categories/" to "Categories"   // list of all categories
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "${request.data}${if(request.data.endsWith("/")) "" else "/"}?page=$page"
-        val document = app.get(url).document
+        val url = request.data
 
-        val elements = document.select("div.item, div.video-item, div.post, div.model, li.item")
-
-        val homeItems = elements.mapNotNull { element ->
-            element.toSearchResult()
+        // ----- Special: Being Watched (uses AJAX for page > 1) -----
+        if (url == "$mainUrl/" && request.name == "Being Watched") {
+            return getBeingWatchedPage(page)
         }
 
-        return newHomePageResponse(request.name, homeItems)
+        // ----- Special: Categories list -----
+        if (url == "$mainUrl/categories/" && request.name == "Categories") {
+            return getCategoriesPage()
+        }
+
+        // ----- Normal listing with ?page=N -----
+        val docUrl = if (page == 1) url else "${url}?page=$page"
+        val doc = app.get(docUrl).document
+        val items = doc.select("div.item.card-video").mapNotNull { it.toSearchResult() }
+        return newHomePageResponse(request.name, items)
     }
 
     // ---------------------------------------------------------------
-    // ITEM PARSING (single result – used by main page and search)
+    // BEING WATCHED – homepage section + AJAX load‑more
+    // ---------------------------------------------------------------
+    private suspend fun getBeingWatchedPage(page: Int): HomePageResponse {
+        val doc = if (page == 1) {
+            // first page: parse the homepage
+            app.get("$mainUrl/").document
+        } else {
+            // subsequent pages: use the exact AJAX URL from the "Load more" button
+            val from = (page - 1) * 18   // the site loads ~18 items per chunk
+            val ajaxUrl = "$mainUrl/?mode=async&function=get_block" +
+                "&block_id=list_videos_being_watched_videos" +
+                "&sort_by=last_time_view_date" +
+                "&from_videos=$from&from_albums=$from"
+            app.get(ajaxUrl).document
+        }
+        val items = doc.select("div.item.card-video").mapNotNull { it.toSearchResult() }
+        return newHomePageResponse("Being Watched", items)
+    }
+
+    // ---------------------------------------------------------------
+    // CATEGORIES PAGE – parse the /categories/ grid
+    // ---------------------------------------------------------------
+    private suspend fun getCategoriesPage(): HomePageResponse {
+        val doc = app.get("$mainUrl/categories/").document
+        val categories = doc.select("a[href*=/categories/]").mapNotNull { a ->
+            val href = fixUrlNull(a.attr("href")) ?: return@mapNotNull null
+            // Skip the "Categories" link that just leads back to the same page
+            if (href == "$mainUrl/categories/") return@mapNotNull null
+
+            val img = a.selectFirst("img")
+            val name = img?.attr("alt")?.ifBlank { a.text() }?.trim() ?: return@mapNotNull null
+            val poster = fixUrlNull(img?.attr("src") ?: img?.attr("data-src"))
+
+            newMovieSearchResponse(name, href, TvType.NSFW) {
+                this.posterUrl = poster
+            }
+        }.distinctBy { it.url }
+        return newHomePageResponse("Categories", categories)
+    }
+
+    // ---------------------------------------------------------------
+    // UNIVERSAL VIDEO‑CARD PARSER (works for every section)
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
-        val aTag = this.selectFirst("a[href*=/videos/], a[href*=/video/]") ?: this.selectFirst("a") ?: return null
-        val href = fixUrlNull(aTag.attr("href")) ?: return null
+        val link = this.selectFirst("a[href*=/v/]") ?: return null
+        val href = fixUrlNull(link.attr("href")) ?: return null
 
         val img = this.selectFirst("img")
-        val title = img?.attr("alt")?.ifBlank { img.attr("title") }?.ifBlank { this.text() }?.trim() ?: "Video"
+        val rawTitle = img?.attr("alt")?.trim()?.ifBlank {
+            this.selectFirst("h4.card-video__title a")?.text()?.trim()
+        } ?: return null
 
-        val rawPoster = img?.attr("data-original")?.ifBlank { img.attr("data-src") }?.ifBlank { img.attr("src") }
+        val rawPoster = img?.attr("data-src")?.ifBlank { img.attr("src") }
         val posterUrl = fixUrlNull(rawPoster)
 
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
+        return newMovieSearchResponse(rawTitle, href, TvType.NSFW) {
             this.posterUrl = posterUrl
         }
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
-    // CloudStream's search() has no scroll/pagination hook, so we
-    // fetch several pages up front from the theme's own AJAX block
-    // loader (confirmed via devtools: /search/<term>/?mode=async&
-    // function=get_block&block_id=list_videos_videos_list_search_result
-    // &from_videos=N&from_albums=N) and merge them into one list.
+    // SEARCH (same pattern: page 1 = HTML, page 2+ = AJAX)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val maxPages = 3
-
-        suspend fun fetchPage(page: Int): List<SearchResponse> {
+        val results = mutableListOf<SearchResponse>()
+        for (page in 1..maxPages) {
             val doc = if (page == 1) {
                 app.get("$mainUrl/search/$encodedQuery/").document
             } else {
-                val ajaxUrl = "$mainUrl/search/$encodedQuery/?mode=async&function=get_block" +
+                val from = (page - 1) * 20
+                val ajaxUrl = "$mainUrl/search/$encodedQuery/" +
+                    "?mode=async&function=get_block" +
                     "&block_id=list_videos_videos_list_search_result" +
-                    "&q=$encodedQuery&category_ids=&sort_by=" +
-                    "&from_videos=$page&from_albums=$page" +
+                    "&q=$encodedQuery" +
+                    "&from_videos=$from&from_albums=$from" +
                     "&_=${System.currentTimeMillis()}"
                 app.get(ajaxUrl).document
             }
-            return doc.select("div.item, div.video-item, div.post, div.model, li.item")
-                .mapNotNull { it.toSearchResult() }
-        }
-
-        val results = mutableListOf<SearchResponse>()
-        for (page in 1..maxPages) {
-            val pageResults = fetchPage(page)
-            if (pageResults.isEmpty()) break
-            results.addAll(pageResults)
+            val items = doc.select("div.item.card-video").mapNotNull { it.toSearchResult() }
+            if (items.isEmpty()) break
+            results.addAll(items)
         }
         return results
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page with Plyr.io Extraction)
+    // LOAD (detail page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
-        val pageHtml = document.html()
+        val doc = app.get(url).document
+        val pageHtml = doc.html()
 
-        val title = document.selectFirst("h1")?.text()
-            ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
+        val title = doc.selectFirst("h1")?.text()
+            ?: doc.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: "Video"
 
-        var posterUrl = document.selectFirst("meta[property=og:image]")?.attr("content")
-
-        if (posterUrl.isNullOrBlank()) {
-            val plyrStyle = document.selectFirst(".plyr__poster")?.attr("style")
-            if (plyrStyle != null) {
-                posterUrl = Regex("""url\(['"]?([^'"()]+)['"]?\)""").find(plyrStyle)?.groupValues?.get(1)
-            }
-        }
-
+        var posterUrl = doc.selectFirst("meta[property=og:image]")?.attr("content")
         if (posterUrl.isNullOrBlank()) {
             posterUrl = Regex("""poster="([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
-                ?: Regex("""preview_url:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
 
-        val tags = document.select("a[href*=/tags/], a[href*=/categories/]").map { it.text().trim() }.filter { it.isNotBlank() }
+        val tags = doc.select("a[href*=/tags/], a[href*=/categories/]")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = fixUrlNull(posterUrl)
@@ -125,7 +161,7 @@ class PppPornProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (KVS Scraper)
+    // LOAD LINKS (generic KVS‑style scraper)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -141,10 +177,8 @@ class PppPornProvider : MainAPI() {
 
         cdnRegex.findAll(pageHtml).forEach { match ->
             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-
             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png") && !cleanUrl.endsWith(".webp")) {
                 val isM3u8 = cleanUrl.contains(".m3u8")
-
                 callback(
                     newExtractorLink(
                         source = name,
@@ -161,15 +195,13 @@ class PppPornProvider : MainAPI() {
         }
 
         if (!found) {
-            val document = response.document
-            document.select("iframe").forEach { iframe ->
+            response.document.select("iframe").forEach { iframe ->
                 val src = iframe.attr("src")
                 if (src.isNotBlank() && src.startsWith("http")) {
                     try {
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
                         cdnRegex.findAll(iframeHtml).forEach { match ->
                             val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-
                             if (cleanUrl.isNotBlank() && !cleanUrl.endsWith(".jpg") && !cleanUrl.endsWith(".png")) {
                                 callback(
                                     newExtractorLink(
