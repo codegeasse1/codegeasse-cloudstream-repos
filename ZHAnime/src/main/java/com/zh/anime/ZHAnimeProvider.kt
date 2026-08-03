@@ -17,7 +17,6 @@ class ZHAnimeProvider : MainAPI() {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    // 1. Define homepage tabs for CloudStream
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
         "$mainUrl/type/Anime" to "Anime",
@@ -32,13 +31,11 @@ class ZHAnimeProvider : MainAPI() {
         val type: String? = null
     )
 
-    // 2. Fetch and parse main page content
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page > 1) "${request.data}?page=$page" else request.data
         val document = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
         val homeItems = mutableListOf<HomePageList>()
 
-        // Parse Spotlight Carousel on Home Page (Page 1)
         if (request.data == "$mainUrl/" && page == 1) {
             val spotlightItems = document.select("#hero-slider .hero-slide").mapNotNull { slide ->
                 val title = slide.selectFirst(".title-en")?.text()?.trim() ?: return@mapNotNull null
@@ -54,7 +51,6 @@ class ZHAnimeProvider : MainAPI() {
             }
         }
 
-        // Parse Grid Anime Cards
         val animeCards = document.select(".anime-card").mapNotNull { card ->
             card.toSearchResult()
         }
@@ -103,7 +99,6 @@ class ZHAnimeProvider : MainAPI() {
         }
     }
 
-    // 3. Search
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/search?q=$query"
         val document = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
@@ -112,7 +107,6 @@ class ZHAnimeProvider : MainAPI() {
         }
     }
 
-    // 4. Load Anime Details and Episodes
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
 
@@ -155,7 +149,6 @@ class ZHAnimeProvider : MainAPI() {
         }
     }
 
-    // 5. Load Video Links (With Multi-Server Support)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -166,7 +159,6 @@ class ZHAnimeProvider : MainAPI() {
         val headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")
         val document = app.get(data, headers = headers).document
 
-        // Select BOTH the iframe and the server buttons to ensure we get all available servers!
         val serverLinks = document.select(".server-btn[data-embed], iframe[src]").map {
             it.attr("data-embed").ifBlank { it.attr("src") }
         }.filter { it.isNotBlank() }.distinct()
@@ -175,46 +167,56 @@ class ZHAnimeProvider : MainAPI() {
             val fixedUrl = fixUrl(embedUrl)
 
             when {
-                // Extract native players and artplayer specifically
                 fixedUrl.contains("artplayer.php") || fixedUrl.contains("player.php") -> {
                     runCatching {
                         val playerHtml = app.get(fixedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT)).text
                         
-                        // Regex catches file: "..." or url: '...' or src: "..."
                         val m3u8Regex = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|index\.txt|mp4)[^"']*)["']""")
                         val match = m3u8Regex.find(playerHtml)
                         
                         match?.groupValues?.get(1)?.let { streamUrlRaw ->
                             val streamUrlClean = streamUrlRaw.replace("\\/", "/")
                             
-                            // Proper handling for relative CDNs specific to zhanime
-                            val finalStreamUrl = when {
-                                streamUrlClean.startsWith("//") -> "https:$streamUrlClean"
-                                streamUrlClean.startsWith("/") -> "https://cdn.zhanime.online$streamUrlClean"
-                                else -> streamUrlClean
+                            val finalStreamUrl = if (streamUrlClean.startsWith("//")) {
+                                "https:$streamUrlClean"
+                            } else if (streamUrlClean.startsWith("/")) {
+                                "https://cdn.zhanime.online$streamUrlClean"
+                            } else {
+                                streamUrlClean
                             }
                             
                             val isM3u8 = finalStreamUrl.contains("m3u8") || finalStreamUrl.contains("index.txt")
                             val serverName = if (fixedUrl.contains("artplayer")) "Artplayer" else "Native Player"
 
-                            callback.invoke(
-                                newExtractorLink(
+                            if (isM3u8) {
+                                // FIX: Use M3u8Helper to parse the .txt/.m3u8 files properly without crashing ExoPlayer
+                                M3u8Helper.generateM3u8(
                                     source = name,
-                                    name = serverName,
-                                    url = finalStreamUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = fixedUrl
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to fixedUrl)
+                                    streamUrl = finalStreamUrl,
+                                    referer = fixedUrl,
+                                    headers = mapOf("Origin" to mainUrl, "Referer" to fixedUrl),
+                                    name = serverName
+                                ).forEach { link ->
+                                    callback.invoke(link)
                                 }
-                            )
+                            } else {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = serverName,
+                                        url = finalStreamUrl,
+                                        type = ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = fixedUrl
+                                        this.headers = mapOf("Origin" to mainUrl, "Referer" to fixedUrl)
+                                    }
+                                )
+                            }
                             found = true
                         }
                     }
                 }
                 
-                // Fallback to loadExtractor for Megaplay, Vidplay, Mp4Upload, etc.
                 else -> {
                     runCatching {
                         if (loadExtractor(fixedUrl, data, subtitleCallback, callback)) {
