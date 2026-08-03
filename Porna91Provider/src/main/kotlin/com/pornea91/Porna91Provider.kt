@@ -18,18 +18,17 @@ class Porna91Provider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
-    // Standard browser headers
+    // Browser headers
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.5"
     )
 
-    // Guarantee a session – called once when the provider is loaded
+    // Session initialization
     private var sessionInitialized = false
     private suspend fun initSession() {
         if (!sessionInitialized) {
-            // Load the homepage to obtain necessary cookies
             app.get(mainUrl, headers = headers).text
             sessionInitialized = true
         }
@@ -65,10 +64,11 @@ class Porna91Provider : MainAPI() {
         val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
         val document = app.get(docUrl, headers = headers).document
         val items = document.select(".video-items .video-item, ul.video-items > li.video-item")
-            .mapNotNull { it.toSearchResult() }
+            .mapNotNull { it.toSearchResult() }   // non‑suspend, OK now
         return newHomePageResponse(request.name, items)
     }
 
+    // Item parsing – no suspend, returns poster URL directly
     private fun Element.toSearchResult(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail?video_key=], a[href*=/avdetail?video_key=]") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
@@ -78,7 +78,7 @@ class Porna91Provider : MainAPI() {
             ?: return null
         val posterUrl = fixUrlNull(img?.attr("data-src")?.ifBlank { img.attr("src") })
         return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl   // CloudStream will use cookies + referer automatically
+            this.posterUrl = posterUrl   // CloudStream handles cookies + referer
         }
     }
 
@@ -91,7 +91,8 @@ class Porna91Provider : MainAPI() {
             val docUrl = if (page == 1) "$mainUrl/comic/index/search?keyword=$encodedQuery"
                          else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
             val document = app.get(docUrl, headers = headers).document
-            val items = document.select(".video-items .video-item").mapNotNull { it.toSearchResult() }
+            val items = document.select(".video-items .video-item")
+                .mapNotNull { it.toSearchResult() }
             if (items.isEmpty()) break
             results.addAll(items)
         }
@@ -128,7 +129,7 @@ class Porna91Provider : MainAPI() {
         val mainHtml = app.get(data, headers = headers).text
 
         fun searchForStream(html: String, referer: String) {
-            // Direct M3U8 links
+            // Direct M3U8
             Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
                 val url = match.value.replace("&amp;", "&")
                 callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
@@ -138,11 +139,9 @@ class Porna91Provider : MainAPI() {
                 found = true
             }
 
-            // Various player JSON objects
-            val playerNames = listOf(
-                "player_aaaa", "player_data", "player_info", "player", "videoConfig",
-                "config", "playInfo", "playerConfig", "videoInfo"
-            )
+            // Player JSONs
+            val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
+                "config", "playInfo", "playerConfig", "videoInfo")
             for (pName in playerNames) {
                 val match = Regex("""$pName\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL).find(html)
                 if (match != null) {
@@ -170,10 +169,10 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 1. Search main page
+        // 1. Main page
         searchForStream(mainHtml, data)
 
-        // 2. Search iframes
+        // 2. Iframes
         if (!found) {
             val document = app.get(data, headers = headers).document
             val iframes = document.select("iframe")
@@ -189,7 +188,7 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 3. API fallback (try multiple endpoints)
+        // 3. API fallback
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             val apiUrls = listOf(
