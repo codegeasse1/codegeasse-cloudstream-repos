@@ -19,6 +19,11 @@ class TaiAVProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
+    // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
+    //   {"translate": true}
+    // Edit that file from your phone anytime — no rebuild needed.
+    // Cached for the lifetime of this provider instance (until the
+    // app fully restarts / plugin reloads).
     // ---------------------------------------------------------------
     private var cachedTranslateFlag: Boolean? = null
 
@@ -31,7 +36,7 @@ class TaiAVProvider : MainAPI() {
             Regex(""""translate"\s*:\s*(true|false)""").find(json)
                 ?.groupValues?.get(1)?.toBoolean() ?: true
         } catch (e: Exception) {
-            true
+            true // fallback default if the fetch fails
         }
         cachedTranslateFlag = flag
         return flag
@@ -75,29 +80,6 @@ class TaiAVProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}?page=$page"
         val document = app.get(url).document
 
-        // Handle the discover (categories) page
-        if (request.data.contains("discover")) {
-            val categories = document.select("a[href*=/cn/category/]").mapNotNull { a ->
-                val href = fixUrlNull(a.attr("href")) ?: return@mapNotNull null
-                val rawName = a.text().trim()
-                if (rawName.isBlank()) return@mapNotNull null
-                val translatedName = translateText(rawName, true) ?: rawName
-                
-                // Extract image for the categories properly
-                val img = a.selectFirst("img")
-                var poster = img?.attr("src")
-                if (poster.isNullOrBlank() || poster.contains("data:image")) {
-                    poster = img?.attr("data-src") ?: ""
-                }
-
-                newMovieSearchResponse(translatedName, href, TvType.NSFW) {
-                    this.posterUrl = fixUrlNull(poster)
-                }
-            }.distinctBy { it.url }
-            return newHomePageResponse(request.name, categories, hasNext = false)
-        }
-
-        // Original movie-card parsing for "Hot Videos" etc.
         val homeItems = document.select("div.movie-card").mapNotNull { element ->
             element.toSearchResultAsync()
         }
@@ -115,18 +97,17 @@ class TaiAVProvider : MainAPI() {
         val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".movie-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
 
-        var posterUrl = img?.attr("src") ?: ""
-        if (posterUrl.isBlank() || posterUrl.contains("data:image")) {
-            posterUrl = img?.attr("data-src") ?: ""
-        }
+        val posterUrl = fixUrlNull(img?.attr("src"))
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
-            this.posterUrl = fixUrlNull(posterUrl)
+            this.posterUrl = posterUrl
         }
     }
 
     // ---------------------------------------------------------------
     // SEARCH
+    // Confirmed via devtools: /search?q=...&page=N is a plain
+    // page-number param, so we just loop pages and merge results.
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
@@ -188,7 +169,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (API + Fallback Scraper)
+    // LOAD LINKS (TaiAV Key Injector)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -198,67 +179,62 @@ class TaiAVProvider : MainAPI() {
     ): Boolean {
         var found = false
 
-        val movieIdMatch = Regex("""/(\d+)(?:/|\.|\?|$)""").find(data)
-        val movieId = movieIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?")
+        // Extract the exact movieId from the URL
+        val movieId = data.substringAfterLast("/").substringBefore("?")
 
-        val headers = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer" to data
-        )
-
-        fun emitLink(rawUrl: String) {
-            var fixedM3u8Url = rawUrl.replace("\\/", "/")
-            if (fixedM3u8Url.startsWith("//")) fixedM3u8Url = "https:$fixedM3u8Url"
-            else if (fixedM3u8Url.startsWith("/")) fixedM3u8Url = "$mainUrl$fixedM3u8Url"
-
-            val videoOrigin = try {
-                val uri = java.net.URI(fixedM3u8Url)
-                "${uri.scheme}://${uri.host}"
-            } catch (e: Exception) { mainUrl }
-
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "$name HD",
-                    url = fixedM3u8Url,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.headers = mapOf(
-                        "User-Agent" to headers["User-Agent"]!!,
-                        "Origin" to videoOrigin,
-                        "Referer" to "$videoOrigin/"
-                    )
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            found = true
-        }
-
-        // 1. Extract directly from the HTML source of the page (Bypasses API blocks)
-        try {
-            val html = app.get(data, headers = headers).text
-            
-            // Look for m3u8 directly in the JS config blocks
-            val htmlRegex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
-            htmlRegex.findAll(html).forEach { match ->
-                emitLink(match.groupValues[1])
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // 2. Fallback to API if HTML scraper fails
-        if (!found && movieId.isNotBlank()) {
+        if (movieId.isNotBlank()) {
             try {
                 val apiUrl = "$mainUrl/api/getmovie?type=1280&id=$movieId"
-                val response = app.get(apiUrl, headers = headers.plus("X-Requested-With" to "XMLHttpRequest")).text
-                
-                if (response.trim().startsWith("{")) {
-                    val json = JSONObject(response)
-                    val m3u8UrlRaw = json.optString("m3u8", "").ifBlank { json.optString("url", "") }
-                    if (m3u8UrlRaw.isNotBlank()) {
-                        emitLink(m3u8UrlRaw)
+
+                val response = app.get(
+                    apiUrl,
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Accept" to "application/json, text/javascript, */*; q=0.01",
+                        "Referer" to data
+                    )
+                )
+
+                // 1. Grab the JSON Response and extract the URL safely
+                val json = JSONObject(response.text)
+                val m3u8UrlRaw = json.optString("m3u8", "")
+
+                if (m3u8UrlRaw.isNotBlank()) {
+
+                    // 2. Format the URL to ensure it has a valid protocol
+                    val fixedM3u8Url = when {
+                        m3u8UrlRaw.startsWith("//") -> "https:$m3u8UrlRaw"
+                        m3u8UrlRaw.startsWith("/") -> "$mainUrl$m3u8UrlRaw"
+                        else -> m3u8UrlRaw
                     }
+
+                    // 3. Dynamically grab the exact host for the Origin header (e.g., m.taiav.com)
+                    val videoOrigin = try {
+                        val uri = java.net.URI(fixedM3u8Url)
+                        "${uri.scheme}://${uri.host}"
+                    } catch (e: Exception) {
+                        mainUrl
+                    }
+
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name HD",
+                            url = fixedM3u8Url,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            // Inject strict headers directly into CloudStream's ExoPlayer
+                            // Cookies are automatically handled by CloudStream's global cookie jar
+                            this.headers = mapOf(
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                "Origin" to videoOrigin,
+                                "Referer" to "$videoOrigin/"
+                            )
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    found = true
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
