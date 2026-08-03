@@ -156,101 +156,80 @@ class ZHAnimeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")
-        val document = app.get(data, headers = headers).document
+        val pageHeaders = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")
+        val document = app.get(data, headers = pageHeaders).document
 
-        val serverLinks = document.select(".server-btn[data-embed], iframe[src]").map {
-            it.attr("data-embed").ifBlank { it.attr("src") }
-        }.filter { it.isNotBlank() }.distinct()
+        val serverLinks = document.select(".server-btn[data-embed], iframe[src], [data-src]").mapNotNull { el ->
+            val raw = el.attr("data-embed").ifBlank { el.attr("src") }.ifBlank { el.attr("data-src") }
+            if (raw.isNotBlank()) fixUrl(raw) else null
+        }.distinct()
 
         serverLinks.forEach { embedUrl ->
-            val fixedUrl = fixUrl(embedUrl)
-
             when {
-                // NEW: Custom Megaplay / Vidplay API Interceptor
-                fixedUrl.contains("megaplay.buzz") || fixedUrl.contains("vidplay") -> {
+                // Megaplay / Vidplay Handling
+                embedUrl.contains("megaplay.buzz") || embedUrl.contains("vidplay") -> {
                     runCatching {
-                        val embedHtml = app.get(fixedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT)).text
+                        val embedHtml = app.get(embedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT)).text
                         
-                        // Look for an ID in the URL (?id=...) or buried in the HTML script
-                        val idMatch = Regex("""[?&]id=([^&]+)""").find(fixedUrl)?.groupValues?.get(1)
+                        val idMatch = Regex("""[?&]id=([^&"'\s]+)""").find(embedUrl)?.groupValues?.get(1)
                             ?: Regex("""id\s*[:=]\s*["']?([^"'\s&]+)["']?""").find(embedHtml)?.groupValues?.get(1)
 
+                        var streamUrl: String? = null
+
                         if (idMatch != null) {
-                            // Call the hidden API you found!
                             val apiUrl = "https://megaplay.buzz/stream/getSourcesNew?id=$idMatch"
-                            val apiResponse = app.get(apiUrl, headers = mapOf(
-                                "Referer" to fixedUrl,
-                                "User-Agent" to USER_AGENT,
-                                "X-Requested-With" to "XMLHttpRequest"
-                            )).text
+                            runCatching {
+                                val apiText = app.get(apiUrl, headers = mapOf(
+                                    "Referer" to embedUrl,
+                                    "User-Agent" to USER_AGENT,
+                                    "X-Requested-With" to "XMLHttpRequest"
+                                )).text
 
-                            val streamRegex = Regex("""(?:file|url|src)["']?\s*:\s*["']([^"']+\.(?:m3u8|txt|mp4)[^"']*)["']""")
-                            val match = streamRegex.find(apiResponse) ?: streamRegex.find(embedHtml)
+                                val streamRegex = Regex("""(?:file|url|src)["']?\s*:\s*["']([^"']+)["']""")
+                                streamUrl = streamRegex.find(apiText)?.groupValues?.get(1)
+                            }
+                        }
 
-                            match?.groupValues?.get(1)?.let { streamRaw ->
-                                val cleanStream = streamRaw.replace("\\/", "/")
-                                val finalStream = if (cleanStream.startsWith("/")) "https://megaplay.buzz$cleanStream" else cleanStream
-                                
-                                // Use M3u8Helper so ExoPlayer can decode those disguised .jpg segments
-                                if (finalStream.contains("m3u8") || finalStream.contains("txt")) {
+                        if (streamUrl.isNullOrBlank()) {
+                            val streamRegex = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|txt|mp4)[^"']*)["']""")
+                            streamUrl = streamRegex.find(embedHtml)?.groupValues?.get(1)
+                        }
+
+                        streamUrl?.let { rawStream ->
+                            val cleanStream = rawStream.replace("\\/", "/")
+                            val finalStream = when {
+                                cleanStream.startsWith("//") -> "https:$cleanStream"
+                                cleanStream.startsWith("/") -> "https://megaplay.buzz$cleanStream"
+                                else -> cleanStream
+                            }
+
+                            val isM3u8 = finalStream.contains("m3u8") || finalStream.contains("txt")
+
+                            val generatedLinks = if (isM3u8) {
+                                runCatching {
                                     M3u8Helper.generateM3u8(
                                         source = name,
                                         streamUrl = finalStream,
-                                        referer = fixedUrl,
-                                        headers = mapOf("Origin" to mainUrl, "Referer" to fixedUrl),
+                                        referer = embedUrl,
+                                        headers = mapOf("Referer" to embedUrl, "User-Agent" to USER_AGENT),
                                         name = "Megaplay HD"
-                                    ).forEach { link ->
-                                        callback.invoke(link)
-                                        found = true
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Fallback: If custom API scrape fails, try the generic Cloudstream extractor
-                        if (!found && loadExtractor(fixedUrl, data, subtitleCallback, callback)) {
-                            found = true
-                        }
-                    }
-                }
+                                    )
+                                }.getOrDefault(emptyList())
+                            } else emptyList()
 
-                // Native Artplayer
-                fixedUrl.contains("artplayer.php") || fixedUrl.contains("player.php") -> {
-                    runCatching {
-                        val playerHtml = app.get(fixedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT)).text
-                        val m3u8Regex = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|index\.txt|mp4)[^"']*)["']""")
-                        val match = m3u8Regex.find(playerHtml)
-                        
-                        match?.groupValues?.get(1)?.let { streamUrlRaw ->
-                            val streamUrlClean = streamUrlRaw.replace("\\/", "/")
-                            val finalStreamUrl = when {
-                                streamUrlClean.startsWith("//") -> "https:$streamUrlClean"
-                                streamUrlClean.startsWith("/") -> "https://cdn.zhanime.online$streamUrlClean"
-                                else -> streamUrlClean
-                            }
-                            
-                            val isM3u8 = finalStreamUrl.contains("m3u8") || finalStreamUrl.contains("index.txt")
-                            val serverName = if (fixedUrl.contains("artplayer")) "Artplayer" else "Native Player"
-
-                            if (isM3u8) {
-                                M3u8Helper.generateM3u8(
-                                    source = name,
-                                    streamUrl = finalStreamUrl,
-                                    referer = fixedUrl,
-                                    headers = mapOf("Origin" to mainUrl, "Referer" to fixedUrl),
-                                    name = serverName
-                                ).forEach { link -> callback.invoke(link) }
+                            if (generatedLinks.isNotEmpty()) {
+                                generatedLinks.forEach { link -> callback.invoke(link) }
                             } else {
+                                // Fallback: Pass link directly to CloudStream if M3u8Helper fails
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
-                                        name = serverName,
-                                        url = finalStreamUrl,
-                                        type = ExtractorLinkType.VIDEO
+                                        name = "Megaplay HD",
+                                        url = finalStream,
+                                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
-                                        this.referer = fixedUrl
-                                        this.headers = mapOf("Origin" to mainUrl, "Referer" to fixedUrl)
+                                        this.referer = embedUrl
+                                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to embedUrl)
                                     }
                                 )
                             }
@@ -258,11 +237,62 @@ class ZHAnimeProvider : MainAPI() {
                         }
                     }
                 }
-                
-                // Any other servers (OkRu, Filemoon, etc.)
+
+                // Native Artplayer / Local Player Handling
+                embedUrl.contains("artplayer.php") || embedUrl.contains("player.php") -> {
+                    runCatching {
+                        val playerHtml = app.get(embedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT)).text
+                        val m3u8Regex = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|index\.txt|mp4)[^"']*)["']""")
+                        val match = m3u8Regex.find(playerHtml)
+
+                        match?.groupValues?.get(1)?.let { streamUrlRaw ->
+                            val streamUrlClean = streamUrlRaw.replace("\\/", "/")
+                            val finalStreamUrl = when {
+                                streamUrlClean.startsWith("//") -> "https:$streamUrlClean"
+                                streamUrlClean.startsWith("/") -> "https://cdn.zhanime.online$streamUrlClean"
+                                else -> streamUrlClean
+                            }
+
+                            val isM3u8 = finalStreamUrl.contains("m3u8") || finalStreamUrl.contains("index.txt")
+                            val serverName = if (embedUrl.contains("artplayer")) "Artplayer" else "Native Player"
+
+                            val generatedLinks = if (isM3u8) {
+                                runCatching {
+                                    M3u8Helper.generateM3u8(
+                                        source = name,
+                                        streamUrl = finalStreamUrl,
+                                        referer = embedUrl,
+                                        headers = mapOf("Referer" to embedUrl, "User-Agent" to USER_AGENT),
+                                        name = serverName
+                                    )
+                                }.getOrDefault(emptyList())
+                            } else emptyList()
+
+                            if (generatedLinks.isNotEmpty()) {
+                                generatedLinks.forEach { link -> callback.invoke(link) }
+                            } else {
+                                // Fallback: Pass direct ExtractorLink
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = serverName,
+                                        url = finalStreamUrl,
+                                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = embedUrl
+                                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to embedUrl)
+                                    }
+                                )
+                            }
+                            found = true
+                        }
+                    }
+                }
+
+                // Default fallback for external servers (OkRu, Streamtape, Filemoon, etc.)
                 else -> {
                     runCatching {
-                        if (loadExtractor(fixedUrl, data, subtitleCallback, callback)) {
+                        if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
                             found = true
                         }
                     }
