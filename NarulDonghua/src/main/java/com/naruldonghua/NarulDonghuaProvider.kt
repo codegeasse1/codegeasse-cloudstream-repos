@@ -269,7 +269,7 @@ class NarulDonghuaProvider : MainAPI() {
                         var mirrorFound = handleEmbed(fixedSrc)
 
                         if (!mirrorFound) {
-                            val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data, "User-Agent" to Mozilla/5.0)).text
+                            val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data, "User-Agent" to "Mozilla/5.0")).text
                             val m3u8Match = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|txt|mp4)[^"']*)["']""").find(iframeText)
                             
                             m3u8Match?.groupValues?.get(1)?.let { streamUrl ->
