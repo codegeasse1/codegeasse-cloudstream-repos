@@ -200,11 +200,11 @@ class C51CGProvider : MainAPI() {
         // ---------------------------------------------------------------
         // 1. DETECT AND HANDLE RANKING / "melon list" PAGES
         // ---------------------------------------------------------------
-        // A ranking page contains multiple <a class="btn btn-primary"> links
-        // directly inside the post content, each pointing to a real video.
-        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
+        // Real ranking pages contain <span id="menu_index_1">, etc.
+        // Single articles do NOT have those markers.
+        val isRankingPage = document.select(".post-content span[id^=menu_index_]").isNotEmpty()
 
-        if (rankingLinks.isNotEmpty()) {
+        if (isRankingPage) {
             val rawTitle = document.selectFirst("h1.post-title")?.text()?.trim()
                 ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
                 ?: "Ranking List"
@@ -213,6 +213,8 @@ class C51CGProvider : MainAPI() {
             val poster = document.selectFirst(".post-content img[data-xkrkllgl]")?.attr("data-xkrkllgl")
                 ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
+            // Extract all video links (works for 2, 10, any number)
+            val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
             val episodes = mutableListOf<Episode>()
             for ((index, a) in rankingLinks.withIndex()) {
                 val link = fixUrlNull(a.attr("href")) ?: continue
