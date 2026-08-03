@@ -90,7 +90,7 @@ class DongStreamProvider : MainAPI() {
             })
         }
 
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
+        return newAnimeSearchResponse(title, finalUrl, TvType.Anime) {
             this.posterUrl = fixUrlNull(poster)
             this.plot = plot
             addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.url })
