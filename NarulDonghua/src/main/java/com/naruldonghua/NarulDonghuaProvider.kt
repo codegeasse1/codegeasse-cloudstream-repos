@@ -46,6 +46,7 @@ class NarulDonghuaProvider : MainAPI() {
 
         val imgEl = this.selectFirst("img")
         val poster = imgEl?.attr("data-src")?.ifBlank { imgEl.attr("src") }
+            ?: imgEl?.attr("srcset")?.substringBefore(" ")
             ?: this.selectFirst(".backdrop")?.attr("style")?.let { style ->
                 Regex("url\\(['\"]?(.*?)['\"]?\\)").find(style)?.groupValues?.get(1)
             }
@@ -76,9 +77,7 @@ class NarulDonghuaProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        val epElements = document.select(
-            ".eplister ul li, .episodelist ul li, .lister ul li, .naveps a, div.ep_list ul li"
-        )
+        val epElements = document.select(".eplister ul li, .episodelist ul li, .lister ul li, .naveps a, div.ep_list ul li")
         epElements.forEach { el ->
             val a = el.selectFirst("a") ?: if (el.tagName() == "a") el else return@forEach
             val epHref = fixUrl(a.attr("href"))
@@ -123,30 +122,34 @@ class NarulDonghuaProvider : MainAPI() {
         suspend fun handleEmbed(src: String): Boolean {
             var linkFound = false
 
-            // ------------------------------------------------------------
-            // narulplex.p2pstream.vip custom player – handles both
-            // /e/<id> iframes and /api/v1/player?t=... direct links
-            // ------------------------------------------------------------
-            if (src.contains("narulplex.p2pstream.vip")) {
-                // Direct player API link (e.g. /api/v1/player?t=...)
-                if (src.contains("api/v1/player")) {
-                    try {
-                        val apiRes = app.get(
-                            src,
-                            headers = mapOf("Referer" to "https://naruldonghua.com/", "User-Agent" to "Mozilla/5.0")
+            // 1. Narulplex P2P Player API
+            if (src.contains("p2pstream.vip") || src.contains("narulplex")) {
+                val id = Regex("""[?&]id=([\w-]+)""").find(src)?.groupValues?.get(1)
+                    ?: Regex("""/e/([\w-]+)""").find(src)?.groupValues?.get(1)
+                    ?: src.substringAfterLast("#").ifBlank { null }
+                    ?: src.trimEnd('/').substringAfterLast("/")
+
+                if (!id.isNullOrBlank()) {
+                    runCatching {
+                        val videoApiUrl = "https://narulplex.p2pstream.vip/api/v1/video?id=$id&w=1280&h=800&r=naruldonghua.com"
+                        val res = app.get(
+                            videoApiUrl,
+                            headers = mapOf("Referer" to src, "User-Agent" to "Mozilla/5.0")
                         ).text
 
-                        val streamMatch = Regex("""(?:url|file|src|m3u8)\s*:\s*"(https?://[^"]+?\.(?:m3u8|txt)[^"]*)"""")
-                            .find(apiRes)?.groupValues?.get(1)
-                            ?: Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiRes)?.value
+                        val streamMatch = Regex(""""(?:url|file|src|m3u8)"\s*:\s*"([^"]+\.(?:m3u8|txt)[^"]*)"""")
+                            .find(res)?.groupValues?.get(1)
+                            ?: Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(res)?.value
 
                         if (!streamMatch.isNullOrBlank()) {
                             val cleanUrl = streamMatch.replace("\\/", "/")
+                            val safeUrl = if (cleanUrl.contains("txt") && !cleanUrl.contains(".m3u8")) "$cleanUrl#.m3u8" else cleanUrl
+                            
                             callback(
                                 newExtractorLink(
                                     source = name,
                                     name = "Narul P2P",
-                                    url = cleanUrl,
+                                    url = safeUrl,
                                     type = ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = src
@@ -156,73 +159,33 @@ class NarulDonghuaProvider : MainAPI() {
                             )
                             linkFound = true
                         }
-                    } catch (_: Exception) {}
-                } else {
-                    // Original /e/<id> or query param extraction
-                    val id = Regex("""[?&]id=([\w-]+)""").find(src)?.groupValues?.get(1)
-                        ?: Regex("""/e/([\w-]+)""").find(src)?.groupValues?.get(1)
-                        ?: src.substringAfterLast("#").ifBlank { null }
-                        ?: src.trimEnd('/').substringAfterLast("/")
-
-                    if (id.isNotBlank()) {
-                        try {
-                            val videoApiUrl = "https://narulplex.p2pstream.vip/api/v1/video?id=$id&w=1280&h=800&r=naruldonghua.com"
-                            val res = app.get(
-                                videoApiUrl,
-                                headers = mapOf("Referer" to src, "User-Agent" to "Mozilla/5.0")
-                            ).text
-
-                            val streamMatch = Regex(""""(?:url|file|src|m3u8)"\s*:\s*"([^"]+\.(?:m3u8|txt)[^"]*)"""")
-                                .find(res)?.groupValues?.get(1)
-                                ?: Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(res)?.value
-
-                            if (!streamMatch.isNullOrBlank()) {
-                                val cleanUrl = streamMatch.replace("\\/", "/")
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "Narul P2P",
-                                        url = cleanUrl,
-                                        type = ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = src
-                                        this.quality = Qualities.Unknown.value
-                                        this.headers = mapOf("Referer" to src, "Origin" to "https://naruldonghua.com")
-                                    }
-                                )
-                                linkFound = true
-                            }
-                        } catch (_: Exception) {}
                     }
                 }
             }
 
-            // ------------------------------------------------------------
-            // Dailymotion
-            // ------------------------------------------------------------
+            // 2. Dailymotion Handler
             if (!linkFound && src.contains("dailymotion")) {
                 val dmId = Regex("""(?:video/|video=|embed/|/e/)([a-zA-Z0-9]+)""").find(src)?.groupValues?.get(1)
                 if (dmId != null) {
-                    try {
+                    runCatching {
                         if (loadExtractor("https://www.dailymotion.com/video/$dmId", data, subtitleCallback, callback)) {
                             linkFound = true
                         }
-                    } catch (_: Exception) {}
+                    }
                 }
             }
 
-            // ------------------------------------------------------------
-            // Rumble HLS
-            // ------------------------------------------------------------
+            // 3. Rumble Cloud & HLS Vod Handling
             if (!linkFound && (src.contains("rumble.com") || src.contains("rumble.cloud"))) {
-                try {
-                    if (src.contains(".m3u8") || src.contains(".ts")) {
+                runCatching {
+                    if (src.contains(".m3u8") || src.contains(".tar") || src.contains(".ts")) {
+                        val safeUrl = if (src.contains("tar") && !src.contains("#.m3u8")) "$src#.m3u8" else src
                         callback(
                             newExtractorLink(
                                 source = name,
-                                name = "Rumble HLS",
-                                url = src,
-                                type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                name = "Rumble Stream",
+                                url = safeUrl,
+                                type = ExtractorLinkType.M3U8
                             ) {
                                 this.referer = "https://rumble.com/"
                                 this.quality = Qualities.Unknown.value
@@ -247,44 +210,42 @@ class NarulDonghuaProvider : MainAPI() {
                             linkFound = true
                         }
                     }
-                } catch (_: Exception) {}
+                }
             }
 
-            // ------------------------------------------------------------
-            // Aurorion Studio server (soq.aurorionstudio.shop)
-            // Provides HLS streams with .txt master/variant playlists
-            // and .woff2 segments – all perfectly playable by ExoPlayer.
-            // ------------------------------------------------------------
-            if (!linkFound && src.contains("aurorionstudio.shop")) {
-                try {
+            // 4. Aurorion Studio / Custom CDN (.txt manifests & .woff2 segments)
+            if (!linkFound && (src.contains("aurorionstudio.shop") || src.contains("fitnesshaven.cfd"))) {
+                runCatching {
+                    val safeUrl = if (src.contains(".txt") && !src.contains("#.m3u8")) "$src#.m3u8" else src
                     callback(
                         newExtractorLink(
                             source = name,
-                            name = "Aurorion Studio",
-                            url = src,
-                            type = ExtractorLinkType.M3U8   // works for .txt playlists too
+                            name = "Aurorion CDN",
+                            url = safeUrl,
+                            type = ExtractorLinkType.M3U8
                         ) {
                             this.referer = "https://naruldonghua.com/"
                             this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("Referer" to "https://naruldonghua.com/", "Origin" to "https://naruldonghua.com")
                         }
                     )
                     linkFound = true
-                } catch (_: Exception) {}
+                }
             }
 
-            // Generic fallback — native CloudStream extractor
+            // 5. Generic fallback extractor
             if (!linkFound) {
-                try {
+                runCatching {
                     if (loadExtractor(src, data, subtitleCallback, callback)) {
                         linkFound = true
                     }
-                } catch (_: Exception) {}
+                }
             }
 
             return linkFound
         }
 
-        // Parse direct iframe payloads
+        // Parse standard iframe embeds
         document.select(".player-embed iframe, iframe[src]").forEach { iframe ->
             val src = fixUrl(iframe.attr("src").ifBlank { iframe.attr("data-litespeed-src") })
             if (src.isNotBlank() && !src.contains("about:blank")) {
@@ -292,7 +253,7 @@ class NarulDonghuaProvider : MainAPI() {
             }
         }
 
-        // Parse base64 dropdown servers (Mirror selector)
+        // Parse base64 dropdown mirror options
         document.select("select.mirror option").forEach { option ->
             val base64Val = option.attr("value")
             if (base64Val.isNotBlank()) {
@@ -308,7 +269,7 @@ class NarulDonghuaProvider : MainAPI() {
                         var mirrorFound = handleEmbed(fixedSrc)
 
                         if (!mirrorFound) {
-                            val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data, "User-Agent" to "Mozilla/5.0")).text
+                            val iframeText = app.get(fixedSrc, headers = mapOf("Referer" to data, "User-Agent" to Mozilla/5.0)).text
                             val m3u8Match = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|txt|mp4)[^"']*)["']""").find(iframeText)
                             
                             m3u8Match?.groupValues?.get(1)?.let { streamUrl ->
@@ -321,7 +282,7 @@ class NarulDonghuaProvider : MainAPI() {
                                         source = name,
                                         name = "Narul Stream",
                                         url = safeUrl,
-                                        type = if (safeUrl.contains("m3u8") || safeUrl.contains("txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        type = ExtractorLinkType.M3U8
                                     ) {
                                         this.referer = fixedSrc
                                         this.quality = Qualities.Unknown.value
