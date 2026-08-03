@@ -5,7 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
 class ZHAnimeProvider : MainAPI() {
-    override var mainUrl = "https://zhanime.online" // Update with the actual base URL
+    override var mainUrl = "https://zhanime.online"
     override var name = "ZH Anime"
     override val hasMainPage = true
     override var lang = "en"
@@ -34,7 +34,7 @@ class ZHAnimeProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(
-        data: String, 
+        data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
@@ -58,15 +58,17 @@ class ZHAnimeProvider : MainAPI() {
                     match?.groupValues?.get(1)?.let { playlistUrl ->
                         val fixedPlaylistUrl = fixUrl(playlistUrl)
                         
-                        // FIX: Replaced ExtractorLink with newExtractorLink
+                        // Corrected newExtractorLink implementation
                         callback.invoke(
                             newExtractorLink(
+                                source = "ZH CDN",
                                 name = "ZH CDN",
                                 url = fixedPlaylistUrl,
-                                referer = src,
-                                quality = Qualities.Unknown.value,
-                                isM3u8 = true 
-                            )
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = src
+                                this.quality = Qualities.Unknown.value
+                            }
                         )
                     }
                 }
