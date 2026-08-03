@@ -2,7 +2,6 @@ package com.dongstream
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 
 class DongStreamProvider : MainAPI() {
     override var mainUrl = "https://dongstream.com"
@@ -21,30 +20,54 @@ class DongStreamProvider : MainAPI() {
         "comingSoon" to "Coming Soon"
     )
 
-    private data class HomeData(val categories: Map<String, List<CategoryItem>>?)
-    private data class CategoryItem(val title: String?, val thumbnail_url: String?, val slug: String?)
-    private data class JsonLdData(val embedUrl: String?)
+    // Using a generic Map structure makes parsing indestructible against API changes
+    private data class HomeResponse(val categories: Map<String, List<Map<String, Any>>>?)
+
+    // Universal parser that handles both "Series" objects and "Episode" objects seamlessly
+    private fun parseItem(item: Map<String, Any>): SearchResponse? {
+        val title = (item["title"] as? String) ?: (item["name"] as? String) ?: return null
+
+        // "Latest Releases" returns Episodes, so the image/slug is hidden inside a nested playlist object
+        val playlist = item["playlist"] as? Map<*, *>
+        
+        val seriesTitle = (playlist?.get("title") as? String) ?: title
+        
+        val actualSlug = (playlist?.get("slug") as? String) 
+            ?: (item["playlist_slug"] as? String) 
+            ?: (item["slug"] as? String) 
+            ?: seriesTitle.lowercase().replace(Regex("\\s+"), "-").replace(Regex("[^a-z0-9\\-]"), "")
+            
+        val rawImg = (item["thumbnail_url"] as? String) 
+            ?: (item["image_url"] as? String)
+            ?: (playlist?.get("thumbnail_url") as? String)
+            ?: (playlist?.get("image_url") as? String)
+            
+        val img = rawImg?.let { 
+            if (it.startsWith("http")) it else "https://backend.dongstream.com${if (it.startsWith("/")) "" else "/"}$it"
+        }
+
+        // Format nicely for Latest Releases (e.g., "Swallowed Star E235")
+        val epNum = item["episode_number"]?.toString()?.toDoubleOrNull()?.toInt()
+        val displayTitle = if (epNum != null && !seriesTitle.contains("Episode", true)) {
+            "$seriesTitle E$epNum"
+        } else {
+            seriesTitle
+        }
+
+        return newAnimeSearchResponse(displayTitle, "$mainUrl/$actualSlug", TvType.Anime) {
+            this.posterUrl = img
+        }
+    }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val homeItems = mutableListOf<HomePageList>()
         
         runCatching {
             val jsonText = app.get("$apiUrl/home?region=en").text
-            val data = parseJson<HomeData>(jsonText)
+            val data = AppUtils.parseJson<HomeResponse>(jsonText)
             
             val list = data.categories?.get(request.data) ?: emptyList()
-            val cards = list.mapNotNull { item ->
-                if (item.title == null) return@mapNotNull null
-                
-                val itemSlug = item.slug ?: item.title.lowercase().replace(Regex("\\s+"), "-").replace(Regex("[^a-z0-9\\-]"), "")
-                val img = item.thumbnail_url?.let { 
-                    if (it.startsWith("http")) it else "https://backend.dongstream.com${if (it.startsWith("/")) "" else "/"}$it"
-                }
-
-                newAnimeSearchResponse(item.title, "$mainUrl/$itemSlug", TvType.Anime) {
-                    this.posterUrl = img
-                }
-            }
+            val cards = list.mapNotNull { parseItem(it) }
 
             if (cards.isNotEmpty()) {
                 homeItems.add(HomePageList(request.name, cards))
@@ -55,14 +78,36 @@ class DongStreamProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search?q=$query").document
+        val results = mutableListOf<SearchResponse>()
         
-        return document.select(".ssr-home a, .ssr-search a, a[href^=/]").mapNotNull {
-            val href = it.attr("href")
-            if (href.startsWith("/") && href.length > 2 && !href.contains("video")) {
-                newAnimeSearchResponse(it.text(), fixUrl(href), TvType.Anime)
-            } else null
-        }.distinctBy { it.url }
+        // 1. Try the primary Search API first
+        runCatching {
+            val res = app.get("$apiUrl/search?q=$query").parsedSafe<List<Map<String, Any>>>()
+            res?.forEach { item -> parseItem(item)?.let { results.add(it) } }
+        }
+        
+        // 2. Fallback to Playlists API if standard search fails
+        if (results.isEmpty()) {
+            runCatching {
+                val res = app.get("$apiUrl/playlists?search=$query").parsedSafe<List<Map<String, Any>>>()
+                res?.forEach { item -> parseItem(item)?.let { results.add(it) } }
+            }
+        }
+
+        // 3. Last Resort: Fetch the homepage and filter the cache manually
+        if (results.isEmpty()) {
+            runCatching {
+                val res = app.get("$apiUrl/home?region=en").parsedSafe<HomeResponse>()
+                res?.categories?.values?.flatten()?.forEach { item ->
+                    val parsed = parseItem(item)
+                    if (parsed != null && parsed.name.contains(query, ignoreCase = true)) {
+                        results.add(parsed)
+                    }
+                }
+            }
+        }
+        
+        return results.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -87,7 +132,6 @@ class DongStreamProvider : MainAPI() {
             })
         }
 
-        // Fixed the return statement and corrected distinctBy { it.data }
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = fixUrlNull(poster)
             this.plot = plot
@@ -108,19 +152,18 @@ class DongStreamProvider : MainAPI() {
         
         if (!jsonLd.isNullOrBlank()) {
             runCatching {
-                val jsonData = parseJson<JsonLdData>(jsonLd)
+                // Quick regex to grab the embedUrl safely from the Schema
+                val embedUrl = Regex(""""embedUrl"\s*:\s*"([^"]+)"""").find(jsonLd)?.groupValues?.get(1)
                 
-                jsonData.embedUrl?.let { embedUrl ->
-                    if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
+                embedUrl?.let { embed ->
+                    if (loadExtractor(embed, data, subtitleCallback, callback)) {
                         found = true
                     } else {
-                        val iframeHtml = app.get(embedUrl, headers = mapOf("Referer" to data)).text
+                        val iframeHtml = app.get(embed, headers = mapOf("Referer" to data)).text
                         val m3u8Match = Regex("""(?:file|src|url)["']?\s*:\s*["']([^"']+(?:m3u8|mp4)[^"']*)["']""").find(iframeHtml)
                         
                         m3u8Match?.groupValues?.get(1)?.let { stream ->
                             val isM3u8 = stream.contains("m3u8")
-                            
-                            // Updated Extractor Builder Syntax
                             callback.invoke(
                                 newExtractorLink(
                                     source = name,
@@ -128,7 +171,7 @@ class DongStreamProvider : MainAPI() {
                                     url = stream,
                                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.referer = embedUrl
+                                    this.referer = embed
                                     this.quality = Qualities.Unknown.value
                                 }
                             )
