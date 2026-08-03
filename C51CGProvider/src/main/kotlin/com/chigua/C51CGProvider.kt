@@ -191,20 +191,16 @@ class C51CGProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) – WITH RANKING LIST DETECTION
+    // LOAD (Detail Page) – RANKING LIST ONLY FOR “Melon List” CATEGORY
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val pageHtml = document.outerHtml()
 
-        // ---------------------------------------------------------------
-        // 1. DETECT AND HANDLE RANKING / "melon list" PAGES
-        // ---------------------------------------------------------------
-        // Real ranking pages contain <span id="menu_index_1">, etc.
-        // Single articles do NOT have those markers.
-        val isRankingPage = document.select(".post-content span[id^=menu_index_]").isNotEmpty()
+        // Detect if the page belongs to the "Melon List" category (吃瓜榜单, slug mrdg)
+        val isMelonList = document.select(".nav-breadcrumb-wrap a[href*=\"/category/mrdg/\"]").isNotEmpty()
 
-        if (isRankingPage) {
+        if (isMelonList) {
             val rawTitle = document.selectFirst("h1.post-title")?.text()?.trim()
                 ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
                 ?: "Ranking List"
@@ -213,7 +209,6 @@ class C51CGProvider : MainAPI() {
             val poster = document.selectFirst(".post-content img[data-xkrkllgl]")?.attr("data-xkrkllgl")
                 ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
-            // Extract all video links (works for 2, 10, any number)
             val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
             val episodes = mutableListOf<Episode>()
             for ((index, a) in rankingLinks.withIndex()) {
@@ -237,7 +232,7 @@ class C51CGProvider : MainAPI() {
         }
 
         // ---------------------------------------------------------------
-        // 2. NORMAL SINGLE-VIDEO PAGE
+        // NORMAL SINGLE-VIDEO PAGE (all other categories)
         // ---------------------------------------------------------------
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val title = translateToEnglish(rawTitle) ?: "Video"
