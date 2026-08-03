@@ -94,7 +94,7 @@ class ZHAnimeProvider : MainAPI() {
         val imgEl = this.selectFirst("img")
         val poster = imgEl?.attr("src")?.ifBlank { imgEl.attr("data-src") }
 
-        return newAnimeSearchResponse(title!!, finalUrl, TvType.Anime) {
+        return newAnimeSearchResponse(title, finalUrl, TvType.Anime) {
             this.posterUrl = fixUrlNull(poster)
         }
     }
@@ -204,14 +204,24 @@ class ZHAnimeProvider : MainAPI() {
                             }
 
                             val isM3u8 = finalStream.contains("m3u8") || finalStream.contains("txt")
+                            
+                            // FIX: Append #.m3u8 if it's a disguised .txt file so ExoPlayer recognizes it!
+                            val safeUrl = if (isM3u8 && !finalStream.contains(".m3u8")) "$finalStream#.m3u8" else finalStream
+                            
+                            val streamHeaders = mapOf(
+                                "Origin" to "https://megaplay.buzz",
+                                "Referer" to embedUrl,
+                                "Accept" to "*/*",
+                                "User-Agent" to USER_AGENT
+                            )
 
                             val generatedLinks = if (isM3u8) {
                                 runCatching {
                                     M3u8Helper.generateM3u8(
                                         source = name,
-                                        streamUrl = finalStream,
+                                        streamUrl = safeUrl,
                                         referer = embedUrl,
-                                        headers = mapOf("Referer" to embedUrl, "User-Agent" to USER_AGENT),
+                                        headers = streamHeaders,
                                         name = "Megaplay HD"
                                     )
                                 }.getOrDefault(emptyList())
@@ -220,16 +230,15 @@ class ZHAnimeProvider : MainAPI() {
                             if (generatedLinks.isNotEmpty()) {
                                 generatedLinks.forEach { link -> callback.invoke(link) }
                             } else {
-                                // Fallback: Pass link directly to CloudStream if M3u8Helper fails
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
                                         name = "Megaplay HD",
-                                        url = finalStream,
+                                        url = safeUrl,
                                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
                                         this.referer = embedUrl
-                                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to embedUrl)
+                                        this.headers = streamHeaders
                                     }
                                 )
                             }
@@ -254,15 +263,25 @@ class ZHAnimeProvider : MainAPI() {
                             }
 
                             val isM3u8 = finalStreamUrl.contains("m3u8") || finalStreamUrl.contains("index.txt")
+                            
+                            // FIX: Append #.m3u8 if it's a disguised .txt file so ExoPlayer recognizes it!
+                            val safeUrl = if (isM3u8 && !finalStreamUrl.contains(".m3u8")) "$finalStreamUrl#.m3u8" else finalStreamUrl
                             val serverName = if (embedUrl.contains("artplayer")) "Artplayer" else "Native Player"
+
+                            val streamHeaders = mapOf(
+                                "Origin" to mainUrl,
+                                "Referer" to embedUrl,
+                                "Accept" to "*/*",
+                                "User-Agent" to USER_AGENT
+                            )
 
                             val generatedLinks = if (isM3u8) {
                                 runCatching {
                                     M3u8Helper.generateM3u8(
                                         source = name,
-                                        streamUrl = finalStreamUrl,
+                                        streamUrl = safeUrl,
                                         referer = embedUrl,
-                                        headers = mapOf("Referer" to embedUrl, "User-Agent" to USER_AGENT),
+                                        headers = streamHeaders,
                                         name = serverName
                                     )
                                 }.getOrDefault(emptyList())
@@ -271,16 +290,15 @@ class ZHAnimeProvider : MainAPI() {
                             if (generatedLinks.isNotEmpty()) {
                                 generatedLinks.forEach { link -> callback.invoke(link) }
                             } else {
-                                // Fallback: Pass direct ExtractorLink
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
                                         name = serverName,
-                                        url = finalStreamUrl,
+                                        url = safeUrl,
                                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
                                         this.referer = embedUrl
-                                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to embedUrl)
+                                        this.headers = streamHeaders
                                     }
                                 )
                             }
