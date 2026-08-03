@@ -36,6 +36,8 @@ jobs:
 
       - name: Push to builds branch
         run: |
+        - name: Clean Gradle build cache
+  run: gradle clean          # or: ./gradlew clean
           cd release
           git init
           git checkout -b builds
