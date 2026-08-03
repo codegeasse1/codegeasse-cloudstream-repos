@@ -18,14 +18,13 @@ class Porna91Provider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
-    // Browser headers
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.5"
     )
 
-    // Session initialization
+    // Ensure session cookies are set
     private var sessionInitialized = false
     private suspend fun initSession() {
         if (!sessionInitialized) {
@@ -64,11 +63,11 @@ class Porna91Provider : MainAPI() {
         val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
         val document = app.get(docUrl, headers = headers).document
         val items = document.select(".video-items .video-item, ul.video-items > li.video-item")
-            .mapNotNull { it.toSearchResult() }   // non‑suspend, OK now
+            .mapNotNull { it.toSearchResult() }   // no suspend, OK
         return newHomePageResponse(request.name, items)
     }
 
-    // Item parsing – no suspend, returns poster URL directly
+    // Item parsing – raw URL only
     private fun Element.toSearchResult(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail?video_key=], a[href*=/avdetail?video_key=]") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
@@ -78,7 +77,7 @@ class Porna91Provider : MainAPI() {
             ?: return null
         val posterUrl = fixUrlNull(img?.attr("data-src")?.ifBlank { img.attr("src") })
         return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl   // CloudStream handles cookies + referer
+            this.posterUrl = posterUrl
         }
     }
 
@@ -112,7 +111,7 @@ class Porna91Provider : MainAPI() {
         val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = fixUrlNull(posterUrl)
-            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+            this.posterHeaders = mapOf("Referer" to "$mainUrl/")   // Referer for detail image
             this.plot = title
             this.tags = tags
         }
@@ -138,7 +137,6 @@ class Porna91Provider : MainAPI() {
                 })
                 found = true
             }
-
             // Player JSONs
             val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
                 "config", "playInfo", "playerConfig", "videoInfo")
@@ -169,10 +167,8 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 1. Main page
         searchForStream(mainHtml, data)
 
-        // 2. Iframes
         if (!found) {
             val document = app.get(data, headers = headers).document
             val iframes = document.select("iframe")
@@ -188,7 +184,6 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 3. API fallback
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             val apiUrls = listOf(
