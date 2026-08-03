@@ -193,6 +193,47 @@ class NarulDonghuaProvider : MainAPI() {
                 }
             }
 
+            // ------------------------------------------------------------
+            // Rumble HLS handling – direct .m3u8/.ts links & embed URLs
+            // ------------------------------------------------------------
+            if (!linkFound && (src.contains("rumble.com") || src.contains("rumble.cloud"))) {
+                try {
+                    if (src.contains(".m3u8") || src.contains(".ts")) {
+                        // Already a direct HLS link (master, variant, or segment)
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = "Rumble HLS",
+                                url = src,
+                                type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = "https://rumble.com/"
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        linkFound = true
+                    } else {
+                        // Extract video ID from an embed/page URL and build master playlist
+                        val videoId = Regex("""(?:embed|v)/([a-zA-Z0-9]+)""").find(src)?.groupValues?.get(1)
+                        if (videoId != null) {
+                            val masterUrl = "https://rumble.com/hls-vod/$videoId/playlist.m3u8?u=0&b=0"
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "Rumble HLS",
+                                    url = masterUrl,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = "https://rumble.com/"
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            linkFound = true
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
             // Generic fallback — native CloudStream extractor for anything else
             if (!linkFound) {
                 try {
