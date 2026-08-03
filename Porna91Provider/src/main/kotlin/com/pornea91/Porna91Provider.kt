@@ -62,11 +62,10 @@ class Porna91Provider : MainAPI() {
         val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
         val document = app.get(docUrl, headers = headers).document
         val items = document.select(".video-items .video-item, ul.video-items > li.video-item")
-            .mapNotNull { it.toSearchResult() }   // NOT suspend
+            .mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
 
-    // *********** NO suspend ************
     private fun Element.toSearchResult(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail?video_key=], a[href*=/avdetail?video_key=]") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
