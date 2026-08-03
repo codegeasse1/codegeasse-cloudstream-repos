@@ -18,6 +18,16 @@ class Porna91Provider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
+    // Standard browser headers – used for every request
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.5"
+    )
+
+    // ---------------------------------------------------------------
+    // MAIN PAGE – all homepage video sections
+    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
         "$mainUrl/comic/index/video?category=now_month_hot" to "Hot Ranking",
@@ -45,24 +55,38 @@ class Porna91Provider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val baseUrl = request.data
         val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
-        val document = app.get(docUrl).document
-        val items = document.select(".video-items .video-item, ul.video-items > li.video-item").mapNotNull { it.toSearchResult() }
+        val document = app.get(docUrl, headers = headers).document
+        val items = document.select(".video-items .video-item, ul.video-items > li.video-item")
+            .mapNotNull { element -> element.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
+    // ---------------------------------------------------------------
+    // ITEM PARSING – fetch image manually to bypass CDN blocking
+    // ---------------------------------------------------------------
+    private suspend fun Element.toSearchResult(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail?video_key=], a[href*=/avdetail?video_key=]") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
+
         val img = this.selectFirst("img")
         val title = img?.attr("alt")?.trim()
             ?: this.selectFirst(".line-clamp-2, .post-item-title")?.text()?.trim()
             ?: return null
-        val posterUrl = fixUrlNull(img?.attr("data-src")?.ifBlank { img.attr("src") })
+
+        // Fetch the image and convert to base64 data URI
+        val posterUrl = fixUrlNull(
+            img?.attr("data-src")?.ifBlank { img.attr("src") }
+        )
+        val dataUri = posterUrl?.let { fetchImageAsDataUri(it) } ?: posterUrl
+
         return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl
+            this.posterUrl = dataUri
         }
     }
 
+    // ---------------------------------------------------------------
+    // SEARCH – same image fetching
+    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val maxPages = 5
@@ -70,32 +94,44 @@ class Porna91Provider : MainAPI() {
         for (page in 1..maxPages) {
             val docUrl = if (page == 1) "$mainUrl/comic/index/search?keyword=$encodedQuery"
                          else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
-            val document = app.get(docUrl).document
-            val items = document.select(".video-items .video-item").mapNotNull { it.toSearchResult() }
+            val document = app.get(docUrl, headers = headers).document
+            val items = document.select(".video-items .video-item")
+                .mapNotNull { element -> element.toSearchResult() }
             if (items.isEmpty()) break
             results.addAll(items)
         }
         return results
     }
 
+    // ---------------------------------------------------------------
+    // LOAD (Detail Page)
+    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        val document = app.get(url, headers = headers).document
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: document.selectFirst("h1, h2")?.text()?.trim() ?: "Video"
+
         var posterUrl = document.selectFirst("meta[property=og:image]")?.attr("content")
         if (posterUrl.isNullOrBlank()) {
             posterUrl = document.selectFirst(".poster img, .video-cover img")?.attr("data-src")
                 ?: document.selectFirst(".poster img, .video-cover img")?.attr("src")
         }
-        val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
+        val dataUri = posterUrl?.let { fetchImageAsDataUri(it) } ?: posterUrl
+
+        val tags = document.select("a[href*=/search?keyword=]")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
-            this.posterUrl = fixUrlNull(posterUrl)
-            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+            this.posterUrl = dataUri
             this.plot = title
             this.tags = tags
         }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD LINKS – extract M3U8 with browser headers
+    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -103,10 +139,11 @@ class Porna91Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val html = app.get(data).text
+        val html = app.get(data, headers = headers).text
 
-        // 1. Direct M3U8 anywhere in the source (most reliable)
-        Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
+        // 1. Direct M3U8 anywhere in the page
+        val m3u8Regex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        m3u8Regex.findAll(html).forEach { match ->
             val url = match.value.replace("&amp;", "&")
             callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
                 this.referer = data
@@ -145,33 +182,41 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 3. Fallback API – use video_key to get stream
+        // 3. Fallback API – request stream via video_key
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             try {
-                // Try common API endpoints
-                val apiUrls = listOf(
-                    "$mainUrl/api/play?video_key=$videoKey",
-                    "$mainUrl/comic/play?video_key=$videoKey"
-                )
-                for (api in apiUrls) {
-                    val json = app.get(api, headers = mapOf("Referer" to data)).text
-                    val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)
-                    if (urlMatch != null) {
-                        val streamUrl = urlMatch.groupValues[1]
-                        if (streamUrl.contains(".m3u8")) {
-                            callback(newExtractorLink(name, "API", streamUrl, ExtractorLinkType.M3U8) {
-                                this.referer = data
-                                this.quality = Qualities.Unknown.value
-                            })
-                            found = true
-                            break
-                        }
+                val apiUrl = "$mainUrl/api/play?video_key=$videoKey"
+                val json = app.get(apiUrl, headers = headers).text
+                val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)
+                if (urlMatch != null) {
+                    val streamUrl = urlMatch.groupValues[1]
+                    if (streamUrl.contains(".m3u8")) {
+                        callback(newExtractorLink(name, "API", streamUrl, ExtractorLinkType.M3U8) {
+                            this.referer = data
+                            this.quality = Qualities.Unknown.value
+                        })
+                        found = true
                     }
                 }
             } catch (_: Exception) {}
         }
 
         return found
+    }
+
+    // ---------------------------------------------------------------
+    // Helper: fetch image and return base64 data URI
+    // ---------------------------------------------------------------
+    private suspend fun fetchImageAsDataUri(imageUrl: String): String {
+        return try {
+            val response = app.get(imageUrl, headers = headers)
+            val bytes = response.okhttpResponse.body?.bytes() ?: return imageUrl
+            val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            val ext = imageUrl.substringAfterLast(".", "jpeg").substringBefore("?")
+            "data:image/$ext;base64,$base64"
+        } catch (e: Exception) {
+            imageUrl  // fallback to original URL if fetch fails
+        }
     }
 }
