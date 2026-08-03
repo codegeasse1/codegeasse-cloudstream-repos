@@ -90,15 +90,12 @@ class Porna91Provider : MainAPI() {
         val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = fixUrlNull(posterUrl)
-            this.posterHeaders = mapOf("Referer" to "$mainUrl/")   // crucial for CDN
+            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
             this.plot = title
             this.tags = tags
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS – robust extraction
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -106,24 +103,23 @@ class Porna91Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
+        val html = app.get(data).text
 
-        // Helper to extract from HTML string
-        fun extractFromHtml(html: String, referer: String) {
-            // 1. Direct M3U8
-            Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
-                val url = match.value.replace("&amp;", "&")
-                callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
-            }
+        // 1. Direct M3U8 anywhere in the source (most reliable)
+        Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
+            val url = match.value.replace("&amp;", "&")
+            callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
+                this.referer = data
+                this.quality = Qualities.Unknown.value
+            })
+            found = true
+        }
 
-            // 2. Player JSON objects (multiple known names)
-            val playerJsonNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig")
-            for (name in playerJsonNames) {
-                val playerRegex = Regex("""$name\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL)
-                val match = playerRegex.find(html)
+        // 2. player_aaaa JSON (common fallback)
+        if (!found) {
+            val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig")
+            for (pName in playerNames) {
+                val match = Regex("""$pName\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL).find(html)
                 if (match != null) {
                     try {
                         val json = match.groupValues[1]
@@ -138,77 +134,40 @@ class Porna91Provider : MainAPI() {
                             callback(newExtractorLink(name, "Player", realUrl,
                                 if (realUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                             ) {
-                                this.referer = referer
+                                this.referer = data
                                 this.quality = Qualities.Unknown.value
                             })
                             found = true
-                            break // stop after first successful player extraction
+                            break
                         }
                     } catch (_: Exception) {}
                 }
             }
-
-            // 3. JavaScript variable assignments
-            val jsVarRegex = Regex("""(?:video_url|videoSrc|videoUrl|video_src|src|url)\s*[:=]\s*['"]([^'"]+\.m3u8[^'"]*)['"]""")
-            jsVarRegex.findAll(html).forEach { match ->
-                val url = match.groupValues[1]
-                callback(newExtractorLink(name, "JS Var", url, ExtractorLinkType.M3U8) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
-            }
-
-            // 4. Look for <video> or <source> tags
-            val sourceRegex = Regex("""<(?:video|source)[^>]+src\s*=\s*['"]([^'"]+)['"]""")
-            sourceRegex.findAll(html).forEach { match ->
-                val url = match.groupValues[1]
-                if (url.contains(".m3u8") || url.contains(".mp4")) {
-                    callback(newExtractorLink(name, "Source", url,
-                        if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = referer
-                        this.quality = Qualities.Unknown.value
-                    })
-                    found = true
-                }
-            }
         }
 
-        // Fetch main page
-        val mainHtml = app.get(data).text
-        extractFromHtml(mainHtml, data)
-
-        // 5. Iframes
-        if (!found) {
-            val document = app.get(data).document
-            val iframes = document.select("iframe")
-            for (iframe in iframes) {
-                val src = iframe.attr("src")
-                if (src.isNotBlank() && src.startsWith("http")) {
-                    try {
-                        val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
-                        extractFromHtml(iframeHtml, src)
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-
-        // 6. Fallback API (guess the API endpoint)
+        // 3. Fallback API – use video_key to get stream
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             try {
-                val apiUrl = "$mainUrl/api/play?video_key=$videoKey"
-                val json = app.get(apiUrl, headers = mapOf("Referer" to data)).text
-                val url = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
-                if (url != null && (url.contains(".m3u8") || url.contains(".mp4"))) {
-                    callback(newExtractorLink(name, "API", url,
-                        if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = data
-                        this.quality = Qualities.Unknown.value
-                    })
-                    found = true
+                // Try common API endpoints
+                val apiUrls = listOf(
+                    "$mainUrl/api/play?video_key=$videoKey",
+                    "$mainUrl/comic/play?video_key=$videoKey"
+                )
+                for (api in apiUrls) {
+                    val json = app.get(api, headers = mapOf("Referer" to data)).text
+                    val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(json)
+                    if (urlMatch != null) {
+                        val streamUrl = urlMatch.groupValues[1]
+                        if (streamUrl.contains(".m3u8")) {
+                            callback(newExtractorLink(name, "API", streamUrl, ExtractorLinkType.M3U8) {
+                                this.referer = data
+                                this.quality = Qualities.Unknown.value
+                            })
+                            found = true
+                            break
+                        }
+                    }
                 }
             } catch (_: Exception) {}
         }
