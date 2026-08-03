@@ -213,18 +213,21 @@ class C51CGProvider : MainAPI() {
             val poster = document.selectFirst(".post-content img[data-xkrkllgl]")?.attr("data-xkrkllgl")
                 ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
-            val episodes = rankingLinks.mapIndexed { index, a ->
-                val link = fixUrlNull(a.attr("href")) ?: return@mapIndexed null
-                // Try to get the title from the preceding <h2>, otherwise use link text
-                val epTitle = a.parent()?.previousElementSibling()?.text()?.trim()
+            val episodes = mutableListOf<Episode>()
+            for ((index, a) in rankingLinks.withIndex()) {
+                val link = fixUrlNull(a.attr("href")) ?: continue
+                val rawEpTitle = a.parent()?.previousElementSibling()?.text()?.trim()
                     ?: a.text().trim()
-                newEpisode(link) {
-                    this.name = translateToEnglish(epTitle) ?: epTitle
-                    this.episode = index + 1
-                }
-            }.filterNotNull()
+                val epTitle = translateToEnglish(rawEpTitle) ?: rawEpTitle
+                episodes.add(
+                    newEpisode(link) {
+                        this.name = epTitle
+                        this.episode = index + 1
+                    }
+                )
+            }
 
-            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            return newAnimeLoadResponse(title, url, TvType.Anime) {
                 this.posterUrl = poster
                 this.plot = "Top ${episodes.size} entries"
                 addEpisodes(DubStatus.Subbed, episodes)
