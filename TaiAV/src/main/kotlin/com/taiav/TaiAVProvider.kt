@@ -82,8 +82,16 @@ class TaiAVProvider : MainAPI() {
                 val rawName = a.text().trim()
                 if (rawName.isBlank()) return@mapNotNull null
                 val translatedName = translateText(rawName, true) ?: rawName
+                
+                // Extract image for the categories properly
+                val img = a.selectFirst("img")
+                var poster = img?.attr("src")
+                if (poster.isNullOrBlank() || poster.contains("data:image")) {
+                    poster = img?.attr("data-src") ?: ""
+                }
+
                 newMovieSearchResponse(translatedName, href, TvType.NSFW) {
-                    this.posterUrl = null
+                    this.posterUrl = fixUrlNull(poster)
                 }
             }.distinctBy { it.url }
             return newHomePageResponse(request.name, categories, hasNext = false)
@@ -107,10 +115,13 @@ class TaiAVProvider : MainAPI() {
         val rawTitle = img?.attr("alt")?.ifBlank { this.selectFirst(".movie-title")?.text() }?.trim() ?: ""
         val title = translateText(rawTitle, true) ?: rawTitle
 
-        val posterUrl = fixUrlNull(img?.attr("src"))
+        var posterUrl = img?.attr("src") ?: ""
+        if (posterUrl.isBlank() || posterUrl.contains("data:image")) {
+            posterUrl = img?.attr("data-src") ?: ""
+        }
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
-            this.posterUrl = posterUrl
+            this.posterUrl = fixUrlNull(posterUrl)
         }
     }
 
@@ -177,7 +188,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (TaiAV Key Injector)
+    // LOAD LINKS (API + Fallback Scraper)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -187,55 +198,67 @@ class TaiAVProvider : MainAPI() {
     ): Boolean {
         var found = false
 
-        val movieId = data.substringAfterLast("/").substringBefore("?")
+        val movieIdMatch = Regex("""/(\d+)(?:/|\.|\?|$)""").find(data)
+        val movieId = movieIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?")
 
-        if (movieId.isNotBlank()) {
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer" to data
+        )
+
+        fun emitLink(rawUrl: String) {
+            var fixedM3u8Url = rawUrl.replace("\\/", "/")
+            if (fixedM3u8Url.startsWith("//")) fixedM3u8Url = "https:$fixedM3u8Url"
+            else if (fixedM3u8Url.startsWith("/")) fixedM3u8Url = "$mainUrl$fixedM3u8Url"
+
+            val videoOrigin = try {
+                val uri = java.net.URI(fixedM3u8Url)
+                "${uri.scheme}://${uri.host}"
+            } catch (e: Exception) { mainUrl }
+
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "$name HD",
+                    url = fixedM3u8Url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.headers = mapOf(
+                        "User-Agent" to headers["User-Agent"]!!,
+                        "Origin" to videoOrigin,
+                        "Referer" to "$videoOrigin/"
+                    )
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            found = true
+        }
+
+        // 1. Extract directly from the HTML source of the page (Bypasses API blocks)
+        try {
+            val html = app.get(data, headers = headers).text
+            
+            // Look for m3u8 directly in the JS config blocks
+            val htmlRegex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
+            htmlRegex.findAll(html).forEach { match ->
+                emitLink(match.groupValues[1])
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 2. Fallback to API if HTML scraper fails
+        if (!found && movieId.isNotBlank()) {
             try {
                 val apiUrl = "$mainUrl/api/getmovie?type=1280&id=$movieId"
-
-                val response = app.get(
-                    apiUrl,
-                    headers = mapOf(
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "Accept" to "application/json, text/javascript, */*; q=0.01",
-                        "Referer" to data
-                    )
-                )
-
-                val json = JSONObject(response.text)
-                val m3u8UrlRaw = json.optString("m3u8", "")
-
-                if (m3u8UrlRaw.isNotBlank()) {
-                    val fixedM3u8Url = when {
-                        m3u8UrlRaw.startsWith("//") -> "https:$m3u8UrlRaw"
-                        m3u8UrlRaw.startsWith("/") -> "$mainUrl$m3u8UrlRaw"
-                        else -> m3u8UrlRaw
+                val response = app.get(apiUrl, headers = headers.plus("X-Requested-With" to "XMLHttpRequest")).text
+                
+                if (response.trim().startsWith("{")) {
+                    val json = JSONObject(response)
+                    val m3u8UrlRaw = json.optString("m3u8", "").ifBlank { json.optString("url", "") }
+                    if (m3u8UrlRaw.isNotBlank()) {
+                        emitLink(m3u8UrlRaw)
                     }
-
-                    val videoOrigin = try {
-                        val uri = java.net.URI(fixedM3u8Url)
-                        "${uri.scheme}://${uri.host}"
-                    } catch (e: Exception) {
-                        mainUrl
-                    }
-
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name HD",
-                            url = fixedM3u8Url,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.headers = mapOf(
-                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                "Origin" to videoOrigin,
-                                "Referer" to "$videoOrigin/"
-                            )
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    found = true
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
