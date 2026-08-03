@@ -66,7 +66,7 @@ class Porna91Provider : MainAPI() {
         return newHomePageResponse(request.name, items)
     }
 
-    // ************ NO suspend ************
+    // *********** NO suspend ************
     private fun Element.toSearchResult(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail?video_key=], a[href*=/avdetail?video_key=]") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
