@@ -24,9 +24,19 @@ jobs:
         with:
           gradle-version: '8.4'
 
+      # 1. Clean the project so no old classes remain
+      - name: Clean project
+        run: gradle clean
+
+      # 2. Purge the global Gradle cache (optional but recommended)
+      - name: Clean global Gradle cache
+        run: gradle cleanBuildCache || true   # ignore if this task isn't available
+
+      # 3. Build the plugins
       - name: Build plugins
         run: gradle make makePluginsJson
 
+      # 4. Collect the output files
       - name: Collect build output
         run: |
           mkdir -p release
@@ -34,10 +44,9 @@ jobs:
           cp build/plugins.json release/plugins.json
           echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]}' > release/repo.json
 
+      # 5. Push to the `builds` branch
       - name: Push to builds branch
         run: |
-        - name: Clean Gradle build cache
-  run: gradle clean          # or: ./gradlew clean
           cd release
           git init
           git checkout -b builds
