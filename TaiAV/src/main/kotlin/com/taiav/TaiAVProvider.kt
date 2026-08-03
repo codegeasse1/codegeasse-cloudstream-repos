@@ -19,11 +19,6 @@ class TaiAVProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
-    // Reads a tiny JSON file you control, e.g. a GitHub Gist raw URL:
-    //   {"translate": true}
-    // Edit that file from your phone anytime — no rebuild needed.
-    // Cached for the lifetime of this provider instance (until the
-    // app fully restarts / plugin reloads).
     // ---------------------------------------------------------------
     private var cachedTranslateFlag: Boolean? = null
 
@@ -36,7 +31,7 @@ class TaiAVProvider : MainAPI() {
             Regex(""""translate"\s*:\s*(true|false)""").find(json)
                 ?.groupValues?.get(1)?.toBoolean() ?: true
         } catch (e: Exception) {
-            true // fallback default if the fetch fails
+            true
         }
         cachedTranslateFlag = flag
         return flag
@@ -52,14 +47,14 @@ class TaiAVProvider : MainAPI() {
             val encodedText = URLEncoder.encode(text, "UTF-8")
             val targetLang = if (toEnglish) "en" else "zh-CN"
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=$encodedText"
-            
+
             val response = app.get(url, headers = mapOf("User-Agent" to "Mozilla/5.0")).text
 
             val matches = Regex("""\["([^"\\]*(?:\\.[^"\\]*)*)","[^"]*"""").findAll(response)
-            val translated = matches.map { 
+            val translated = matches.map {
                 it.groupValues[1]
                     .replace("\\\"", "\"")
-                    .replace("\\n", "\n") 
+                    .replace("\\n", "\n")
             }.joinToString("")
 
             if (translated.isNotBlank()) translated else text
@@ -69,21 +64,39 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // MAIN PAGE – exactly the links you extracted
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
-        "$mainUrl/cn/hots" to "Hot Videos",
-        "$mainUrl/cn/discover" to "Discover Categories"
+        "$mainUrl/cn/hots" to "Popular Videos",
+        "$mainUrl/cn/random" to "Random",
+        "$mainUrl/cn/discover" to "Categories"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "${request.data}?page=$page"
-        val document = app.get(url).document
+        val url = request.data
 
-        val homeItems = document.select("div.movie-card").mapNotNull { element ->
+        // Categories page – list all category links
+        if (url.contains("/cn/discover")) {
+            val document = app.get(url).document
+            val categories = document.select("a[href*=/cn/category/]").mapNotNull { a ->
+                val href = fixUrlNull(a.attr("href")) ?: return@mapNotNull null
+                val rawName = a.text().trim()
+                if (rawName.isBlank()) return@mapNotNull null
+                val translatedName = translateText(rawName, true) ?: rawName
+                newMovieSearchResponse(translatedName, href, TvType.NSFW) {
+                    this.posterUrl = null
+                }
+            }.distinctBy { it.url }
+            return newHomePageResponse(request.name, categories, hasNext = false)
+        }
+
+        // Everything else (Popular Videos, Random) – normal pagination
+        val docUrl = if (page == 1) url else "${url}?page=$page"
+        val document = app.get(docUrl).document
+        val items = document.select("div.movie-card").mapNotNull { element ->
             element.toSearchResultAsync()
         }
-        return newHomePageResponse(request.name, homeItems)
+        return newHomePageResponse(request.name, items)
     }
 
     // ---------------------------------------------------------------
@@ -106,8 +119,6 @@ class TaiAVProvider : MainAPI() {
 
     // ---------------------------------------------------------------
     // SEARCH
-    // Confirmed via devtools: /search?q=...&page=N is a plain
-    // page-number param, so we just loop pages and merge results.
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val chineseQuery = translateText(query, false) ?: query
@@ -135,7 +146,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD
+    // LOAD (Detail Page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -169,7 +180,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (TaiAV Key Injector)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -178,8 +189,6 @@ class TaiAVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-
-        // Extract the exact movieId from the URL
         val movieId = data.substringAfterLast("/").substringBefore("?")
 
         if (movieId.isNotBlank()) {
@@ -196,20 +205,16 @@ class TaiAVProvider : MainAPI() {
                     )
                 )
 
-                // 1. Grab the JSON Response and extract the URL safely
                 val json = JSONObject(response.text)
                 val m3u8UrlRaw = json.optString("m3u8", "")
 
                 if (m3u8UrlRaw.isNotBlank()) {
-
-                    // 2. Format the URL to ensure it has a valid protocol
                     val fixedM3u8Url = when {
                         m3u8UrlRaw.startsWith("//") -> "https:$m3u8UrlRaw"
                         m3u8UrlRaw.startsWith("/") -> "$mainUrl$m3u8UrlRaw"
                         else -> m3u8UrlRaw
                     }
 
-                    // 3. Dynamically grab the exact host for the Origin header (e.g., m.taiav.com)
                     val videoOrigin = try {
                         val uri = java.net.URI(fixedM3u8Url)
                         "${uri.scheme}://${uri.host}"
@@ -224,8 +229,6 @@ class TaiAVProvider : MainAPI() {
                             url = fixedM3u8Url,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            // Inject strict headers directly into CloudStream's ExoPlayer
-                            // Cookies are automatically handled by CloudStream's global cookie jar
                             this.headers = mapOf(
                                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                                 "Origin" to videoOrigin,
