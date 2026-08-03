@@ -20,38 +20,50 @@ class DongStreamProvider : MainAPI() {
         "comingSoon" to "Coming Soon"
     )
 
-    // Using a generic Map structure makes parsing indestructible against API changes
-    private data class HomeResponse(val categories: Map<String, List<Map<String, Any>>>?)
+    // Strict Data Classes to guarantee JSON parsing doesn't fail
+    private data class DongHome(val categories: Map<String, List<DongItem>>?)
+    private data class DongSearch(val playlists: List<DongItem>?, val data: List<DongItem>?)
+    
+    private data class DongItem(
+        val title: String? = null,
+        val name: String? = null,
+        val slug: String? = null,
+        val playlist_slug: String? = null,
+        val thumbnail_url: String? = null,
+        val image_url: String? = null,
+        val episode_number: Any? = null,
+        val playlist: DongPlaylist? = null
+    )
 
-    // Universal parser that handles both "Series" objects and "Episode" objects seamlessly
-    private fun parseItem(item: Map<String, Any>): SearchResponse? {
-        val title = (item["title"] as? String) ?: (item["name"] as? String) ?: return null
+    private data class DongPlaylist(
+        val title: String? = null,
+        val slug: String? = null,
+        val thumbnail_url: String? = null,
+        val image_url: String? = null
+    )
 
-        // "Latest Releases" returns Episodes, so the image/slug is hidden inside a nested playlist object
-        val playlist = item["playlist"] as? Map<*, *>
+    private data class JsonLdData(val embedUrl: String?)
+
+    // Fixes the "Site Logo" bug by routing relative images to the backend server
+    private fun resolveImageUrl(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        if (raw.startsWith("http")) return raw
+        return "https://backend.dongstream.com${if (raw.startsWith("/")) "" else "/"}$raw"
+    }
+
+    // Universal parser for both Series and Episode cards
+    private fun parseToSearchResponse(item: DongItem): SearchResponse? {
+        val title = item.title ?: item.name ?: item.playlist?.title ?: return null
+        val actualSlug = item.playlist?.slug ?: item.playlist_slug ?: item.slug ?: return null
         
-        val seriesTitle = (playlist?.get("title") as? String) ?: title
-        
-        val actualSlug = (playlist?.get("slug") as? String) 
-            ?: (item["playlist_slug"] as? String) 
-            ?: (item["slug"] as? String) 
-            ?: seriesTitle.lowercase().replace(Regex("\\s+"), "-").replace(Regex("[^a-z0-9\\-]"), "")
-            
-        val rawImg = (item["thumbnail_url"] as? String) 
-            ?: (item["image_url"] as? String)
-            ?: (playlist?.get("thumbnail_url") as? String)
-            ?: (playlist?.get("image_url") as? String)
-            
-        val img = rawImg?.let { 
-            if (it.startsWith("http")) it else "https://backend.dongstream.com${if (it.startsWith("/")) "" else "/"}$it"
-        }
+        val rawImg = item.thumbnail_url ?: item.image_url ?: item.playlist?.thumbnail_url ?: item.playlist?.image_url
+        val img = resolveImageUrl(rawImg)
 
-        // Format nicely for Latest Releases (e.g., "Swallowed Star E235")
-        val epNum = item["episode_number"]?.toString()?.toDoubleOrNull()?.toInt()
-        val displayTitle = if (epNum != null && !seriesTitle.contains("Episode", true)) {
-            "$seriesTitle E$epNum"
+        val epNumStr = item.episode_number?.toString()
+        val displayTitle = if (!epNumStr.isNullOrBlank() && !title.contains("Episode", true)) {
+            "${item.playlist?.title ?: title} E${epNumStr.replace(".0", "")}"
         } else {
-            seriesTitle
+            title
         }
 
         return newAnimeSearchResponse(displayTitle, "$mainUrl/$actualSlug", TvType.Anime) {
@@ -64,10 +76,10 @@ class DongStreamProvider : MainAPI() {
         
         runCatching {
             val jsonText = app.get("$apiUrl/home?region=en").text
-            val data = AppUtils.parseJson<HomeResponse>(jsonText)
+            val data = AppUtils.parseJson<DongHome>(jsonText)
             
             val list = data.categories?.get(request.data) ?: emptyList()
-            val cards = list.mapNotNull { parseItem(it) }
+            val cards = list.mapNotNull { parseToSearchResponse(it) }
 
             if (cards.isNotEmpty()) {
                 homeItems.add(HomePageList(request.name, cards))
@@ -80,26 +92,26 @@ class DongStreamProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
         
-        // 1. Try the primary Search API first
         runCatching {
-            val res = app.get("$apiUrl/search?q=$query").parsedSafe<List<Map<String, Any>>>()
-            res?.forEach { item -> parseItem(item)?.let { results.add(it) } }
-        }
-        
-        // 2. Fallback to Playlists API if standard search fails
-        if (results.isEmpty()) {
-            runCatching {
-                val res = app.get("$apiUrl/playlists?search=$query").parsedSafe<List<Map<String, Any>>>()
-                res?.forEach { item -> parseItem(item)?.let { results.add(it) } }
+            val jsonText = app.get("$apiUrl/playlists?search=$query").text
+            
+            // Handle different API array/object structural possibilities
+            val list = runCatching { AppUtils.parseJson<List<DongItem>>(jsonText) }.getOrNull()
+                ?: runCatching { AppUtils.parseJson<DongSearch>(jsonText).let { it.data ?: it.playlists } }.getOrNull()
+            
+            list?.forEach { item ->
+                parseToSearchResponse(item)?.let { results.add(it) }
             }
         }
 
-        // 3. Last Resort: Fetch the homepage and filter the cache manually
+        // Fallback if search API is completely empty
         if (results.isEmpty()) {
             runCatching {
-                val res = app.get("$apiUrl/home?region=en").parsedSafe<HomeResponse>()
-                res?.categories?.values?.flatten()?.forEach { item ->
-                    val parsed = parseItem(item)
+                val jsonText = app.get("$apiUrl/home?region=en").text
+                val data = AppUtils.parseJson<DongHome>(jsonText)
+                
+                data.categories?.values?.flatten()?.forEach { item ->
+                    val parsed = parseToSearchResponse(item)
                     if (parsed != null && parsed.name.contains(query, ignoreCase = true)) {
                         results.add(parsed)
                     }
@@ -111,10 +123,16 @@ class DongStreamProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // INTERCEPTOR: If a "Latest Release" episode link is clicked, redirect it to the Series page
+        if (url.contains("/video/")) {
+            val seriesSlug = url.substringAfter("/video/").substringBefore("/")
+            return load("$mainUrl/$seriesSlug")
+        }
+
         val document = app.get(url).document
         
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")?.replace(" - DongStream", "") ?: "Unknown Title"
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        val rawPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = document.selectFirst("meta[property=og:description]")?.attr("content")
 
         val episodes = mutableListOf<Episode>()
@@ -133,7 +151,7 @@ class DongStreamProvider : MainAPI() {
         }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
-            this.posterUrl = fixUrlNull(poster)
+            this.posterUrl = resolveImageUrl(rawPoster)
             this.plot = plot
             addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.data }) 
         }
@@ -152,7 +170,6 @@ class DongStreamProvider : MainAPI() {
         
         if (!jsonLd.isNullOrBlank()) {
             runCatching {
-                // Quick regex to grab the embedUrl safely from the Schema
                 val embedUrl = Regex(""""embedUrl"\s*:\s*"([^"]+)"""").find(jsonLd)?.groupValues?.get(1)
                 
                 embedUrl?.let { embed ->
