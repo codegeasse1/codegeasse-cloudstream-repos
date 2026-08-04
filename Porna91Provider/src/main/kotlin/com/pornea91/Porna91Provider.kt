@@ -40,9 +40,12 @@ class Porna91Provider : MainAPI() {
         }
     }
 
+    // FIXED: Replaced AcraApplication with CloudStreamApp as requested by the compiler
     private val posterCacheDir: File? by lazy {
         try {
-            AcraApplication.context?.let { File(it.cacheDir, "p91_posters").apply { mkdirs() } }
+            CloudStreamApp.context?.let { 
+                File(it.cacheDir, "p91_posters").apply { mkdirs() } 
+            }
         } catch (e: Exception) {
             null
         }
