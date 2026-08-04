@@ -31,7 +31,6 @@ class AniwavesProvider : MainAPI() {
         "X-Requested-With" to "XMLHttpRequest"
     )
 
-    // Holder for links that failed validation (shown only if nothing else works)
     class PendingLink(val url: String, val referer: String, val tag: String, val headers: Map<String, String>, val m3u8: Boolean)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -150,12 +149,12 @@ class AniwavesProvider : MainAPI() {
         fun originOf(url: String): String = Regex("""https?://[^/]+""").find(url)?.value ?: mainUrl
 
         val mediaUrlRegex = Regex("""https?://[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:[^\s"'<>\\]*)?""")
+        val idRegex = Regex("""(?:/e/|/embed-\d+/|/v/|[?&]id=)([\w-]+)""")
 
         fun isJunk(url: String): Boolean =
             url.contains("placeholder") || url.contains("/ads/") || url.contains("static.") ||
             url.contains("trailer") || url.contains("poster") || url.contains("preview")
 
-        // Emits a link to the player (suspend because newExtractorLink is suspend)
         suspend fun emitRaw(p: PendingLink) {
             callback(
                 newExtractorLink(
@@ -171,7 +170,6 @@ class AniwavesProvider : MainAPI() {
             )
         }
 
-        // Tests a link on-device before showing it. This is what kills the 2001 errors.
         suspend fun validateLink(url: String, referer: String, hdrs: Map<String, String>, m3u8: Boolean): Boolean {
             return try {
                 val h = hdrs.toMutableMap()
@@ -189,18 +187,15 @@ class AniwavesProvider : MainAPI() {
 
         suspend fun tryLink(url: String, referer: String, tag: String, hdrs: Map<String, String>, m3u8: Boolean): Boolean {
             val h = hdrs.toMutableMap()
-            if (h.isEmpty()) h["Referer"] = referer
             if (!h.containsKey("Referer")) h["Referer"] = referer
             if (validateLink(url, referer, h, m3u8)) {
                 emitRaw(PendingLink(url, referer, tag, h, m3u8))
                 return true
             }
-            // keep it as absolute last resort, but do NOT show it now
             if (!isJunk(url)) pendingLinks.add(PendingLink(url, referer, tag, h, m3u8))
             return false
         }
 
-        // Runs a CloudStream extractor but INTERCEPTS its links and validates them too
         suspend fun extractingLoadExtractor(url: String, tag: String): Boolean {
             val intercepted = mutableListOf<ExtractorLink>()
             var ok = false
@@ -237,46 +232,87 @@ class AniwavesProvider : MainAPI() {
             }
         }
 
+        fun parseSourcesJson(json: JSONObject, embedUrl: String, tag: String): Boolean {
+            return false // placeholder, real logic below in suspend fun
+        }
+
+        suspend fun handleSourcesJson(res: String, embedUrl: String, tag: String): Boolean {
+            if (!res.trim().startsWith("{")) return false
+            val j = JSONObject(res)
+            val streamUrl = when (val src = j.opt("sources")) {
+                is String -> src
+                is JSONArray -> {
+                    var r = ""
+                    for (i in 0 until src.length()) {
+                        val f = src.optJSONObject(i)?.optString("file") ?: ""
+                        if (f.isNotBlank()) { r = f; break }
+                    }
+                    r
+                }
+                else -> ""
+            }.replace("\\/", "/")
+
+            if (streamUrl.startsWith("http")) {
+                if (tryLink(streamUrl, embedUrl, tag, mapOf("Referer" to embedUrl), streamUrl.contains("m3u8", true))) return true
+            }
+            parseSubtitles(j)
+            return false
+        }
+
+        // Probe MegaCloud/EchoVideo-style getSources APIs on ANY embed host
+        suspend fun probeGetSources(embedUrl: String, tag: String): Boolean {
+            val origin = originOf(embedUrl)
+            val id = idRegex.find(embedUrl)?.groupValues?.get(1)
+                ?: embedUrl.substringBefore("?").substringAfterLast("/")
+            if (id.isBlank()) return false
+
+            val paths = listOf(
+                "/ajax/embed-4/getSources", "/embed-4/getSources",
+                "/ajax/embed-1/getSources", "/embed-1/getSources",
+                "/ajax/getSources", "/getSources"
+            )
+            for (p in paths) {
+                try {
+                    val res = app.get(
+                        "$origin$p?id=$id",
+                        headers = mapOf("User-Agent" to ua, "Referer" to embedUrl, "X-Requested-With" to "XMLHttpRequest")
+                    ).text
+                    if (handleSourcesJson(res, embedUrl, tag)) return true
+                } catch (e: Exception) { }
+            }
+            return false
+        }
+
+        // Try MegaCloud/Vidplay extractors with this id, regardless of the embed host
+        suspend fun tryKnownRewrites(embedUrl: String, tag: String): Boolean {
+            val id = idRegex.find(embedUrl)?.groupValues?.get(1) ?: return false
+            for (alt in listOf(
+                "https://megacloud.tv/embed-2/e-1/$id",
+                "https://megacloud.tv/embed-1/e-1/$id",
+                "https://vidplay.site/e/$id"
+            )) {
+                if (extractingLoadExtractor(alt, tag)) return true
+            }
+            return false
+        }
+
         suspend fun resolveEmbed(embedUrl: String, tag: String): Boolean {
             if (embedUrl.contains("echovideo")) {
                 try {
                     val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
                     val domain = originOf(embedUrl)
                     val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
-
                     val echoRes = app.get(
                         "$domain/$embedSegment/getSources?id=$echoId",
                         headers = mapOf("User-Agent" to ua, "Referer" to embedUrl, "X-Requested-With" to "XMLHttpRequest")
                     ).text
-
-                    if (echoRes.trim().startsWith("{")) {
-                        val echoJson = JSONObject(echoRes)
-
-                        val streamUrl = when (val src = echoJson.opt("sources")) {
-                            is String -> src
-                            is JSONArray -> {
-                                var res = ""
-                                for (i in 0 until src.length()) {
-                                    val file = src.optJSONObject(i)?.optString("file") ?: ""
-                                    if (file.isNotBlank()) {
-                                        res = file
-                                        break
-                                    }
-                                }
-                                res
-                            }
-                            else -> ""
-                        }.replace("\\/", "/")
-
-                        if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
-                            if (tryLink(streamUrl, embedUrl, tag, mapOf("Referer" to embedUrl), streamUrl.contains("m3u8", true))) return true
-                        }
-                        parseSubtitles(echoJson)
-                    }
+                    if (handleSourcesJson(echoRes, embedUrl, tag)) return true
                 } catch (e: Exception) { }
             }
 
             if (extractingLoadExtractor(embedUrl, tag)) return true
+            if (probeGetSources(embedUrl, tag)) return true
+            if (tryKnownRewrites(embedUrl, tag)) return true
 
             try {
                 val embedHtml = app.get(
@@ -332,11 +368,14 @@ class AniwavesProvider : MainAPI() {
             val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
             val serverDoc = Jsoup.parse(serverHtml)
 
+            // Collect ids AND their visible labels (Vidplay / BYFMS / DGHG)
             val serverIds = mutableListOf<String>()
-            for (el in serverDoc.select("a, div, li, span")) {
+            val serverLabels = mutableMapOf<String, String>()
+            for (el in serverDoc.select("li, a, div, span")) {
                 val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
                 if (id.isNotBlank() && !serverIds.contains(id)) {
                     serverIds.add(id)
+                    serverLabels[id] = el.text().trim()
                 }
             }
             if (serverIds.isEmpty()) {
@@ -347,7 +386,7 @@ class AniwavesProvider : MainAPI() {
             }
 
             for (id in serverIds) {
-                val tag = "Aniwaves Server ${serverIds.indexOf(id) + 1}"
+                val tag = serverLabels[id]?.takeIf { it.isNotBlank() } ?: "Aniwaves Server ${serverIds.indexOf(id) + 1}"
                 val apiEndpoints = listOf(
                     "$mainUrl/ajax/episode/sources?id=$id",
                     "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0",
@@ -367,20 +406,6 @@ class AniwavesProvider : MainAPI() {
                         if (embedUrl.startsWith("//")) embedUrl = "https:$embedUrl"
                         if (embedUrl.isBlank() || !embedUrl.startsWith("http")) continue
 
-                        if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
-                            val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|[?&]id=)([\w-]+)""").find(embedUrl)
-                            if (extractingLoadExtractor(embedUrl, tag)) serverFound = true
-                            if (!serverFound && embedIdMatch != null) {
-                                for (alt in listOf(
-                                    "https://megacloud.tv/embed-2/e-1/${embedIdMatch.groupValues[1]}",
-                                    "https://vidplay.site/e/${embedIdMatch.groupValues[1]}"
-                                )) {
-                                    if (extractingLoadExtractor(alt, tag)) { serverFound = true; break }
-                                }
-                            }
-                            if (serverFound) { found = true; break }
-                        }
-
                         if (resolveEmbed(embedUrl, tag)) {
                             serverFound = true
                             found = true
@@ -392,7 +417,6 @@ class AniwavesProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // LAST RESORT: only if NOTHING validated, show held-back links so the list is never empty
         if (!found && pendingLinks.isNotEmpty()) {
             for (p in pendingLinks.distinctBy { it.url }) {
                 emitRaw(p)
