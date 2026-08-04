@@ -125,17 +125,18 @@ class Porna91Provider : MainAPI() {
         var found = false
         val mainHtml = app.get(data, headers = headers).text
 
-        fun searchForStream(html: String, referer: String) {
-            Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
-                val url = match.value.replace("&amp;", "&")
-                try {
+        suspend fun searchForStream(html: String, referer: String) {
+            try {
+                Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
+                    val url = match.value.replace("&amp;", "&")
                     callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
                         this.referer = referer
                         this.quality = Qualities.Unknown.value
                     })
                     found = true
-                } catch (_: Exception) {}
-            }
+                }
+            } catch (_: Exception) {}
+            
             val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
                 "config", "playInfo", "playerConfig", "videoInfo")
             for (pName in playerNames) {
