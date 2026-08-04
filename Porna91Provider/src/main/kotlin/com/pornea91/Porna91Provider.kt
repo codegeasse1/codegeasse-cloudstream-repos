@@ -40,7 +40,6 @@ class Porna91Provider : MainAPI() {
         }
     }
 
-    // FIXED: Replaced AcraApplication with CloudStreamApp as requested by the compiler
     private val posterCacheDir: File? by lazy {
         try {
             CloudStreamApp.context?.let { 
@@ -68,15 +67,16 @@ class Porna91Provider : MainAPI() {
         val baseUrl = request.data
         val docUrl = if (page == 1) baseUrl else "$baseUrl&page=$page"
         val document = app.get(docUrl, headers = headers).document
+        val fullHtml = document.html()
         val items = mutableListOf<SearchResponse>()
         for (el in document.select(".video-items .video-item, ul.video-items > li.video-item")) {
-            val res = el.toSearchResult()
+            val res = el.toSearchResult(fullHtml)
             if (res != null) items.add(res)
         }
         return newHomePageResponse(request.name, items)
     }
 
-    private suspend fun Element.toSearchResult(): SearchResponse? {
+    private suspend fun Element.toSearchResult(fullHtml: String): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail], a[href*=/avdetail], a") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
 
@@ -85,9 +85,18 @@ class Porna91Provider : MainAPI() {
             ?: this.selectFirst(".title, .line-clamp-2, .post-item-title, h3, h4")?.text()?.trim()
             ?: return null
 
-        // Raw HTML carries the encrypted image in data-src (site JS later swaps it to a blob:)
-        val rawPoster = img?.attr("data-src")?.ifBlank { img.attr("data-original") }?.ifBlank { img.attr("src") }
-        val poster = getDecryptedPoster(rawPoster)   // computed OUTSIDE the builder lambda
+        var rawPoster = img?.attr("data-src")?.ifBlank { img.attr("data-original") }?.ifBlank { img.attr("src") }
+        
+        // Fallback: extract from eval block in full HTML
+        if (rawPoster.isNullOrBlank() || rawPoster.startsWith("blob:")) {
+            val imgPath = Regex("""upload_\d+/[a-zA-Z]+/\d+/\d+\.jpeg""").find(fullHtml)?.value
+            val authKey = Regex("""\d{10,}-0-0-[a-f0-9]{30,}""").find(fullHtml)?.value
+            if (imgPath != null && authKey != null) {
+                rawPoster = "https://pic.xmbvxj.cn/$imgPath?auth_key=$authKey"
+            }
+        }
+        
+        val poster = getDecryptedPoster(rawPoster)
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = poster
@@ -102,9 +111,10 @@ class Porna91Provider : MainAPI() {
             val docUrl = if (page == 1) "$mainUrl/comic/index/search?keyword=$encodedQuery"
             else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
             val document = app.get(docUrl, headers = headers).document
+            val fullHtml = document.html()
             val items = mutableListOf<SearchResponse>()
             for (el in document.select(".video-items .video-item")) {
-                val res = el.toSearchResult()
+                val res = el.toSearchResult(fullHtml)
                 if (res != null) items.add(res)
             }
             if (items.isEmpty()) break
@@ -116,15 +126,24 @@ class Porna91Provider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         initSession()
         val document = app.get(url, headers = headers).document
+        val fullHtml = document.html()
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: document.selectFirst("h1, h2")?.text()?.trim() ?: "Video"
 
-        // og:image on detail pages is a plain (unencrypted) CDN url
         var rawPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
         if (rawPoster.isNullOrBlank()) {
             val img = document.selectFirst(".poster img, .video-cover img, .video-item img")
             rawPoster = img?.attr("data-src")?.ifBlank { img.attr("src") }
         }
+        
+        if (rawPoster.isNullOrBlank() || rawPoster.startsWith("blob:")) {
+            val imgPath = Regex("""upload_\d+/[a-zA-Z]+/\d+/\d+\.jpeg""").find(fullHtml)?.value
+            val authKey = Regex("""\d{10,}-0-0-[a-f0-9]{30,}""").find(fullHtml)?.value
+            if (imgPath != null && authKey != null) {
+                rawPoster = "https://pic.xmbvxj.cn/$imgPath?auth_key=$authKey"
+            }
+        }
+        
         val poster = getDecryptedPoster(rawPoster)
 
         val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
@@ -137,14 +156,9 @@ class Porna91Provider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // The CDN returns AES-encrypted image bytes.
-    // Flow (mirrors the site's crypto_image.js):
-    //   AES-CBC decrypt -> base64 TEXT of the real jpeg -> base64 decode -> bytes
-    // ------------------------------------------------------------------
     private suspend fun getDecryptedPoster(url: String?): String? {
         if (url.isNullOrBlank()) return null
-        if (!url.contains("pic.xmbvxj.cn")) return fixUrlNull(url)
+        if (!url.contains("pic.xmbvxj.cn") && !url.contains("expose.eisees.com")) return fixUrlNull(url)
 
         try {
             val dir = posterCacheDir ?: return fixUrlNull(url)
@@ -171,7 +185,9 @@ class Porna91Provider : MainAPI() {
             file.writeBytes(imgBytes)
             return file.absolutePath
         } catch (e: Exception) {
-            return fixUrlNull(url)
+            if (url.contains("expose.eisees.com")) return fixUrlNull(url)
+            val fallbackUrl = url.replace("pic.xmbvxj.cn", "expose.eisees.com").replace("auth_key=", "auth=")
+            return fixUrlNull(fallbackUrl)
         }
     }
 
@@ -183,9 +199,33 @@ class Porna91Provider : MainAPI() {
     ): Boolean {
         initSession()
         val html = app.get(data, headers = headers).text
+        
+        // Extract video parameters directly from the eval block in the HTML
+        val imgPath = Regex("""upload_\d+/[a-zA-Z]+/\d+/\d+\.jpeg""").find(html)?.value
+        val uToken = Regex("""\b[a-f0-9]{100,}\b""").find(html)?.value
+        
+        if (imgPath != null && uToken != null) {
+            val t = System.currentTimeMillis() / 1000 / 2100
+            val playUrl = "$mainUrl/index/detail_play?img=%2F${imgPath.replace("/", "%2F")}&ads=https%3A%2F%2Fabdosjhnc.cc&u=$uToken&t=$t"
+            
+            try {
+                val playHtml = app.get(playUrl, headers = headers).text
+                val m3u8 = Regex("""https?://[^\s"'\\]+\.m3u8[^\s"'\\]*""").find(playHtml)?.value
+                if (!m3u8.isNullOrBlank()) {
+                    callback(
+                        newExtractorLink(name, "$name HLS", m3u8, ExtractorLinkType.M3U8) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return true
+                }
+            } catch (_: Exception) { }
+        }
+
+        // Fallback to old logic
         if (extractFromPage(html, callback)) return true
 
-        // Fallback: the embed player page contains the same injected script
         val vidId = data.substringAfter("video_key=").substringBefore("&")
         try {
             val embedHtml = app.get("$mainUrl/comic/index/embed?id=$vidId", headers = headers).text
@@ -195,10 +235,6 @@ class Porna91Provider : MainAPI() {
         return false
     }
 
-    // ------------------------------------------------------------------
-    // The page injects: <script src="/index/detail_play?img=..&u=..&t=...">
-    // That endpoint returns JS whose variable list contains the plain m3u8 URL.
-    // ------------------------------------------------------------------
     private suspend fun extractFromPage(html: String, callback: (ExtractorLink) -> Unit): Boolean {
         val playMatch = Regex("""/index/detail_play\?[^"'\s]+""").find(html)
         if (playMatch != null) {
@@ -221,7 +257,6 @@ class Porna91Provider : MainAPI() {
             } catch (_: Exception) { }
         }
 
-        // Last resort: plain m3u8 anywhere in the page
         val direct = Regex("""https?://[^\s"'\\]+\.m3u8[^\s"'\\]*""").find(html)?.value
         if (!direct.isNullOrBlank()) {
             callback(
