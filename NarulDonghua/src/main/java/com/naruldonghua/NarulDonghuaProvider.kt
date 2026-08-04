@@ -120,14 +120,14 @@ class NarulDonghuaProvider : MainAPI() {
         var found = false
         val document = app.get(data).document
 
-        // Unescape HTML entities and JS-escaped slashes commonly found in the decoded base64 payloads
         fun String.unescape(): String = this
             .replace("&quot;", "\"").replace("&#039;", "'").replace("&#39;", "'")
             .replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">")
             .replace("\\/", "/").replace("&amp;", "&")
 
-        // Helper to add a direct media link
-        fun addDirect(url: String, tag: String, referer: String): Boolean {
+        // FIXED: Made addDirect a `suspend` function to match the newer CloudStream API 
+        // where newExtractorLink / callback interactions are strictly suspend-scoped.
+        suspend fun addDirect(url: String, tag: String, referer: String): Boolean {
             val clean = url.unescape().trim()
             val finalUrl = when {
                 clean.startsWith("//") -> "https:$clean"
@@ -150,7 +150,6 @@ class NarulDonghuaProvider : MainAPI() {
             return true
         }
 
-        // Self-contained Dailymotion resolver (bypasses missing built-in extractors)
         suspend fun resolveDailymotion(src: String): Boolean {
             val idRegex = Regex("""(?:/embed/video/|/video/|video=|/embed/)([a-zA-Z0-9]+)""")
             var id = idRegex.find(src)?.groupValues?.get(1)
@@ -167,7 +166,10 @@ class NarulDonghuaProvider : MainAPI() {
                     "https://www.dailymotion.com/player/metadata/video/$id?embed=false",
                     headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                 ).text
-                Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").findAll(meta).forEach { m ->
+                
+                // FIXED: Replaced .forEach with a standard `for` loop so we can safely 
+                // call the `suspend` function `addDirect` inside the iteration!
+                for (m in Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").findAll(meta)) {
                     val u = m.groupValues[1]
                     if (u.contains("m3u8") || u.contains(".mp4")) {
                         if (addDirect(u, "Dailymotion", "https://www.dailymotion.com/")) ok = true
@@ -175,7 +177,6 @@ class NarulDonghuaProvider : MainAPI() {
                 }
             } catch (_: Exception) { }
 
-            // Fallback to built-in extractor if metadata API failed
             if (!ok) {
                 try {
                     ok = loadExtractor("https://www.dailymotion.com/video/$id", data, subtitleCallback, callback)
@@ -184,7 +185,6 @@ class NarulDonghuaProvider : MainAPI() {
             return ok
         }
 
-        // Self-contained Rumble resolver (scrapes hls-vod/cdn.rumble.cloud)
         suspend fun resolveRumble(src: String): Boolean {
             var ok = false
             try { ok = loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) { }
@@ -206,22 +206,18 @@ class NarulDonghuaProvider : MainAPI() {
             val src = rawSrc.unescape().trim().removeSurrounding("\"").removeSurrounding("'")
             if (src.isBlank() || src == "about:blank" || src.startsWith("javascript")) return false
 
-            // 1) Already a direct media file
             if (src.contains(".m3u8") || src.contains(".mp4")) {
                 return addDirect(src, "Direct", data)
             }
 
-            // 2) Dailymotion
             if (src.contains("dailymotion") || src.contains("dai.ly")) {
                 return resolveDailymotion(src)
             }
 
-            // 3) Rumble
             if (src.contains("rumble.com")) {
                 return resolveRumble(src)
             }
 
-            // 4) narulplex.p2pstream.vip custom player
             if (src.contains("narulplex.p2pstream.vip")) {
                 val id = Regex("""[?&]id=([\w-]+)""").find(src)?.groupValues?.get(1)
                     ?: Regex("""/e/([\w-]+)""").find(src)?.groupValues?.get(1)
@@ -248,7 +244,6 @@ class NarulDonghuaProvider : MainAPI() {
                 return false
             }
 
-            // 5) Generic fallback
             var linkFound = false
             try { linkFound = loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) { }
             if (!linkFound) {
@@ -265,7 +260,6 @@ class NarulDonghuaProvider : MainAPI() {
             return linkFound
         }
 
-        // FIX: Replaced .forEach { } with standard for loops to safely call suspend functions inside the coroutine
         val iframes = document.select(".player-embed iframe, iframe[src]")
         for (iframe in iframes) {
             val src = fixUrl(iframe.attr("src").ifBlank { iframe.attr("data-litespeed-src") })
@@ -277,10 +271,8 @@ class NarulDonghuaProvider : MainAPI() {
         val options = document.select("select.mirror option")
         for (option in options) {
             val base64Val = option.attr("value").trim()
-            // Only decode strings that look like valid base64 (length > 20)
             if (base64Val.length > 20) {
                 try {
-                    // MIME decoder tolerates line breaks / stray chars
                     val decodedHtml = String(Base64.getMimeDecoder().decode(base64Val)).unescape()
 
                     val iframeSrc = Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
