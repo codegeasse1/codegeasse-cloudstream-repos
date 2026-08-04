@@ -125,7 +125,7 @@ class Porna91Provider : MainAPI() {
         var found = false
         val mainHtml = app.get(data, headers = headers).text
 
-        fun searchForStream(html: String, referer: String) {
+        suspend fun searchForStream(html: String, referer: String) {
             Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
                 val url = match.value.replace("&amp;", "&")
                 callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
