@@ -24,9 +24,6 @@ class ReAnimeProvider : MainAPI() {
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         private const val FLIX = "https://flixcloud.cc"
-        private const val FLIX_FETCH = "https://fetch.flixcloud.cc"
-
-        /** set to true to surface diagnostic entries in the source list */
         private const val DEBUG = false
 
         private val UUID_REGEX =
@@ -46,6 +43,9 @@ class ReAnimeProvider : MainAPI() {
 
         private val EMBED_ID_REGEX =
             Regex("""flixcloud\.cc/(?:embed|e|v|watch|player)/([A-Za-z0-9_-]{8,})""")
+            
+        private val FETCH_HOST_REGEX =
+            Regex("""https?://fetch\d*\.flixcloud\.cc""")
 
         private val KNOWN_HOSTS = listOf(
             "vidhide", "streamwish", "filemoon", "dood", "voe",
@@ -53,7 +53,6 @@ class ReAnimeProvider : MainAPI() {
         )
     }
 
-    /** unescape the various json/js escapings the site uses */
     private fun String.unesc(): String = this
         .replace("\\/", "/")
         .replace("\\u002F", "/")
@@ -61,7 +60,6 @@ class ReAnimeProvider : MainAPI() {
         .replace("\\u0026", "&")
         .replace("&amp;", "&")
 
-    // Fixed AES decryption helper using proper Base64 decoding for IV
     private fun decryptFlixCloudResponse(encryptedBase64: String, keyBase64: String, ivBase64: String): String {
         val encrypted = Base64.decode(encryptedBase64, Base64.DEFAULT)
         val key = Base64.decode(keyBase64, Base64.DEFAULT)
@@ -73,10 +71,6 @@ class ReAnimeProvider : MainAPI() {
         val decrypted = cipher.doFinal(encrypted)
         return String(decrypted, Charsets.UTF_8)
     }
-
-    // ---------------------------------------------------------------------
-    //  MAIN PAGE / SEARCH / LOAD  (unchanged logic, kept intact)
-    // ---------------------------------------------------------------------
 
     private fun extractSectionArray(html: String, key: String): List<SearchResponse> {
         val match = Regex("""["']?$key["']?\s*:\s*\[""").find(html) ?: return emptyList()
@@ -227,7 +221,6 @@ class ReAnimeProvider : MainAPI() {
                 val epTitle = epObj.optString("title", "").ifBlank { "Episode $epNum" }
                 val thumbnail = epObj.optString("thumbnail", "")
 
-                // stash the flixcloud id if the episode list already exposes it
                 val inlineId = UUID_REGEX.find(epObj.toString())?.value ?: ""
 
                 episodes.add(
@@ -265,10 +258,6 @@ class ReAnimeProvider : MainAPI() {
             addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.episode })
         }
     }
-
-    // ---------------------------------------------------------------------
-    //  LINK RESOLUTION
-    // ---------------------------------------------------------------------
 
     private suspend fun emit(
         callback: (ExtractorLink) -> Unit,
@@ -344,7 +333,6 @@ class ReAnimeProvider : MainAPI() {
         val videoIds  = linkedSetOf<String>()
         if (presetVid.isNotBlank()) videoIds.add(presetVid)
 
-        // -- helper: push a playable url -----------------------------------
         suspend fun pushStream(rawUrl: String, label: String, fromFlix: Boolean): Boolean {
             val url = rawUrl.unesc().trim().trimEnd(',', ';', ')')
             if (url.isBlank() || url.startsWith("blob:")) return false
@@ -361,14 +349,13 @@ class ReAnimeProvider : MainAPI() {
             return true
         }
 
-        // -- helper: pull subtitles, ignoring the artplayer metadata track --
         fun pushSubs(text: String) {
-            SUB_REGEX.findAll(text).forEach { m ->
+            for (m in SUB_REGEX.findAll(text)) {
                 val u = m.value.unesc()
                 val low = u.lowercase()
                 if (low.contains("thumbnail") || low.contains("storyboard") ||
-                    low.contains("sprite") || low.contains("preview")) return@forEach
-                if (!seenSubs.add(u)) return@forEach
+                    low.contains("sprite") || low.contains("preview")) continue
+                if (!seenSubs.add(u)) continue
                 val langName = when {
                     low.contains("eng") -> "English"
                     low.contains("spa") -> "Spanish"
@@ -378,13 +365,10 @@ class ReAnimeProvider : MainAPI() {
                     low.contains("ger") || low.contains("deu") -> "German"
                     else -> "Subtitle"
                 }
-                subtitleCallback(SubtitleFile(langName, u))
+                subtitleCallback(newSubtitleFile(langName, u))
             }
         }
 
-        // ==================================================================
-        // STEP 1 — gather pages that may contain the flixcloud video id
-        // ==================================================================
         val pages = mutableListOf<String>()
 
         runCatching { pages += app.get(cleanData, headers = siteHeaders).text }
@@ -417,39 +401,34 @@ class ReAnimeProvider : MainAPI() {
             ).text
         }
 
-        // ==================================================================
-        // STEP 2 — scan them
-        // ==================================================================
         for (raw in pages) {
             val page = raw.unesc()
 
-            // already-signed flixcloud playlist sitting in the payload
-            M3U8_REGEX.findAll(page).forEach { m ->
+            for (m in M3U8_REGEX.findAll(page)) {
                 val u = m.value
                 val flix = u.contains("flixcloud", true)
                 if (pushStream(u, if (flix) "FlixCloud" else "Direct", flix)) found = true
             }
 
-            // plain mp4 fallbacks
-            MP4_REGEX.findAll(page).forEach { m ->
+            for (m in MP4_REGEX.findAll(page)) {
                 val u = m.value
-                if (u.contains("/ads", true)) return@forEach
+                if (u.contains("/ads", true)) continue
                 val flix = u.contains("flixcloud", true)
                 if (pushStream(u, if (flix) "FlixCloud MP4" else "Direct MP4", flix)) found = true
             }
 
             pushSubs(page)
 
-            // remember every candidate id
-            EMBED_ID_REGEX.findAll(page).forEach { videoIds += it.groupValues[1] }
+            for (m in EMBED_ID_REGEX.findAll(page)) { videoIds += m.groupValues[1] }
             if (page.contains("flixcloud", true) || page.contains("\"video_id\"")) {
-                UUID_REGEX.findAll(page).forEach { videoIds += it.value }
+                for (m in UUID_REGEX.findAll(page)) { videoIds += m.value }
             }
-            Regex(""""(?:video_id|videoId|file_id|hash|uid)"\s*:\s*"([A-Za-z0-9-]{8,})"""")
-                .findAll(page).forEach { videoIds += it.groupValues[1] }
+            
+            val idRegex = Regex(""""(?:video_id|videoId|file_id|hash|uid)"\s*:\s*"([A-Za-z0-9-]{8,})"""")
+            for (m in idRegex.findAll(page)) { videoIds += m.groupValues[1] }
 
-            // third-party mirrors
-            Regex("""https?://[^\s"'<>\\]+""").findAll(page).forEach { m ->
+            val urlRegex = Regex("""https?://[^\s"'<>\\]+""")
+            for (m in urlRegex.findAll(page)) {
                 val u = m.value
                 if (KNOWN_HOSTS.any { u.contains(it, true) } && seenLinks.add(u)) {
                     runCatching {
@@ -467,14 +446,10 @@ class ReAnimeProvider : MainAPI() {
         }
         debugNote(callback, "ids=${videoIds.joinToString(",").take(60)}")
 
-        // ==================================================================
-        // STEP 3 — AES Decryption & Token Scrape
-        // ==================================================================
         for (id in videoIds) {
             val embedUrl = "$FLIX/embed/$id"
             val html = runCatching { app.get(embedUrl, headers = flixHeaders).text }.getOrNull() ?: continue
             
-            // --> INJECTED AES DECRYPTION LOGIC <--
             val keyB64 = Regex("""["']kf_\w+["']\s*:\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
             val ivB64 = Regex("""["']ivf_\w+["']\s*:\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
 
@@ -486,7 +461,7 @@ class ReAnimeProvider : MainAPI() {
                     val json = JSONObject(encryptedRes)
                     var encryptedData = ""
                     
-                    json.keys().forEach { k ->
+                    for (k in json.keys()) {
                         val v = json.optString(k)
                         if (v.length > encryptedData.length) {
                             encryptedData = v
@@ -515,7 +490,7 @@ class ReAnimeProvider : MainAPI() {
                                     val subUrl = track.optString("file", "")
                                     val label = track.optString("label", "Unknown")
                                     if (subUrl.isNotBlank()) {
-                                        subtitleCallback(SubtitleFile(label, subUrl))
+                                        subtitleCallback(newSubtitleFile(label, subUrl))
                                     }
                                 }
                             }
@@ -524,43 +499,58 @@ class ReAnimeProvider : MainAPI() {
                 }
             }
 
-            // --> YOUR OLD JWT/FALLBACK SCANNERS <--
             val page = html.unesc()
 
-            // a) a complete signed url is in the response
-            M3U8_REGEX.findAll(page).forEach { m ->
+            for (m in M3U8_REGEX.findAll(page)) {
                 if (pushStream(m.value, "FlixCloud", true)) found = true
             }
 
-            // b) only the JWT is present -> assemble the url ourselves
+            // FIXED: Extract the dynamic fetchX host and push master, video, and audio endpoints
             if (!found) {
                 JWT_REGEX.find(page)?.value?.let { token ->
-                    val master = "$FLIX_FETCH/_v7/$id/master.m3u8?token=$token"
-                    if (pushStream(master, "FlixCloud", true)) found = true
+                    val fetchHost = FETCH_HOST_REGEX.find(page)?.value ?: "https://fetch7.flixcloud.cc"
+                    
+                    // Construct all 3 endpoints seen in the network tab
+                    val master = "$fetchHost/_v7/$id/master.m3u8?token=$token"
+                    val video = "$fetchHost/_v7/$id/video.m3u8?token=$token"
+                    val audio = "$fetchHost/_v7/$id/audio/audio.m3u8?token=$token"
+                    
+                    // ExoPlayer prefers master.m3u8 because it contains the muxed/adaptive manifest
+                    if (pushStream(master, "FlixCloud Master", true)) found = true
+                    if (!found && pushStream(video, "FlixCloud Video", true)) found = true
+                    if (!found && pushStream(audio, "FlixCloud Audio", true)) found = true
                 }
             }
 
             pushSubs(page)
 
-            // c) the embed page may point at yet another script holding the token
             if (!found) {
-                Regex("""<script[^>]+src=["']([^"']+)["']""").findAll(page)
-                    .map { it.groupValues[1] }
-                    .filter { it.contains("player") || it.contains("main") || it.contains("chunk") }
-                    .take(3)
-                    .forEach { s ->
-                        val js = runCatching {
-                            app.get(
-                                if (s.startsWith("http")) s else "$FLIX${if (s.startsWith("/")) "" else "/"}$s",
-                                headers = flixHeaders
-                            ).text
-                        }.getOrNull()?.unesc() ?: return@forEach
+                val scriptRegex = Regex("""<script[^>]+src=["']([^"']+)["']""")
+                val scripts = scriptRegex.findAll(page).map { it.groupValues[1] }
+                    .filter { it.contains("player") || it.contains("main") || it.contains("chunk") || it.contains("_v7") || it.contains("token") }
+                    .take(3).toList()
+                    
+                for (s in scripts) {
+                    val js = runCatching {
+                        app.get(
+                            if (s.startsWith("http")) s else "$FLIX${if (s.startsWith("/")) "" else "/"}$s",
+                            headers = flixHeaders
+                        ).text
+                    }.getOrNull()?.unesc() ?: continue
 
-                        JWT_REGEX.find(js)?.value?.let { token ->
-                            val master = "$FLIX_FETCH/_v7/$id/master.m3u8?token=$token"
-                            if (pushStream(master, "FlixCloud", true)) found = true
-                        }
+                    JWT_REGEX.find(js)?.value?.let { token ->
+                        val fetchHost = FETCH_HOST_REGEX.find(js)?.value ?: "https://fetch7.flixcloud.cc"
+                        
+                        val master = "$fetchHost/_v7/$id/master.m3u8?token=$token"
+                        val video = "$fetchHost/_v7/$id/video.m3u8?token=$token"
+                        val audio = "$fetchHost/_v7/$id/audio/audio.m3u8?token=$token"
+                        
+                        if (pushStream(master, "FlixCloud Master", true)) found = true
+                        if (!found && pushStream(video, "FlixCloud Video", true)) found = true
+                        if (!found && pushStream(audio, "FlixCloud Audio", true)) found = true
                     }
+                    if (found) break
+                }
             }
 
             if (found) break
