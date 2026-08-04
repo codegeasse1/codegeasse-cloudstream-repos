@@ -105,9 +105,9 @@ class AniwavesProvider : MainAPI() {
             val cleanEpHtml = if (epHtml.trim().startsWith("{")) JSONObject(epHtml).optString("result", epHtml) else epHtml
             val epDoc = Jsoup.parse(cleanEpHtml)
 
-            epDoc.select("a").forEach { el ->
+            for (el in epDoc.select("a")) {
                 val rawNum = el.attr("data-num").ifBlank { el.attr("data-ep") }.ifBlank { el.text() }
-                val epNum = Regex("""\d+""").find(rawNum)?.value?.toIntOrNull() ?: return@forEach
+                val epNum = Regex("""\d+""").find(rawNum)?.value?.toIntOrNull() ?: continue
 
                 var epName = el.attr("title").ifBlank { el.text() }.trim()
                 if (epName.isBlank() || epName.matches(Regex("""^\d+$"""))) {
@@ -150,7 +150,7 @@ class AniwavesProvider : MainAPI() {
             url.contains("placeholder") || url.contains("/ads/") || url.contains("static.") ||
             url.contains("trailer") || url.contains("poster") || url.contains("preview")
 
-        // Last-resort emitter (old behaviour): guarantees a link is always shown
+        // Last-resort emitter: guarantees a link is always shown to the user
         fun addUnvalidated(url: String, referer: String, tag: String): Boolean {
             val isHls = url.contains("m3u8", true)
             callback(
@@ -168,7 +168,6 @@ class AniwavesProvider : MainAPI() {
             return true
         }
 
-        // Preferred emitter: verify the stream actually answers first
         suspend fun addValidatedM3u8(url: String, referer: String, tag: String): Boolean {
             return try {
                 val res = app.get(url, headers = mapOf("Referer" to referer, "User-Agent" to ua))
@@ -218,7 +217,6 @@ class AniwavesProvider : MainAPI() {
         }
 
         suspend fun resolveEmbed(embedUrl: String, tag: String): Boolean {
-            // ---------- EchoVideo custom API ----------
             if (embedUrl.contains("echovideo")) {
                 try {
                     val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
@@ -235,9 +233,17 @@ class AniwavesProvider : MainAPI() {
 
                         val streamUrl = when (val src = echoJson.opt("sources")) {
                             is String -> src
-                            is JSONArray -> (0 until src.length()).mapNotNull { i ->
-                                src.optJSONObject(i)?.optString("file")?.takeIf { it.isNotBlank() }
-                            }.firstOrNull() ?: ""
+                            is JSONArray -> {
+                                var res = ""
+                                for (i in 0 until src.length()) {
+                                    val file = src.optJSONObject(i)?.optString("file") ?: ""
+                                    if (file.isNotBlank()) {
+                                        res = file
+                                        break
+                                    }
+                                }
+                                res
+                            }
                             else -> ""
                         }.replace("\\/", "/")
 
@@ -247,7 +253,6 @@ class AniwavesProvider : MainAPI() {
                             } else {
                                 if (addValidatedMp4(streamUrl, embedUrl, tag)) return true
                             }
-                            // old behaviour fallback: emit anyway so the picker is never empty
                             return addUnvalidated(streamUrl, embedUrl, tag)
                         }
                         parseSubtitles(echoJson)
@@ -255,12 +260,10 @@ class AniwavesProvider : MainAPI() {
                 } catch (e: Exception) { }
             }
 
-            // ---------- installed CloudStream extractors ----------
             try {
                 if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true
             } catch (e: Exception) { }
 
-            // ---------- deep scan ----------
             try {
                 val embedHtml = app.get(
                     embedUrl,
@@ -268,19 +271,26 @@ class AniwavesProvider : MainAPI() {
                 ).text.replace("\\/", "/")
 
                 val candidates = mutableListOf<String>()
-                mediaUrlRegex.findAll(embedHtml).forEach { m -> candidates.add(m.value) }
+                // Use standard for loop to safely allow adding to the list inside the suspend context
+                for (m in mediaUrlRegex.findAll(embedHtml)) {
+                    candidates.add(m.value)
+                }
 
                 if (embedHtml.contains("eval(function(p,a,c,k,e,d)")) {
                     try {
                         val unpacked = getAndUnpack(embedHtml)
-                        mediaUrlRegex.findAll(unpacked).forEach { m -> candidates.add(m.value) }
+                        for (m in mediaUrlRegex.findAll(unpacked)) {
+                            candidates.add(m.value)
+                        }
                     } catch (e: Exception) { }
                 }
 
                 for (b64 in Regex("""["']([A-Za-z0-9+/=]{60,})["']""").findAll(embedHtml)) {
                     try {
                         val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
-                        mediaUrlRegex.findAll(decoded).forEach { m -> candidates.add(m.value) }
+                        for (m in mediaUrlRegex.findAll(decoded)) {
+                            candidates.add(m.value)
+                        }
                     } catch (e: Exception) { }
                 }
 
@@ -295,12 +305,10 @@ class AniwavesProvider : MainAPI() {
                     }
                 }
 
-                // LAST RESORT: emit first candidate unvalidated (never show "No Links Found")
                 if (fallback != null) {
                     return addUnvalidated(fallback, embedUrl, tag)
                 }
 
-                // iframe hop
                 val iframeSrc = Jsoup.parse(embedHtml).selectFirst("iframe")?.attr("src") ?: ""
                 if (iframeSrc.isNotBlank()) {
                     val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
@@ -323,16 +331,15 @@ class AniwavesProvider : MainAPI() {
             val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
             val serverDoc = Jsoup.parse(serverHtml)
 
-            // RESTORED old (working) ID collection logic
             val serverIds = mutableListOf<String>()
-            serverDoc.select("a, div, li, span").forEach { el ->
+            for (el in serverDoc.select("a, div, li, span")) {
                 val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
                 if (id.isNotBlank() && !serverIds.contains(id)) {
                     serverIds.add(id)
                 }
             }
             if (serverIds.isEmpty()) {
-                Regex("""data-(?:link-)?id=["']([^"'>\s]+)["']""").findAll(serverHtml).forEach { m ->
+                for (m in Regex("""data-(?:link-)?id=["']([^"'>\s]+)["']""").findAll(serverHtml)) {
                     val v = m.groupValues[1].trim()
                     if (v.isNotBlank() && !serverIds.contains(v)) serverIds.add(v)
                 }
@@ -359,7 +366,6 @@ class AniwavesProvider : MainAPI() {
                         if (embedUrl.startsWith("//")) embedUrl = "https:$embedUrl"
                         if (embedUrl.isBlank() || !embedUrl.startsWith("http")) continue
 
-                        // Vidplay / MegaCloud family (fixed regex, no more crash)
                         if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
                             val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|[?&]id=)([\w-]+)""").find(embedUrl)
                             try { if (loadExtractor(embedUrl, data, subtitleCallback, callback)) serverFound = true } catch (e: Exception) { }
