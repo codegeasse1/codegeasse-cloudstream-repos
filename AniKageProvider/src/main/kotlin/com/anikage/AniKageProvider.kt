@@ -256,12 +256,12 @@ class AniKageProvider : MainAPI() {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // ONLY CHANGE: Vidtube first, then MegaPlay, then everything else
+        // Sort so Vidtube is queried first, Megaplay last
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
-                provider == "megatube" || provider == "megaplay" -> 1
-                else -> 2
+                provider == "megatube" || provider == "megaplay" -> 2
+                else -> 1
             }
         }
 
