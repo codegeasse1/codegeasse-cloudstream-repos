@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.json.JSONArray
 import org.json.JSONObject
 
 class AniwavesProvider : MainAPI() {
@@ -21,8 +22,10 @@ class AniwavesProvider : MainAPI() {
         "$mainUrl/completed" to "Completed",
     )
 
+    private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
     private val headers = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent" to ua,
         "Referer" to "$mainUrl/",
         "Origin" to mainUrl,
         "X-Requested-With" to "XMLHttpRequest"
@@ -42,7 +45,7 @@ class AniwavesProvider : MainAPI() {
 
         val gridElements = document.select(".ani.items .item, .top-table .item")
         val standardItems = gridElements.mapNotNull { parseStandardItem(it) }
-        
+
         if (standardItems.isNotEmpty()) {
             homeItems.add(HomePageList(request.name, standardItems))
         }
@@ -69,7 +72,7 @@ class AniwavesProvider : MainAPI() {
         if (poster.isBlank() || poster.contains("data:image")) {
             poster = element.selectFirst("img")?.attr("data-src") ?: ""
         }
-        
+
         val subEps = element.selectFirst(".ep-status.sub span")?.text()?.trim()?.toIntOrNull()
         val dubEps = element.selectFirst(".ep-status.dub span")?.text()?.trim()?.toIntOrNull()
 
@@ -93,7 +96,7 @@ class AniwavesProvider : MainAPI() {
         val title = document.selectFirst("h1")?.text()?.trim() ?: "Unknown"
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
         val plot = document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
-        
+
         val animeId = url.substringAfterLast("-")
         val episodes = mutableListOf<Episode>()
 
@@ -101,16 +104,16 @@ class AniwavesProvider : MainAPI() {
             val epHtml = app.get("$mainUrl/ajax/episode/list/$animeId?vrf=", headers = headers).text
             val cleanEpHtml = if (epHtml.trim().startsWith("{")) JSONObject(epHtml).optString("result", epHtml) else epHtml
             val epDoc = Jsoup.parse(cleanEpHtml)
-            
+
             epDoc.select("a").forEach { el ->
                 val rawNum = el.attr("data-num").ifBlank { el.attr("data-ep") }.ifBlank { el.text() }
                 val epNum = Regex("""\d+""").find(rawNum)?.value?.toIntOrNull() ?: return@forEach
-                
+
                 var epName = el.attr("title").ifBlank { el.text() }.trim()
                 if (epName.isBlank() || epName.matches(Regex("""^\d+$"""))) {
                     epName = "Episode $epNum"
                 }
-                
+
                 episodes.add(
                     newEpisode("$mainUrl/watch?animeId=$animeId&epNum=$epNum") {
                         this.name = epName
@@ -139,211 +142,223 @@ class AniwavesProvider : MainAPI() {
         val animeId = Regex("""animeId=([^&]+)""").find(data)?.groupValues?.get(1) ?: return false
         val epNum = Regex("""epNum=([^&]+)""").find(data)?.groupValues?.get(1) ?: "1"
 
+        fun originOf(url: String): String = Regex("""https?://[^/]+""").find(url)?.value ?: mainUrl
+
+        val mediaUrlRegex = Regex("""https?://[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:[^\s"'<>\\]*)?""")
+
+        fun isJunk(url: String): Boolean =
+            url.contains("placeholder") || url.contains("/ads/") || url.contains("static.") ||
+            url.contains("trailer") || url.contains("poster") || url.contains("preview")
+
+        // ------------------------------------------------------------
+        // VALIDATION: only hand URLs to the player after a real request
+        // succeeds. This is what fixes ERROR_CODE_IO_NETWORK_CONNECTION_FAILED.
+        // ------------------------------------------------------------
+        suspend fun addValidatedM3u8(url: String, referer: String, tag: String): Boolean {
+            return try {
+                val res = app.get(url, headers = mapOf("Referer" to referer, "Origin" to originOf(referer), "User-Agent" to ua))
+                val good = res.text.startsWith("#EXTM3U") || url.contains(".m3u8", true)
+                if (good) {
+                    callback(
+                        newExtractorLink(source = name, name = tag, url = url, type = ExtractorLinkType.M3U8) {
+                            this.quality = Qualities.Unknown.value
+                            this.referer = referer
+                            this.headers = mapOf("Referer" to referer, "Origin" to originOf(referer), "User-Agent" to ua)
+                        }
+                    )
+                }
+                good
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        suspend fun addValidatedMp4(url: String, referer: String, tag: String): Boolean {
+            return try {
+                val head = app.head(url, headers = mapOf("Referer" to referer, "User-Agent" to ua))
+                if (head.isSuccessful) {
+                    callback(
+                        newExtractorLink(source = name, name = tag, url = url, type = ExtractorLinkType.VIDEO) {
+                            this.quality = Qualities.Unknown.value
+                            this.referer = referer
+                            this.headers = mapOf("Referer" to referer, "Origin" to originOf(referer), "User-Agent" to ua)
+                        }
+                    )
+                }
+                head.isSuccessful
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        suspend fun parseSubtitles(json: JSONObject) {
+            val tracks = json.optJSONArray("tracks") ?: json.optJSONArray("subtitles") ?: return
+            for (i in 0 until tracks.length()) {
+                val t = tracks.optJSONObject(i) ?: continue
+                val file = t.optString("file", "").replace("\\/", "/")
+                if (file.isNotBlank()) {
+                    subtitleCallback(newSubtitleFile(t.optString("label", "English"), file))
+                }
+            }
+        }
+
+        suspend fun resolveEmbed(embedUrl: String, tag: String): Boolean {
+            // ---------- EchoVideo (custom API, with validation + subs) ----------
+            if (embedUrl.contains("echovideo")) {
+                try {
+                    val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
+                    val domain = originOf(embedUrl)
+                    val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
+
+                    val echoRes = app.get(
+                        "$domain/$embedSegment/getSources?id=$echoId",
+                        headers = mapOf("User-Agent" to ua, "Referer" to embedUrl, "X-Requested-With" to "XMLHttpRequest")
+                    ).text
+
+                    if (echoRes.trim().startsWith("{")) {
+                        val echoJson = JSONObject(echoRes)
+
+                        val streamUrl = when (val src = echoJson.opt("sources")) {
+                            is String -> src
+                            is JSONArray -> (0 until src.length()).mapNotNull { i ->
+                                src.optJSONObject(i)?.optString("file")?.takeIf { it.isNotBlank() }
+                            }.firstOrNull() ?: ""
+                            else -> ""
+                        }.replace("\\/", "/")
+
+                        if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
+                            if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4")) {
+                                if (streamUrl.contains(".m3u8")) {
+                                    if (addValidatedM3u8(streamUrl, embedUrl, tag)) return true
+                                } else {
+                                    if (addValidatedMp4(streamUrl, embedUrl, tag)) return true
+                                }
+                            }
+                        }
+                        parseSubtitles(echoJson)
+                    }
+                } catch (e: Exception) { }
+            }
+
+            // ---------- Let CloudStream / installed extractor repos try ----------
+            try {
+                if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true
+            } catch (e: Exception) { }
+
+            // ---------- Deep scan of the embed page ----------
+            try {
+                val embedHtml = app.get(
+                    embedUrl,
+                    headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to ua)
+                ).text.replace("\\/", "/")
+
+                val candidates = mutableListOf<String>()
+                mediaUrlRegex.findAll(embedHtml).forEach { m -> candidates.add(m.value) }
+
+                if (embedHtml.contains("eval(function(p,a,c,k,e,d)")) {
+                    try {
+                        val unpacked = getAndUnpack(embedHtml)
+                        mediaUrlRegex.findAll(unpacked).forEach { m -> candidates.add(m.value) }
+                    } catch (e: Exception) { }
+                }
+
+                // base64 blobs
+                for (b64 in Regex("""["']([A-Za-z0-9+/=]{60,})["']""").findAll(embedHtml)) {
+                    try {
+                        val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
+                        mediaUrlRegex.findAll(decoded).forEach { m -> candidates.add(m.value) }
+                    } catch (e: Exception) { }
+                }
+
+                for (c in candidates.distinct()) {
+                    if (isJunk(c)) continue
+                    if (c.contains(".m3u8")) {
+                        if (addValidatedM3u8(c, embedUrl, tag)) return true
+                    } else {
+                        if (addValidatedMp4(c, embedUrl, tag)) return true
+                    }
+                }
+
+                // iframe hop
+                val iframeSrc = Jsoup.parse(embedHtml).selectFirst("iframe")?.attr("src") ?: ""
+                if (iframeSrc.isNotBlank()) {
+                    val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+                    if (cleanIframe != embedUrl) {
+                        try {
+                            if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) return true
+                        } catch (e: Exception) { }
+                    }
+                }
+            } catch (e: Exception) { }
+
+            return false
+        }
+
         try {
             val serverUrl = "$mainUrl/ajax/server/list?servers=$animeId&eps=$epNum"
             val serverRes = app.get(serverUrl, headers = headers).text
-            
+
             val serverJson = try { JSONObject(serverRes) } catch (e: Exception) { null }
             val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
             val serverDoc = Jsoup.parse(serverHtml)
 
-            val serverIds = mutableSetOf<String>()
-            serverDoc.select("a, div, li, span").forEach { el ->
-                val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
-                if (id.isNotBlank() && id.length > 3) {
+            val serverIds = mutableListOf<String>()
+            serverDoc.select("li, a, div, span").forEach { el ->
+                val id = el.attr("data-id").ifBlank { el.attr("data-link") }.ifBlank { el.attr("data-server") }
+                if (id.isNotBlank() && id.matches(Regex("""^\w+$""")) && !serverIds.contains(id)) {
                     serverIds.add(id)
                 }
             }
-            
             if (serverIds.isEmpty()) {
-                Regex("""data-(?:link-)?id=["']([^"']+)["']""").findAll(serverHtml).forEach { m ->
-                    serverIds.add(m.groupValues[1])
+                Regex("""data-(?:link-)?id="([^"']+)" """).findAll(serverHtml).forEach { m ->
+                    val v = m.groupValues[1].trim()
+                    if (v.isNotBlank() && !serverIds.contains(v)) serverIds.add(v)
                 }
             }
 
-            val videoHeaders = mapOf(
-                "Referer" to "$mainUrl/",
-                "User-Agent" to headers["User-Agent"]!!
-            )
-
             for (id in serverIds) {
+                val tag = "Aniwaves Server ${serverIds.indexOf(id) + 1}"
                 val apiEndpoints = listOf(
+                    "$mainUrl/ajax/episode/sources?id=$id",
                     "$mainUrl/ajax/sources?id=$id&asi=0&autoPlay=0",
-                    "$mainUrl/ajax/server?get=$id",
-                    "$mainUrl/ajax/episode/sources?id=$id"
+                    "$mainUrl/ajax/server?get=$id"
                 )
-                
+
                 var serverFound = false
                 for (apiUrl in apiEndpoints) {
+                    if (serverFound) break
                     try {
                         val sourceRes = app.get(apiUrl, headers = headers).text
                         if (!sourceRes.trim().startsWith("{")) continue
-                        
+
                         val json = JSONObject(sourceRes)
                         val result = json.optJSONObject("result") ?: json
-                        var embedUrl = result.optString("url").ifBlank { result.optString("link") }
-                        
-                        if (embedUrl.isNotBlank()) {
-                            embedUrl = embedUrl.replace("\\/", "/")
-                            if (embedUrl.startsWith("/")) embedUrl = "https:$embedUrl"
+                        var embedUrl = result.optString("url").ifBlank { result.optString("link") }.replace("\\/", "/")
+                        if (embedUrl.startsWith("//")) embedUrl = "https:$embedUrl"
+                        if (embedUrl.isBlank() || !embedUrl.startsWith("http")) continue
 
-                            if (embedUrl.contains("echovideo.ru")) {
-                                val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
-                                val domain = Regex("""https?://([^/]+)""").find(embedUrl)?.groupValues?.get(0) ?: "https://play.echovideo.ru"
-                                val embedSegment = Regex("""/(embed-\d+)/""").find(embedUrl)?.groupValues?.get(1) ?: "embed-1"
-                                val echoApiUrl = "$domain/$embedSegment/getSources?id=$echoId"
-                                
-                                val echoRes = app.get(
-                                    echoApiUrl,
-                                    headers = mapOf(
-                                        "User-Agent" to headers["User-Agent"]!!,
-                                        "Referer" to embedUrl,
-                                        "X-Requested-With" to "XMLHttpRequest"
-                                    )
-                                ).text
-
-                                if (echoRes.trim().startsWith("{")) {
-                                    val echoJson = JSONObject(echoRes)
-                                    val streamUrl = echoJson.optString("sources", "").replace("\\/", "/")
-
-                                    if (streamUrl.isNotBlank()) {
-                                        val finalRes = app.get(
-                                            streamUrl,
-                                            headers = mapOf(
-                                                "Referer" to embedUrl,
-                                                "User-Agent" to headers["User-Agent"]!!
-                                            )
-                                        )
-                                        val finalUrl = finalRes.url
-                                        val text = finalRes.text
-
-                                        if (text.contains("#EXTM3U") || finalUrl.contains(".m3u8", true)) {
-                                            callback(
-                                                newExtractorLink(
-                                                    source = "Aniwaves",
-                                                    // distinct name per server so CloudStream's
-                                                    // Source picker shows each one separately
-                                                    name = "Aniwaves Server ${serverIds.indexOf(id) + 1}",
-                                                    url = finalUrl,
-                                                    type = ExtractorLinkType.M3U8
-                                                ) {
-                                                    this.quality = Qualities.Unknown.value
-                                                    this.headers = mapOf("Referer" to finalUrl)
-                                                }
-                                            )
-                                            found = true
-                                            serverFound = true
-                                        } else {
-                                            val doc = Jsoup.parse(text)
-                                            val iframeSrc = doc.selectFirst("iframe")?.attr("src")
-
-                                            if (iframeSrc != null && iframeSrc.isNotBlank()) {
-                                                val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-                                                if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) {
-                                                    found = true
-                                                    serverFound = true
-                                                }
-                                            } else {
-                                                var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(text)
-                                                if (m3u8Match == null && text.contains("eval(function(p,a,c,k,e,d)")) {
-                                                    try {
-                                                        val unpacked = getAndUnpack(text)
-                                                        m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
-                                                    } catch (e: Exception) {}
-                                                }
-                                                if (m3u8Match != null) {
-                                                    callback(
-                                                        newExtractorLink(
-                                                            source = "Aniwaves Unpacked",
-                                                            name = "Aniwaves Server ${serverIds.indexOf(id) + 1}",
-                                                            url = m3u8Match.value,
-                                                            type = if (m3u8Match.value.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                                        ) {
-                                                            this.quality = Qualities.Unknown.value
-                                                            this.headers = mapOf("Referer" to finalUrl)
-                                                        }
-                                                    )
-                                                    found = true
-                                                    serverFound = true
-                                                } else {
-                                                    if (loadExtractor(finalUrl, data, subtitleCallback, callback)) {
-                                                        found = true
-                                                        serverFound = true
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
+                        // Vidplay / MegaCloud family: fix broken id regex, try real URL first
+                        if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
+                            val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|[?&]id=)([\w-]+)""").find(embedUrl)
+                            try { if (loadExtractor(embedUrl, data, subtitleCallback, callback)) serverFound = true } catch (e: Exception) { }
+                            if (!serverFound && embedIdMatch != null) {
+                                val embedId = embedIdMatch.groupValues[1]
+                                for (alt in listOf(
+                                    "https://megacloud.tv/embed-2/e-1/$embedId",
+                                    "https://vidplay.site/e/$embedId"
+                                )) {
+                                    try { if (loadExtractor(alt, data, subtitleCallback, callback)) { serverFound = true; break } } catch (e: Exception) { }
                                 }
                             }
-                            else if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
-                                val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|\?id=)([\w-]+)""").find(embedUrl)
-                                if (embedIdMatch != null) {
-                                    val embedId = embedIdMatch.groupValues[1]
-                                    if (loadExtractor("https://vidplay.site/e/$embedId", data, subtitleCallback, callback)) {
-                                        found = true
-                                        serverFound = true
-                                    }
-                                    if (!serverFound && loadExtractor("https://megacloud.tv/embed-2/e-1/$embedId", data, subtitleCallback, callback)) {
-                                        found = true
-                                        serverFound = true
-                                    }
-                                }
-                            }
-                            else {
-                                try {
-                                    val embedHtml = app.get(embedUrl, headers = mapOf("Referer" to "$mainUrl/")).text.replace("\\/", "/")
-                                    var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(embedHtml)
-                                    
-                                    if (m3u8Match == null && embedHtml.contains("eval(function(p,a,c,k,e,d)")) {
-                                        try {
-                                            val unpacked = getAndUnpack(embedHtml)
-                                            m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
-                                        } catch (e: Exception) {}
-                                    }
-
-                                    if (m3u8Match == null) {
-                                        val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(embedHtml)
-                                        for (b64 in base64Regex) {
-                                            try {
-                                                val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
-                                                if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                                    m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(decoded)
-                                                    break
-                                                }
-                                            } catch (e: Exception) {}
-                                        }
-                                    }
-
-                                    if (m3u8Match != null) {
-                                        val mediaUrl = m3u8Match.value
-                                        callback(
-                                            newExtractorLink(
-                                                source = "Aniwaves Native",
-                                                name = "Aniwaves Server ${serverIds.indexOf(id) + 1}",
-                                                url = mediaUrl,
-                                                type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                            ) {
-                                                this.quality = Qualities.Unknown.value
-                                                this.headers = mapOf("Referer" to embedUrl)
-                                            }
-                                        )
-                                        found = true
-                                        serverFound = true
-                                    } else {
-                                        if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
-                                            found = true
-                                            serverFound = true
-                                        }
-                                    }
-                                } catch (e: Exception) {}
-                            }
+                            if (serverFound) { found = true; break }
                         }
-                    } catch (e: Exception) {}
-                    
-                    if (serverFound) break // only skip remaining endpoint guesses for THIS server
+
+                        if (resolveEmbed(embedUrl, tag)) {
+                            serverFound = true
+                            found = true
+                        }
+                    } catch (e: Exception) { }
                 }
-                // no break here — always try every other server too
             }
         } catch (e: Exception) {
             e.printStackTrace()
