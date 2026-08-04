@@ -28,9 +28,11 @@ jobs:
       - name: Clean project
         run: gradle clean
 
-      # 2. Purge the global Gradle cache (optional but recommended)
-      - name: Clean global Gradle cache
-        run: gradle cleanBuildCache || true   # ignore if this task isn't available
+      # 2. Clear Gradle cache directory
+      - name: Clear Gradle cache
+        run: |
+          rm -rf ~/.gradle/caches/* || true
+          rm -rf ~/.gradle/wrapper/* || true
 
       # 3. Build the plugins
       - name: Build plugins
@@ -42,7 +44,7 @@ jobs:
           mkdir -p release
           find . -name "*.cs3" -not -path "./release/*" -exec cp {} release/ \;
           cp build/plugins.json release/plugins.json
-          echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]}' > release/repo.json
+          echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]}'> release/manifest.json
 
       # 5. Push to the `builds` branch
       - name: Push to builds branch
