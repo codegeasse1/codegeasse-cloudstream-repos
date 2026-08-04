@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import android.content.Context
 import org.jsoup.Jsoup
 import org.json.JSONObject
+import android.util.Base64
 
 @CloudstreamPlugin
 class AnikotoPlugin : Plugin() {
@@ -16,7 +17,7 @@ class AnikotoPlugin : Plugin() {
 }
 
 class AnikotoProvider : MainAPI() {
-    override var mainUrl = "https://anikototv.to"
+    override var mainUrl = "https://anikoto.cz"
     override var name = "Anikoto"
     override val hasMainPage = true
     override var lang = "en"
@@ -180,13 +181,16 @@ class AnikotoProvider : MainAPI() {
                 val res = app.get("$mainUrl/ajax/server/list?servers=$dataIds", headers = ajaxHeaders).text
                 val doc = Jsoup.parse(if (res.contains("<")) res else JSONObject(res).optString("result", res))
                 
-                doc.select("li[data-link-id], li[data-id]").forEach { li ->
+                // Extract data-link-id attributes (these are base64-encoded server IDs)
+                val serverItems = doc.select("li[data-link-id], li[data-id]")
+                for (li in serverItems) {
                     val id = li.attr("data-link-id").ifBlank { li.attr("data-id") }
                     if (id.isNotBlank()) linkIds.add(id)
                 }
                 
                 if (linkIds.isEmpty()) {
-                    Regex("""data-(?:link-)?id=["']([^"']+)["']""").findAll(res).forEach { m ->
+                    val regexMatches = Regex("""data-(?:link-)?id=["']([^"']+)["']""").findAll(res)
+                    for (m in regexMatches) {
                         linkIds.add(m.groupValues[1])
                     }
                 }
@@ -217,7 +221,9 @@ class AnikotoProvider : MainAPI() {
                     ?: json.optString("url")
                 
                 if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
-                    val isCloneEmbed = streamUrl.contains("megaplay") || streamUrl.contains("vidtube") || streamUrl.contains("mewcdn") || streamUrl.contains("kwik") || streamUrl.contains("vidplay")
+                    val isCloneEmbed = streamUrl.contains("megaplay") || streamUrl.contains("vidtube") || 
+                                     streamUrl.contains("mewcdn") || streamUrl.contains("kwik") || 
+                                     streamUrl.contains("vidplay")
                     
                     if (isCloneEmbed) {
                         val embedHtml = app.get(streamUrl, headers = videoHeaders).text.replace("\\/", "/")
@@ -235,7 +241,7 @@ class AnikotoProvider : MainAPI() {
                             val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(embedHtml)
                             for (b64 in base64Regex) {
                                 try {
-                                    val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
+                                    val decoded = String(Base64.decode(b64.groupValues[1], Base64.DEFAULT))
                                     if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
                                         m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(decoded)
                                         break
@@ -245,37 +251,58 @@ class AnikotoProvider : MainAPI() {
                         }
 
                         if (m3u8Match == null) {
-                            val host = "https://" + java.net.URI(streamUrl).host
-                            val dataId = Regex("""data-id=["']([^"']+)["']""").find(embedHtml)?.groupValues?.get(1)
-                                ?: Regex("""['"]?id['"]?\s*:\s*['"]([^"']+)['"]""").find(embedHtml)?.groupValues?.get(1)
-                                ?: streamUrl.substringAfterLast("/").substringBefore("?")
-                            
-                            if (dataId.isNotBlank() && dataId.length > 2) {
-                                val apis = listOf("/ajax/embed-4/getSources?id=", "/ajax/embed-5/getSources?id=", "/api/source/")
-                                for (api in apis) {
-                                    try {
-                                        val apiRes = app.get("$host$api$dataId", headers = mapOf("X-Requested-With" to "XMLHttpRequest")).text.replace("\\/", "/")
-                                        m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(apiRes)
-                                        if (m3u8Match != null) break
-                                    } catch (e: Exception) {}
+                            try {
+                                val host = "https://" + java.net.URI(streamUrl).host
+                                val dataId = Regex("""data-id=["']([^"']+)["']""").find(embedHtml)?.groupValues?.get(1)
+                                    ?: Regex("""['"]?id['"]?\s*:\s*['"]([^"']+)['"]""").find(embedHtml)?.groupValues?.get(1)
+                                    ?: streamUrl.substringAfterLast("/").substringBefore("?")
+                                
+                                if (dataId.isNotBlank() && dataId.length > 2) {
+                                    val apis = listOf("/ajax/embed-4/getSources?id=", "/ajax/embed-5/getSources?id=", "/api/source/")
+                                    for (api in apis) {
+                                        try {
+                                            val apiRes = app.get("$host$api$dataId", headers = mapOf("X-Requested-With" to "XMLHttpRequest")).text.replace("\\/", "/")
+                                            m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(apiRes)
+                                            if (m3u8Match != null) break
+                                        } catch (e: Exception) {}
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                // URI parsing failed, continue
                             }
                         }
 
                         if (m3u8Match != null) {
                             val mediaUrl = m3u8Match.value
-                            callback(
-                                newExtractorLink(
-                                    source = "Anikoto Native",
-                                    name = java.net.URI(streamUrl).host.substringBeforeLast("."),
-                                    url = mediaUrl,
-                                    type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("Referer" to streamUrl)
-                                }
-                            )
-                            found = true
+                            try {
+                                val serverName = java.net.URI(streamUrl).host.substringBeforeLast(".")
+                                callback(
+                                    newExtractorLink(
+                                        source = "Anikoto Native",
+                                        name = serverName,
+                                        url = mediaUrl,
+                                        type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = Qualities.Unknown.value
+                                        this.headers = mapOf("Referer" to streamUrl)
+                                    }
+                                )
+                                found = true
+                            } catch (e: Exception) {
+                                // Fallback if URI parsing fails
+                                callback(
+                                    newExtractorLink(
+                                        source = "Anikoto Native",
+                                        name = "Server",
+                                        url = mediaUrl,
+                                        type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = Qualities.Unknown.value
+                                        this.headers = mapOf("Referer" to streamUrl)
+                                    }
+                                )
+                                found = true
+                            }
                         } else {
                             if (loadExtractor(streamUrl, cleanData, subtitleCallback, callback)) found = true
                         }
