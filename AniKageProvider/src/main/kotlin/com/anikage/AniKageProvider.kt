@@ -18,7 +18,6 @@ class AniKageProvider : MainAPI() {
         private const val XOR_KEY = "aproxy2026"
     }
 
-    // The site base64+XOR encrypts some source/subtitle urls. This decrypts them.
     private fun xorDecrypt(enc: String): String? {
         return try {
             val key = XOR_KEY.toByteArray(Charsets.UTF_8)
@@ -255,9 +254,10 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
+        // FIXED: removed neko / koto / e-neko / e-koto (they return broken streams)
         val knownProviders = listOf(
-            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
+            "dib", "vibeube", "vidtube", "megatube", "megaplay", "wave", "miko",
+            "ken", "megg", "vibe", "kwik", "aniyt", "e-ken", "e-wish"
         )
         
         val activeProviders = knownProviders.filter { provider ->
@@ -267,15 +267,16 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
-        listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
+        listOf("dib", "vibeube", "vidtube", "megatube", "megaplay", "wave").forEach {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
+        // FIXED: Vidtube FIRST (auto-play), then MegaPlay, then everything else
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
-                provider == "megatube" || provider == "megaplay" -> 2
-                else -> 1
+                provider == "megatube" || provider == "megaplay" -> 1
+                else -> 2
             }
         }
 
@@ -298,10 +299,7 @@ class AniKageProvider : MainAPI() {
                 try {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
 
-                    // =====================================================
-                    // ADDITIVE BLOCK ONLY (original logic untouched below).
-                    // Decrypts the encrypted sources some providers return.
-                    // =====================================================
+                    // Additive: decrypt encrypted sources (wave/dib etc. when encrypted)
                     try {
                         val json = JSONObject(responseText)
                         val sourcesArr = json.optJSONArray("sources")
@@ -339,7 +337,6 @@ class AniKageProvider : MainAPI() {
                                     )
                                     found = true
                                 } else {
-                                    // It's a player page: pull the real stream out of it
                                     try {
                                         val page = app.get(u, headers = videoHeaders).text.replace("\\/", "/")
                                         for (m in Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(page)) {
@@ -370,9 +367,8 @@ class AniKageProvider : MainAPI() {
                             }
                         }
                     } catch (_: Exception) { }
-                    // ================= END ADDITIVE BLOCK =================
 
-                    // ORIGINAL LOGIC (unchanged)
+                    // Original regex extraction (your working logic)
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
                     
                     for (match in matches) {
