@@ -3,7 +3,6 @@ package com.anikage
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
-import org.json.JSONObject
 
 class AniKageProvider : MainAPI() {
     override var mainUrl = "https://anikage.cc"
@@ -12,20 +11,6 @@ class AniKageProvider : MainAPI() {
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
-
-    companion object {
-        private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        private const val XOR_KEY = "aproxy2026"
-    }
-
-    private fun xorDecrypt(enc: String): String? {
-        return try {
-            val key = XOR_KEY.toByteArray(Charsets.UTF_8)
-            val raw = android.util.Base64.decode(enc.trim(), android.util.Base64.DEFAULT)
-            val out = ByteArray(raw.size) { i -> (raw[i].toInt() xor key[i % key.size].toInt()).toByte() }
-            String(out, Charsets.UTF_8)
-        } catch (e: Exception) { null }
-    }
 
     private fun extractSectionArray(scriptData: String, key: String): List<SearchResponse> {
         val startStr = "$key:["
@@ -254,10 +239,9 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        // FIXED: removed neko / koto / e-neko / e-koto (they return broken streams)
         val knownProviders = listOf(
-            "dib", "vibeube", "vidtube", "megatube", "megaplay", "wave", "miko",
-            "ken", "megg", "vibe", "kwik", "aniyt", "e-ken", "e-wish"
+            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
         
         val activeProviders = knownProviders.filter { provider ->
@@ -267,11 +251,12 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
-        listOf("dib", "vibeube", "vidtube", "megatube", "megaplay", "wave").forEach {
+        // Force primary servers into the query list
+        listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // FIXED: Vidtube FIRST (auto-play), then MegaPlay, then everything else
+        // ONLY CHANGE: Vidtube first, then MegaPlay, then everything else
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
@@ -287,7 +272,7 @@ class AniKageProvider : MainAPI() {
 
         val videoHeaders = mapOf(
             "Referer" to "$mainUrl/",
-            "User-Agent" to UA
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
@@ -298,77 +283,6 @@ class AniKageProvider : MainAPI() {
 
                 try {
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-
-                    // Additive: decrypt encrypted sources (wave/dib etc. when encrypted)
-                    try {
-                        val json = JSONObject(responseText)
-                        val sourcesArr = json.optJSONArray("sources")
-                        if (sourcesArr != null) {
-                            for (s in 0 until sourcesArr.length()) {
-                                val srcObj = sourcesArr.optJSONObject(s) ?: continue
-                                var u = srcObj.optString("url", "")
-                                if (!u.startsWith("http")) u = xorDecrypt(u) ?: ""
-                                if (u.isBlank()) continue
-
-                                val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
-                                val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
-                                val displayName = when {
-                                    isVidtube -> "Vidtube"
-                                    isMegaPlay -> "MegaPlay"
-                                    else -> provider.replaceFirstChar { it.uppercase() }
-                                }
-                                val sourceGroup = when {
-                                    isVidtube -> "1. Vidtube"
-                                    isMegaPlay -> "3. MegaPlay"
-                                    else -> "2. $displayName"
-                                }
-
-                                if (u.contains(".m3u8") || u.contains(".mp4")) {
-                                    callback(
-                                        newExtractorLink(
-                                            source = sourceGroup,
-                                            name = "$displayName ($lang)",
-                                            url = u,
-                                            type = if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                        ) {
-                                            this.quality = Qualities.Unknown.value
-                                            this.headers = videoHeaders
-                                        }
-                                    )
-                                    found = true
-                                } else {
-                                    try {
-                                        val page = app.get(u, headers = videoHeaders).text.replace("\\/", "/")
-                                        for (m in Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(page)) {
-                                            callback(
-                                                newExtractorLink(
-                                                    source = sourceGroup,
-                                                    name = "$displayName ($lang)",
-                                                    url = m.value,
-                                                    type = if (m.value.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                                ) {
-                                                    this.quality = Qualities.Unknown.value
-                                                    this.headers = mapOf("Referer" to u, "User-Agent" to UA)
-                                                }
-                                            )
-                                            found = true
-                                        }
-                                    } catch (_: Exception) { }
-                                }
-                            }
-                        }
-                        val subsArr = json.optJSONArray("subtitles")
-                        if (subsArr != null) {
-                            for (s in 0 until subsArr.length()) {
-                                val subObj = subsArr.optJSONObject(s) ?: continue
-                                var f = subObj.optString("file", "")
-                                if (!f.startsWith("http")) f = xorDecrypt(f) ?: ""
-                                if (f.isNotBlank()) subtitleCallback(SubtitleFile(subObj.optString("label", "Sub"), f))
-                            }
-                        }
-                    } catch (_: Exception) { }
-
-                    // Original regex extraction (your working logic)
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
                     
                     for (match in matches) {
