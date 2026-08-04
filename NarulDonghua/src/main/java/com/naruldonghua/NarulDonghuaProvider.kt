@@ -40,7 +40,7 @@ class NarulDonghuaProvider : MainAPI() {
         val href = fixUrl(anchor.attr("href"))
         if (href.isBlank() || href.contains("/author/") || href.contains("/genres/")) return null
 
-        val title = this.selectFirst(".tt, h2, .entry-title")?.text()?.trim()
+        val title = this.selectFirst(".tt, h2, .entry-title")?.text()?.trim() 
             ?: anchor.attr("title")
             ?: return null
 
@@ -64,8 +64,8 @@ class NarulDonghuaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title = document.selectFirst("h1.entry-title, .title-section h1")?.text()?.trim()
-            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore("–")?.trim()
+        val title = document.selectFirst("h1.entry-title, .title-section h1")?.text()?.trim() 
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore("–")?.trim() 
             ?: "Unknown Title"
 
         val poster = document.selectFirst(".thumb img, .mvelement img, meta[property=og:image]")?.let {
@@ -120,16 +120,13 @@ class NarulDonghuaProvider : MainAPI() {
         var found = false
         val document = app.get(data).document
 
-        // ------------------------------------------------------------
-        // Some posts store the iframe HTML with entities (&quot; &amp; \/).
-        // Without unescaping, the src regexes miss them => "No Links Found"
-        // even though the same player works on the site.
-        // ------------------------------------------------------------
+        // Unescape HTML entities and JS-escaped slashes commonly found in the decoded base64 payloads
         fun String.unescape(): String = this
             .replace("&quot;", "\"").replace("&#039;", "'").replace("&#39;", "'")
             .replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">")
             .replace("\\/", "/").replace("&amp;", "&")
 
+        // Helper to add a direct media link
         fun addDirect(url: String, tag: String, referer: String): Boolean {
             val clean = url.unescape().trim()
             val finalUrl = when {
@@ -153,17 +150,11 @@ class NarulDonghuaProvider : MainAPI() {
             return true
         }
 
-        // ------------------------------------------------------------
-        // SELF-CONTAINED Dailymotion resolution.
-        // Does NOT rely on built-in extractors (they are often missing).
-        // Uses the public player metadata API which returns direct
-        // .mp4 and .m3u8 URLs for any public video.
-        // ------------------------------------------------------------
+        // Self-contained Dailymotion resolver (bypasses missing built-in extractors)
         suspend fun resolveDailymotion(src: String): Boolean {
             val idRegex = Regex("""(?:/embed/video/|/video/|video=|/embed/)([a-zA-Z0-9]+)""")
             var id = idRegex.find(src)?.groupValues?.get(1)
 
-            // dai.ly short links: follow the redirect to get the real URL
             if (id == null && src.contains("dai.ly")) {
                 val real = try { app.get(src).url } catch (_: Exception) { src }
                 id = idRegex.find(real)?.groupValues?.get(1)
@@ -174,7 +165,7 @@ class NarulDonghuaProvider : MainAPI() {
             try {
                 val meta = app.get(
                     "https://www.dailymotion.com/player/metadata/video/$id?embed=false",
-                    headers = mapOf("User-Agent" to USER_AGENT)
+                    headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                 ).text
                 Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").findAll(meta).forEach { m ->
                     val u = m.groupValues[1]
@@ -184,7 +175,7 @@ class NarulDonghuaProvider : MainAPI() {
                 }
             } catch (_: Exception) { }
 
-            // Fallback to built-in extractor only if metadata API failed
+            // Fallback to built-in extractor if metadata API failed
             if (!ok) {
                 try {
                     ok = loadExtractor("https://www.dailymotion.com/video/$id", data, subtitleCallback, callback)
@@ -193,10 +184,7 @@ class NarulDonghuaProvider : MainAPI() {
             return ok
         }
 
-        // ------------------------------------------------------------
-        // SELF-CONTAINED Rumble resolution: scrape the embed page for the
-        // hls-vod / cdn.rumble.cloud playlists you captured in network logs.
-        // ------------------------------------------------------------
+        // Self-contained Rumble resolver (scrapes hls-vod/cdn.rumble.cloud)
         suspend fun resolveRumble(src: String): Boolean {
             var ok = false
             try { ok = loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) { }
@@ -204,7 +192,7 @@ class NarulDonghuaProvider : MainAPI() {
                 try {
                     val page = app.get(
                         src,
-                        headers = mapOf("User-Agent" to USER_AGENT, "Referer" to data)
+                        headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer" to data)
                     ).text.unescape()
                     val m3u8 = Regex("""https?://rumble\.com/hls-vod/[^"'\s]+\.m3u8[^"'\s]*""").find(page)?.value
                         ?: Regex("""https?://[a-z0-9.-]*cdn\.rumble\.cloud/[^"'\s]+\.m3u8[^"'\s]*""").find(page)?.value
@@ -218,22 +206,22 @@ class NarulDonghuaProvider : MainAPI() {
             val src = rawSrc.unescape().trim().removeSurrounding("\"").removeSurrounding("'")
             if (src.isBlank() || src == "about:blank" || src.startsWith("javascript")) return false
 
-            // 0) Already a direct media file (raw CDN m3u8/mp4 in base64)
+            // 1) Already a direct media file
             if (src.contains(".m3u8") || src.contains(".mp4")) {
                 return addDirect(src, "Direct", data)
             }
 
-            // 1) Dailymotion (any format: embed/video, player.html, dai.ly)
+            // 2) Dailymotion
             if (src.contains("dailymotion") || src.contains("dai.ly")) {
                 return resolveDailymotion(src)
             }
 
-            // 2) Rumble
+            // 3) Rumble
             if (src.contains("rumble.com")) {
                 return resolveRumble(src)
             }
 
-            // 3) narulplex.p2pstream.vip custom player
+            // 4) narulplex.p2pstream.vip custom player
             if (src.contains("narulplex.p2pstream.vip")) {
                 val id = Regex("""[?&]id=([\w-]+)""").find(src)?.groupValues?.get(1)
                     ?: Regex("""/e/([\w-]+)""").find(src)?.groupValues?.get(1)
@@ -245,7 +233,7 @@ class NarulDonghuaProvider : MainAPI() {
                         val videoApiUrl = "https://narulplex.p2pstream.vip/api/v1/video?id=$id&w=1280&h=800&r=naruldonghua.com"
                         val res = app.get(
                             videoApiUrl,
-                            headers = mapOf("Referer" to src, "User-Agent" to USER_AGENT)
+                            headers = mapOf("Referer" to src, "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                         ).text
 
                         val streamMatch = Regex(""""(?:url|file|src|m3u8)"\s*:\s*"([^"]+\.(?:m3u8|txt)[^"]*)"""")
@@ -260,14 +248,14 @@ class NarulDonghuaProvider : MainAPI() {
                 return false
             }
 
-            // 4) Generic: built-in extractor, then deep-scan the embed page
+            // 5) Generic fallback
             var linkFound = false
             try { linkFound = loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) { }
             if (!linkFound) {
                 try {
                     val text = app.get(
                         src,
-                        headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT)
+                        headers = mapOf("Referer" to data, "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                     ).text.unescape()
                     Regex("""https?://[^"'\s<>]+?(?:m3u8|\.mp4)[^"'\s<>]*""").find(text)?.value?.let {
                         linkFound = addDirect(it, "Narul Stream", src)
@@ -277,21 +265,22 @@ class NarulDonghuaProvider : MainAPI() {
             return linkFound
         }
 
-        // Parse direct iframe payloads
-        document.select(".player-embed iframe, iframe[src]").forEach { iframe ->
+        // FIX: Replaced .forEach { } with standard for loops to safely call suspend functions inside the coroutine
+        val iframes = document.select(".player-embed iframe, iframe[src]")
+        for (iframe in iframes) {
             val src = fixUrl(iframe.attr("src").ifBlank { iframe.attr("data-litespeed-src") })
             if (src.isNotBlank() && !src.contains("about:blank")) {
                 if (handleEmbed(src)) found = true
             }
         }
 
-        // Parse base64 dropdown servers (Mirror selector)
-        document.select("select.mirror option").forEach { option ->
+        val options = document.select("select.mirror option")
+        for (option in options) {
             val base64Val = option.attr("value").trim()
+            // Only decode strings that look like valid base64 (length > 20)
             if (base64Val.length > 20) {
                 try {
-                    // MIME decoder tolerates line breaks / stray chars that
-                    // made the strict decoder throw on some posts
+                    // MIME decoder tolerates line breaks / stray chars
                     val decodedHtml = String(Base64.getMimeDecoder().decode(base64Val)).unescape()
 
                     val iframeSrc = Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
