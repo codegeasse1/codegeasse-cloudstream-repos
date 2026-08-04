@@ -3,11 +3,12 @@ package com.chikianimation
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.M3u8Helper
-import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -124,9 +125,6 @@ class ChikiAnimationProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -135,68 +133,90 @@ class ChikiAnimationProvider : MainAPI() {
     ): Boolean {
         var found = false
         val pageHtml = app.get(data, headers = mapOf("User-Agent" to UA)).text.replace("\\/", "/")
-        val document = org.jsoup.Jsoup.parse(pageHtml)
+        val document = Jsoup.parse(pageHtml)
 
         fun extractStreamUrl(text: String): String? =
             Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(text)?.value
                 ?: Regex("""https?://[^\s"'<>\\]*chunklist[^\s"'<>\\]*""").find(text)?.value
                 ?: Regex("""https?://[^\s"'<>\\]*rumble\.cloud[^\s"'<>\\]*""").find(text)?.value
+                ?: Regex("""https?://[^\s"'<>\\]*rmbl\.ws[^\s"'<>\\]*""").find(text)?.value
 
         suspend fun addM3u8(url: String, referer: String, label: String): Boolean {
             return try {
                 val links = M3u8Helper.generateM3u8(label, url, referer)
-                for (l in links) { callback(l); }
+                for (l in links) callback(l)
                 links.isNotEmpty()
             } catch (e: Exception) { false }
         }
 
-        // --- Server A: chiki.rpmstream.live/#<id> -> /api/v1/video ---
+        // Server: chiki.rpmstream.live/#<id> -> /api/v1/video
         suspend fun handleRpmStream(embedUrl: String): Boolean {
-            val id = embedUrl.substringAfterLast("#").substringAfter("?id=").substringBefore("&").trim()
-            if (id.isBlank()) return false
-            val api = "https://chiki.rpmstream.live/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online"
-            return try {
+            try {
+                val id = embedUrl.substringAfterLast("#").substringAfter("?id=").substringBefore("&").trim()
+                if (id.isBlank()) return false
+                val api = "https://chiki.rpmstream.live/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online"
                 val res = app.get(api, headers = mapOf("User-Agent" to UA, "Referer" to "https://chiki.rpmstream.live/")).text.replace("\\/", "/")
-                if (res.trim().startsWith("#EXTM3U")) {
-                    addM3u8(api, "https://chiki.rpmstream.live/", "Multi Player")
-                } else {
-                    val m3u8 = extractStreamUrl(res) ?: return false
-                    addM3u8(m3u8, "https://chiki.rpmstream.live/", "Multi Player")
-                }
-            } catch (e: Exception) { false }
+                if (res.trim().startsWith("#EXTM3U")) return addM3u8(api, "https://chiki.rpmstream.live/", "Multi Player")
+                val m3u8 = extractStreamUrl(res) ?: return false
+                return addM3u8(m3u8, "https://chiki.rpmstream.live/", "Multi Player")
+            } catch (e: Exception) { return false }
         }
 
-        // --- Server B: videoplayerst.online/watch.php?code=... (hls.js + rumble CDN) ---
+        // Server: videoplayerst.online/watch.php?code=.. (rumble CDN hls)
         suspend fun handleVpst(embedUrl: String): Boolean {
-            return try {
+            try {
                 val res = app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to "https://videoplayerst.online/")).text.replace("\\/", "/")
                 val m3u8 = extractStreamUrl(res) ?: return false
-                addM3u8(m3u8, "https://videoplayerst.online/", "VPST")
+                return addM3u8(m3u8, "https://videoplayerst.online/", "VPST")
+            } catch (e: Exception) { return false }
+        }
+
+        // Server: rumble.com embed -> pull m3u8 from the embed page itself
+        suspend fun handleRumble(embedUrl: String): Boolean {
+            try {
+                val res = app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to "https://rumble.com/")).text.replace("\\/", "/")
+                val m3u8 = extractStreamUrl(res)
+                if (m3u8 != null) {
+                    if (addM3u8(m3u8, "https://rumble.com/", "Rumble")) return true
+                }
+                // last resort: built-in extractor (never let it throw)
+                try {
+                    if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true
+                } catch (e: Exception) { }
+            } catch (e: Exception) { }
+            return false
+        }
+
+        suspend fun handleDailymotion(embedUrl: String): Boolean {
+            val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                ?: return false
+            return try {
+                loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)
             } catch (e: Exception) { false }
         }
 
+        // EVERY server attempt is isolated: a failing server can never kill the loop
         suspend fun handleEmbed(embedUrl: String): Boolean {
             val u = embedUrl.trim()
             if (u.isBlank()) return false
-            return when {
-                u.contains("dailymotion", true) -> {
-                    val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(u)?.groupValues?.get(1)
-                    if (vid != null) loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback) else false
+            return try {
+                when {
+                    u.contains("dailymotion", true) -> handleDailymotion(u)
+                    u.contains("rpmstream.live", true) -> handleRpmStream(u)
+                    u.contains("videoplayerst.online", true) -> handleVpst(u)
+                    u.contains("rumble.com", true) || u.contains("rmbl.ws", true) -> handleRumble(u)
+                    else -> false
                 }
-                u.contains("rpmstream.live", true) -> handleRpmStream(u)
-                u.contains("videoplayerst.online", true) -> handleVpst(u)
-                u.contains("rumble.com", true) -> loadExtractor(u, data, subtitleCallback, callback)
-                else -> false
-            }
+            } catch (e: Exception) { false }
         }
 
         // 1) Iframes directly in the page (default server)
         for (iframe in document.select("iframe[src], iframe[data-src]")) {
             val src = fixRelativeUrl(iframe.attr("src").ifBlank { iframe.attr("data-src") }, data) ?: continue
-            if (handleEmbed(src)) found = true
+            try { if (handleEmbed(src)) found = true } catch (e: Exception) { }
         }
 
-        // 2) Base64 mirror <option> values (server switcher)
+        // 2) Base64 mirror <option> values (server switcher, in site order)
         for (option in document.select("option[value]")) {
             val value = option.attr("value")
             if (value.isBlank()) continue
@@ -205,10 +225,9 @@ class ChikiAnimationProvider : MainAPI() {
                 ?: Regex("""(https?://[^\s"'<>]+)""").find(decoded)?.groupValues?.get(1)
                 ?: continue
             val fixed = fixRelativeUrl(src, data) ?: continue
-            if (handleEmbed(fixed)) found = true
+            try { if (handleEmbed(fixed)) found = true } catch (e: Exception) { }
 
-            // subtitles inside decoded mirror html
-            for (track in org.jsoup.Jsoup.parse(decoded).select("track[src]")) {
+            for (track in Jsoup.parse(decoded).select("track[src]")) {
                 val subUrl = fixRelativeUrl(track.attr("src"), fixed)
                 if (!subUrl.isNullOrBlank()) {
                     subtitleCallback(SubtitleFile(track.attr("label").ifBlank { "Subtitle" }, subUrl))
@@ -221,14 +240,16 @@ class ChikiAnimationProvider : MainAPI() {
             val dm = Regex("""geo\.dailymotion\.com/player\.html\?video=([a-zA-Z0-9_]+)""").find(pageHtml)
                 ?: Regex("""dailymotion\.com/(?:embed/)?video/([a-zA-Z0-9_]+)""").find(pageHtml)
             if (dm != null) {
-                if (loadExtractor("https://www.dailymotion.com/video/${dm.groupValues[1]}", data, subtitleCallback, callback)) found = true
+                try {
+                    if (loadExtractor("https://www.dailymotion.com/video/${dm.groupValues[1]}", data, subtitleCallback, callback)) found = true
+                } catch (e: Exception) { }
             }
         }
 
         // 4) Any raw m3u8/rumble url present in the page itself
         if (!found) {
             extractStreamUrl(pageHtml)?.let { m3u8 ->
-                val referer = if (m3u8.contains("rumble.cloud")) "https://videoplayerst.online/" else "$mainUrl/"
+                val referer = if (m3u8.contains("rumble.cloud") || m3u8.contains("rmbl.ws")) "https://videoplayerst.online/" else "$mainUrl/"
                 if (addM3u8(m3u8, referer, "Direct")) found = true
             }
         }
