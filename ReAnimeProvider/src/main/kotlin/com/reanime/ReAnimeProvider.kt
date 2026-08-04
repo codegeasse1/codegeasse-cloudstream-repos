@@ -349,7 +349,8 @@ class ReAnimeProvider : MainAPI() {
             return true
         }
 
-        fun pushSubs(text: String) {
+        // FIXED: Made pushSubs a suspend function because newSubtitleFile is suspend
+        suspend fun pushSubs(text: String) {
             for (m in SUB_REGEX.findAll(text)) {
                 val u = m.value.unesc()
                 val low = u.lowercase()
@@ -371,8 +372,9 @@ class ReAnimeProvider : MainAPI() {
 
         val pages = mutableListOf<String>()
 
-        runCatching { pages += app.get(cleanData, headers = siteHeaders).text }
-        runCatching { pages += app.get("$mainUrl/watch/$slug?ep=$epNum", headers = siteHeaders).text }
+        // FIXED: Replaced ALL runCatching with standard try/catch to safely call suspend functions
+        try { pages += app.get(cleanData, headers = siteHeaders).text } catch (e: Exception) {}
+        try { pages += app.get("$mainUrl/watch/$slug?ep=$epNum", headers = siteHeaders).text } catch (e: Exception) {}
 
         val apiCandidates = listOf(
             "$mainUrl/api/v1/anime/$slug/episodes/$epNum/servers",
@@ -382,24 +384,24 @@ class ReAnimeProvider : MainAPI() {
             "$mainUrl/api/v1/episode/$slug-episode-$epNum/servers"
         )
         for (u in apiCandidates) {
-            runCatching { pages += app.get(u, headers = siteHeaders).text }
+            try { pages += app.get(u, headers = siteHeaders).text } catch (e: Exception) {}
         }
 
         if (aniId.isNotBlank()) {
-            runCatching {
+            try {
                 pages += app.get(
                     "$mainUrl/api/v1/downloads/check?anilist_id=$aniId&mal_id=$malId&episode=$epNum",
                     headers = siteHeaders
                 ).text
-            }
+            } catch (e: Exception) {}
         }
 
-        runCatching {
+        try {
             pages += app.get(
                 "$mainUrl/api/v1/anime/$slug/episodes?limit=2000",
                 headers = siteHeaders
             ).text
-        }
+        } catch (e: Exception) {}
 
         for (raw in pages) {
             val page = raw.unesc()
@@ -431,9 +433,9 @@ class ReAnimeProvider : MainAPI() {
             for (m in urlRegex.findAll(page)) {
                 val u = m.value
                 if (KNOWN_HOSTS.any { u.contains(it, true) } && seenLinks.add(u)) {
-                    runCatching {
+                    try {
                         if (loadExtractor(u, cleanData, subtitleCallback, callback)) found = true
-                    }
+                    } catch (e: Exception) {}
                 }
             }
         }
@@ -448,14 +450,14 @@ class ReAnimeProvider : MainAPI() {
 
         for (id in videoIds) {
             val embedUrl = "$FLIX/embed/$id"
-            val html = runCatching { app.get(embedUrl, headers = flixHeaders).text }.getOrNull() ?: continue
+            val html = try { app.get(embedUrl, headers = flixHeaders).text } catch (e: Exception) { null } ?: continue
             
             val keyB64 = Regex("""["']kf_\w+["']\s*:\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
             val ivB64 = Regex("""["']ivf_\w+["']\s*:\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
 
             if (keyB64 != null && ivB64 != null) {
                 val m3u8ApiUrl = "$FLIX/api/m3u8/$id"
-                val encryptedRes = runCatching { app.get(m3u8ApiUrl, headers = flixHeaders).text }.getOrNull()
+                val encryptedRes = try { app.get(m3u8ApiUrl, headers = flixHeaders).text } catch (e: Exception) { null }
                 
                 if (encryptedRes != null && encryptedRes.trim().startsWith("{")) {
                     val json = JSONObject(encryptedRes)
@@ -505,17 +507,14 @@ class ReAnimeProvider : MainAPI() {
                 if (pushStream(m.value, "FlixCloud", true)) found = true
             }
 
-            // FIXED: Extract the dynamic fetchX host and push master, video, and audio endpoints
             if (!found) {
                 JWT_REGEX.find(page)?.value?.let { token ->
                     val fetchHost = FETCH_HOST_REGEX.find(page)?.value ?: "https://fetch7.flixcloud.cc"
                     
-                    // Construct all 3 endpoints seen in the network tab
                     val master = "$fetchHost/_v7/$id/master.m3u8?token=$token"
                     val video = "$fetchHost/_v7/$id/video.m3u8?token=$token"
                     val audio = "$fetchHost/_v7/$id/audio/audio.m3u8?token=$token"
                     
-                    // ExoPlayer prefers master.m3u8 because it contains the muxed/adaptive manifest
                     if (pushStream(master, "FlixCloud Master", true)) found = true
                     if (!found && pushStream(video, "FlixCloud Video", true)) found = true
                     if (!found && pushStream(audio, "FlixCloud Audio", true)) found = true
@@ -531,12 +530,12 @@ class ReAnimeProvider : MainAPI() {
                     .take(3).toList()
                     
                 for (s in scripts) {
-                    val js = runCatching {
+                    val js = try {
                         app.get(
                             if (s.startsWith("http")) s else "$FLIX${if (s.startsWith("/")) "" else "/"}$s",
                             headers = flixHeaders
                         ).text
-                    }.getOrNull()?.unesc() ?: continue
+                    } catch (e: Exception) { null }?.unesc() ?: continue
 
                     JWT_REGEX.find(js)?.value?.let { token ->
                         val fetchHost = FETCH_HOST_REGEX.find(js)?.value ?: "https://fetch7.flixcloud.cc"
