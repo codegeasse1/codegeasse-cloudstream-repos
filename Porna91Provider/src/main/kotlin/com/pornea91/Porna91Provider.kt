@@ -128,11 +128,13 @@ class Porna91Provider : MainAPI() {
         fun searchForStream(html: String, referer: String) {
             Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
                 val url = match.value.replace("&amp;", "&")
-                callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
+                try {
+                    callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
+                        this.referer = referer
+                        this.quality = Qualities.Unknown.value
+                    })
+                    found = true
+                } catch (_: Exception) {}
             }
             val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
                 "config", "playInfo", "playerConfig", "videoInfo")
