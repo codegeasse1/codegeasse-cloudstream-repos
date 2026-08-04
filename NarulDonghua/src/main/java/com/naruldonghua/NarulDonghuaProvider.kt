@@ -76,11 +76,6 @@ class NarulDonghuaProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        // 1. Scrape episode containers — added ".eplister ul li", which is the
-        // confirmed-working selector on this same WordPress anime theme family
-        // (same theme as ChikiAnimation). The previous selector list was
-        // missing this exact class, which is why every title fell through
-        // to the single-episode fallback below.
         val epElements = document.select(
             ".eplister ul li, .episodelist ul li, .lister ul li, .naveps a, div.ep_list ul li"
         )
@@ -100,7 +95,6 @@ class NarulDonghuaProvider : MainAPI() {
             })
         }
 
-        // 2. Fallback: If no sidebar list exists, parse current page as a single/main episode
         if (episodes.isEmpty()) {
             episodes.add(newEpisode(url) {
                 this.name = title
@@ -108,7 +102,6 @@ class NarulDonghuaProvider : MainAPI() {
             })
         }
 
-        // Sort episodes reliably ascending by episode number to prevent backward playback order
         val sortedEpisodes = episodes.sortedBy { it.episode ?: 0 }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
@@ -131,13 +124,7 @@ class NarulDonghuaProvider : MainAPI() {
             var linkFound = false
 
             // ------------------------------------------------------------
-            // narulplex.p2pstream.vip custom player — confirmed via network
-            // capture that it exposes api/v1/info?id=X and
-            // api/v1/video?id=X&w=&h=&r=<domain>, eventually resolving to a
-            // signed .txt/.m3u8 CDN URL. The iframe src itself hasn't been
-            // directly captured, only these API calls, so the id-extraction
-            // below tries several common URL shapes (path segment, query
-            // param, fragment) rather than one confirmed pattern.
+            // narulplex.p2pstream.vip custom player
             // ------------------------------------------------------------
             if (src.contains("narulplex.p2pstream.vip")) {
                 val id = Regex("""[?&]id=([\w-]+)""").find(src)?.groupValues?.get(1)
@@ -145,7 +132,7 @@ class NarulDonghuaProvider : MainAPI() {
                     ?: src.substringAfterLast("#").ifBlank { null }
                     ?: src.trimEnd('/').substringAfterLast("/")
 
-                if (id.isNotBlank()) {
+                if (!id.isNullOrBlank()) {
                     try {
                         val videoApiUrl = "https://narulplex.p2pstream.vip/api/v1/video?id=$id&w=1280&h=800&r=naruldonghua.com"
                         val res = app.get(
@@ -178,13 +165,13 @@ class NarulDonghuaProvider : MainAPI() {
             }
 
             // ------------------------------------------------------------
-            // Dailymotion — confirmed via capture (cdndirector.dailymotion.com
-            // manifest link). CloudStream's built-in extractor handles the
-            // actual stream resolution once given a proper video URL.
+            // Dailymotion — FIXED regex to correctly capture video ID
             // ------------------------------------------------------------
             if (!linkFound && src.contains("dailymotion")) {
-                val dmId = Regex("""(?:video/|video=|embed/|/e/)([a-zA-Z0-9]+)""").find(src)?.groupValues?.get(1)
-                if (dmId != null) {
+                // Updated regex ensures it captures the actual ID (e.g., x8abcde) 
+                // instead of accidentally capturing the word "video"
+                val dmId = Regex("""(?:/embed/video/|/video/|video=|/embed/)([a-zA-Z0-9]+)""").find(src)?.groupValues?.get(1)
+                if (!dmId.isNullOrBlank()) {
                     try {
                         if (loadExtractor("https://www.dailymotion.com/video/$dmId", data, subtitleCallback, callback)) {
                             linkFound = true
@@ -193,10 +180,60 @@ class NarulDonghuaProvider : MainAPI() {
                 }
             }
 
-            // Generic fallback — native CloudStream extractor for anything else
-            if (!linkFound) {
+            // ------------------------------------------------------------
+            // Rumble — explicit handling with direct HLS fallback
+            // ------------------------------------------------------------
+            if (!linkFound && src.contains("rumble.com")) {
                 try {
                     if (loadExtractor(src, data, subtitleCallback, callback)) {
+                        linkFound = true
+                    } else {
+                        // Fallback: fetch the embed page and look for hls-vod or cdn.rumble.cloud direct links
+                        val embedPage = app.get(src, headers = mapOf("Referer" to data, "User-Agent" to "Mozilla/5.0")).text
+                        val rumbleMatch = Regex("""https://rumble\.com/hls-vod/[^"']+\.m3u8[^"']*""").find(embedPage)?.value
+                            ?: Regex("""https://[\w.-]+\.cdn\.rumble\.cloud/[^"']+\.m3u8[^"']*""").find(embedPage)?.value
+                        
+                        if (!rumbleMatch.isNullOrBlank()) {
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "Rumble Direct",
+                                    url = rumbleMatch,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = src
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf("Referer" to src, "Origin" to "https://rumble.com")
+                                }
+                            )
+                            linkFound = true
+                        }
+                    }
+                } catch (_: Exception) { }
+            }
+
+            // ------------------------------------------------------------
+            // Generic fallback — native CloudStream extractor or direct link
+            // ------------------------------------------------------------
+            if (!linkFound) {
+                try {
+                    // Check if src is ALREADY a direct video link (m3u8, mp4, txt)
+                    if (src.contains(".m3u8") || src.contains(".mp4") || src.contains(".txt")) {
+                        val safeUrl = if (src.contains("txt") && !src.contains(".m3u8")) "$src#.m3u8" else src
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = "Direct Stream",
+                                url = safeUrl,
+                                type = if (safeUrl.contains("m3u8") || safeUrl.contains("txt")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = data
+                                this.quality = Qualities.Unknown.value
+                                this.headers = mapOf("Referer" to data, "Origin" to mainUrl)
+                            }
+                        )
+                        linkFound = true
+                    } else if (loadExtractor(src, data, subtitleCallback, callback)) {
                         linkFound = true
                     }
                 } catch (_: Exception) { }
@@ -216,13 +253,16 @@ class NarulDonghuaProvider : MainAPI() {
         // Parse base64 dropdown servers (Mirror selector)
         document.select("select.mirror option").forEach { option ->
             val base64Val = option.attr("value")
-            if (base64Val.isNotBlank()) {
+            // Added length > 20 check to skip placeholder options like "Select Video Server"
+            if (base64Val.isNotBlank() && base64Val.length > 20) {
                 runCatching {
                     val decodedBytes = Base64.getDecoder().decode(base64Val)
-                    val decodedHtml = String(decodedBytes)
+                    val decodedHtml = String(decodedBytes).trim()
                     
+                    // Extract URL from iframe src, OR fallback to raw URL if the base64 is just a link
                     val iframeSrc = Regex("src=[\"'](.*?)[\"']", RegexOption.IGNORE_CASE).find(decodedHtml)?.groupValues?.get(1) 
                         ?: Regex("src=([^\\s>]+)", RegexOption.IGNORE_CASE).find(decodedHtml)?.groupValues?.get(1)
+                        ?: if (decodedHtml.startsWith("http")) decodedHtml else null
 
                     if (!iframeSrc.isNullOrBlank()) {
                         val fixedSrc = fixUrl(iframeSrc.trim('"', '\'', ' '))
