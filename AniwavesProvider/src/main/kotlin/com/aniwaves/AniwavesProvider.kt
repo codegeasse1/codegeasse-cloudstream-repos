@@ -150,8 +150,8 @@ class AniwavesProvider : MainAPI() {
             url.contains("placeholder") || url.contains("/ads/") || url.contains("static.") ||
             url.contains("trailer") || url.contains("poster") || url.contains("preview")
 
-        // Last-resort emitter: guarantees a link is always shown to the user
-        fun addUnvalidated(url: String, referer: String, tag: String): Boolean {
+        // FIXED: Added `suspend` because newExtractorLink is a suspend function
+        suspend fun addUnvalidated(url: String, referer: String, tag: String): Boolean {
             val isHls = url.contains("m3u8", true)
             callback(
                 newExtractorLink(
@@ -271,7 +271,6 @@ class AniwavesProvider : MainAPI() {
                 ).text.replace("\\/", "/")
 
                 val candidates = mutableListOf<String>()
-                // Use standard for loop to safely allow adding to the list inside the suspend context
                 for (m in mediaUrlRegex.findAll(embedHtml)) {
                     candidates.add(m.value)
                 }
