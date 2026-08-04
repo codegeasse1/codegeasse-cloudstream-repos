@@ -5,8 +5,11 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLDecoder
 
 class ChikiAnimationProvider : MainAPI() {
     override var mainUrl = "https://chikianimation.online"
@@ -16,9 +19,6 @@ class ChikiAnimationProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/anime/?status=&type=&order=update" to "Latest Release",
         "$mainUrl/anime/?status=&type=&order=popular" to "Popular",
@@ -55,17 +55,11 @@ class ChikiAnimationProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         return document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD (anime detail page + episode list)
-    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
@@ -92,7 +86,7 @@ class ChikiAnimationProvider : MainAPI() {
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis, .desc")?.text()
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
 
-        fun parseEpisodeGrid(doc: org.jsoup.nodes.Document, currentUrl: String): List<Episode> {
+        fun parseEpisodeGrid(doc: Document, currentUrl: String): List<Episode> {
             val elements = doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li")
             return elements.mapNotNull { li ->
                 val epLink = li.selectFirst("a")
@@ -164,58 +158,107 @@ class ChikiAnimationProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD LINKS – Dailymotion + Multi Player + videoplayerst + Rumble + fallback
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        val pageHtml = document.html()
         var found = false
 
-        // 1. Direct Dailymotion Embed
-        val dmRegex = Regex("""geo\.dailymotion\.com/player\.html\?video=([a-zA-Z0-9_]+)""")
-        val dmMatch = dmRegex.find(pageHtml)
-        if (dmMatch != null) {
-            val videoId = dmMatch.groupValues[1]
-            try {
-                if (loadExtractor("https://www.dailymotion.com/video/$videoId", data, subtitleCallback, callback)) {
-                    found = true
-                }
-            } catch (_: Exception) { }
+        // Try to get the page content
+        val response = try {
+            app.get(data)
+        } catch (e: Exception) {
+            null
         }
 
-        // 2. Iterate through mirror options to find active backups
-        document.select("option[value]").forEach { option ->
+        if (response == null) return false
+
+        val document = response.document
+        val pageHtml = response.text
+
+        // 1. Direct Dailymotion Embed - Multiple patterns
+        val dmPatterns = listOf(
+            Regex("""geo\.dailymotion\.com/player\.html\?video=([a-zA-Z0-9_]+)"""),
+            Regex("""dailymotion\.com/embed/video/([a-zA-Z0-9_]+)"""),
+            Regex("""dailymotion\.com/video/([a-zA-Z0-9_]+)""")
+        )
+
+        for (pattern in dmPatterns) {
+            val match = pattern.find(pageHtml)
+            if (match != null) {
+                val videoId = match.groupValues[1]
+                try {
+                    if (loadExtractor("https://www.dailymotion.com/video/$videoId", data, subtitleCallback, callback)) {
+                        found = true
+                        break
+                    }
+                } catch (_: Exception) { }
+            }
+        }
+
+        // 2. Process all mirror options with better decoding
+        val options = document.select("select#serverlist option, select option, select[name*='server'] option")
+        
+        for (option in options) {
             val value = option.attr("value")
-            if (value.isBlank()) return@forEach
+            if (value.isBlank()) continue
 
             try {
-                val decoded = String(Base64.decode(value, Base64.DEFAULT))
-                val src = Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                    .find(decoded)?.groupValues?.get(1)
-                    ?: Regex("""embedUrl["']?\s*content=["']([^"']+)["']""")
-                        .find(decoded)?.groupValues?.get(1)
+                // Try multiple decoding methods
+                var decoded = try {
+                    String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8)
+                } catch (e: Exception) {
+                    try {
+                        URLDecoder.decode(value, "UTF-8")
+                    } catch (e: Exception) {
+                        value
+                    }
+                }
 
-                if (src.isNullOrBlank()) return@forEach
+                // Extract src from decoded value
+                val srcPatterns = listOf(
+                    Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                    Regex("""["']([^"']*\.(?:html|php)[^"']*)["']"""),
+                    Regex("""(https?://[^\s"'<>]+)""")
+                )
 
+                var src: String? = null
+                for (pattern in srcPatterns) {
+                    val match = pattern.find(decoded)
+                    if (match != null) {
+                        src = match.groupValues[1]
+                        if (src.contains("http")) break
+                    }
+                }
+
+                if (src.isNullOrBlank()) continue
+                src = fixRelativeUrl(src, data) ?: continue
+
+                // Handle different server types
                 when {
-                    // Dailymotion Native
-                    src.contains("dailymotion") -> {
-                        val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(src)?.groupValues?.get(1)
-                        if (vid != null) {
-                            if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)) {
-                                found = true
+                    // Dailymotion
+                    src.contains("dailymotion", ignoreCase = true) -> {
+                        val vidPatterns = listOf(
+                            Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)"""),
+                            Regex("""/video/([a-zA-Z0-9_]+)""")
+                        )
+                        
+                        for (pattern in vidPatterns) {
+                            val vidMatch = pattern.find(src)
+                            if (vidMatch != null) {
+                                val vid = vidMatch.groupValues[1]
+                                if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)) {
+                                    found = true
+                                    break
+                                }
                             }
                         }
                     }
 
-                    // videoplayerst.online server
-                    src.contains("videoplayerst.online") -> {
+                    // videoplayerst.online
+                    src.contains("videoplayerst.online", ignoreCase = true) -> {
                         val code = Regex("""code=([a-zA-Z0-9_]+)""").find(src)?.groupValues?.get(1)
                         if (code != null) {
                             if (loadExtractor("https://www.dailymotion.com/video/$code", data, subtitleCallback, callback)) {
@@ -224,67 +267,195 @@ class ChikiAnimationProvider : MainAPI() {
                         }
                     }
 
-                    // Rumble Native Server
-                    src.contains("rumble.com") -> {
+                    // Rumble
+                    src.contains("rumble.com", ignoreCase = true) -> {
                         if (loadExtractor(src, data, subtitleCallback, callback)) {
                             found = true
                         }
                     }
 
-                    // rpmstream.live player
-                    src.contains("rpmstream.live") -> {
-                        val fragmentId = src.substringAfterLast("#").ifBlank { null }
+                    // rpmstream.live
+                    src.contains("rpmstream.live", ignoreCase = true) -> {
+                        val fragmentId = src.substringAfterLast("#").ifBlank {
+                            Regex("""[?&]id=([^&]+)""").find(src)?.groupValues?.get(1)
+                        }
+                        
                         if (fragmentId != null) {
                             val apiUrl = "https://chiki.rpmstream.live/api/v1/video?id=$fragmentId&w=1280&h=800&r=chikianimation.online"
-                            val apiResponse = app.get(apiUrl, headers = mapOf("Referer" to data)).text
+                            try {
+                                val apiResponse = app.get(apiUrl, headers = mapOf("Referer" to data)).text
 
-                            val m3u8Url = Regex(""""(?:url|file|src|m3u8|playlist)"\s*:\s*"([^"]+\.m3u8[^"]*)"""")
-                                .find(apiResponse)?.groupValues?.get(1)
-                                ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(apiResponse)?.value
+                                val m3u8Patterns = listOf(
+                                    Regex(""""(?:url|file|src|m3u8|playlist)"\s*:\s*"([^"]+\.m3u8[^"]*)""""),
+                                    Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
+                                )
 
-                            if (!m3u8Url.isNullOrBlank()) {
-                                val cleanUrl = m3u8Url.replace("\\/", "/")
-                                M3u8Helper.generateM3u8("Multi Player", cleanUrl, apiUrl).forEach {
-                                    callback(it)
+                                for (pattern in m3u8Patterns) {
+                                    val m3u8Match = pattern.find(apiResponse)
+                                    if (m3u8Match != null) {
+                                        val m3u8Url = m3u8Match.value.replace("\\/", "/")
+                                        try {
+                                            M3u8Helper.generateM3u8(
+                                                source = this.name,
+                                                streamUrl = m3u8Url,
+                                                referer = apiUrl
+                                            ).forEach { link ->
+                                                callback(link)
+                                                found = true
+                                            }
+                                        } catch (_: Exception) { }
+                                        break
+                                    }
                                 }
-                                found = true
-                            }
+                            } catch (_: Exception) { }
                         }
                     }
 
-                    // Generic Fallback
+                    // Generic fallback - handle any embed URL
                     else -> {
-                        val res = app.get(src, headers = mapOf("Referer" to data))
-                        val doc = res.document
+                        try {
+                            val res = app.get(src, headers = mapOf("Referer" to data))
+                            val doc = res.document
+                            val embedHtml = res.text
 
-                        doc.select("track").forEach { track ->
-                            val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
-                            val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "Subtitle" }
-                            val subUrl = fixRelativeUrl(trackSrc, src)
-                            if (!subUrl.isNullOrBlank()) {
-                                subtitleCallback(SubtitleFile(label, subUrl))
+                            // Extract subtitles
+                            doc.select("track").forEach { track ->
+                                val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
+                                val label = track.attr("label").ifBlank { 
+                                    track.attr("srclang").ifBlank { "Subtitle" }
+                                }
+                                val subUrl = fixRelativeUrl(trackSrc, src)
+                                if (!subUrl.isNullOrBlank()) {
+                                    subtitleCallback(SubtitleFile(label, subUrl))
+                                }
                             }
-                        }
 
-                        var foundStream = false
-                        doc.select("source").forEach { source ->
-                            val streamUrl = fixRelativeUrl(source.attr("src"), src)
-                            if (!streamUrl.isNullOrBlank() && (streamUrl.contains(".m3u8") || streamUrl.contains(".txt") || source.attr("type").contains("mpegurl", true))) {
-                                M3u8Helper.generateM3u8("Server", streamUrl, src).forEach { callback(it) }
-                                foundStream = true
+                            // Try to extract streams from video/source tags
+                            var foundStream = false
+                            
+                            doc.select("source, video").forEach { element ->
+                                val streamUrl = fixRelativeUrl(element.attr("src"), src)
+                                if (!streamUrl.isNullOrBlank() && 
+                                    (streamUrl.contains(".m3u8") || 
+                                     streamUrl.contains(".mp4") || 
+                                     element.attr("type").contains("mpegurl", true) ||
+                                     element.attr("type").contains("mp4", true))) {
+                                    
+                                    if (streamUrl.contains(".m3u8")) {
+                                        try {
+                                            M3u8Helper.generateM3u8(
+                                                source = this.name,
+                                                streamUrl = streamUrl,
+                                                referer = src
+                                            ).forEach { link ->
+                                                callback(link)
+                                                foundStream = true
+                                            }
+                                        } catch (_: Exception) { }
+                                    } else {
+                                        callback(
+                                            ExtractorLink(
+                                                source = this.name,
+                                                name = "Server",
+                                                url = streamUrl,
+                                                referer = src,
+                                                quality = Qualities.Unknown.value,
+                                                isM3u8 = false
+                                            )
+                                        )
+                                        foundStream = true
+                                    }
+                                }
                             }
-                        }
 
-                        if (!foundStream) {
-                            Regex("""https?://[^\s"'<>]+(?:\.m3u8|\.txt)(?:\?[^\s"'<>]*)?""").findAll(res.text).forEach { match ->
-                                M3u8Helper.generateM3u8("Server", match.value, src).forEach { callback(it) }
-                                foundStream = true
+                            // Regex fallback for m3u8/mp4 in HTML
+                            if (!foundStream) {
+                                val streamPatterns = listOf(
+                                    Regex("""https?://[^\s"'<>]+\.m3u8(?:\?[^\s"'<>]*)?"""),
+                                    Regex("""https?://[^\s"'<>]+\.mp4(?:\?[^\s"'<>]*)?"""),
+                                    Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
+                                )
+
+                                for (pattern in streamPatterns) {
+                                    val matches = pattern.findAll(embedHtml)
+                                    for (match in matches) {
+                                        val streamUrl = match.value
+                                        if (streamUrl.contains(".m3u8")) {
+                                            try {
+                                                M3u8Helper.generateM3u8(
+                                                    source = this.name,
+                                                    streamUrl = streamUrl,
+                                                    referer = src
+                                                ).forEach { link ->
+                                                    callback(link)
+                                                    foundStream = true
+                                                }
+                                            } catch (_: Exception) { }
+                                        } else {
+                                            callback(
+                                                ExtractorLink(
+                                                    source = this.name,
+                                                    name = "Server",
+                                                    url = streamUrl,
+                                                    referer = src,
+                                                    quality = Qualities.Unknown.value,
+                                                    isM3u8 = false
+                                                )
+                                            )
+                                            foundStream = true
+                                        }
+                                        if (foundStream) break
+                                    }
+                                    if (foundStream) break
+                                }
                             }
-                        }
-                        if (foundStream) found = true
+
+                            if (foundStream) found = true
+
+                        } catch (_: Exception) { }
                     }
                 }
+
+                if (found) break
+
             } catch (_: Exception) { }
+        }
+
+        // 3. Direct iframe search in page HTML
+        if (!found) {
+            val iframePattern = Regex("""<iframe[^>]+src=["']([^"']+)["']""")
+            val iframes = iframePattern.findAll(pageHtml)
+            
+            for (iframe in iframes) {
+                val src = fixRelativeUrl(iframe.groupValues[1], data) ?: continue
+                
+                try {
+                    if (src.contains("dailymotion", ignoreCase = true)) {
+                        val vidPatterns = listOf(
+                            Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)"""),
+                            Regex("""/video/([a-zA-Z0-9_]+)""")
+                        )
+                        
+                        for (pattern in vidPatterns) {
+                            val vidMatch = pattern.find(src)
+                            if (vidMatch != null) {
+                                val vid = vidMatch.groupValues[1]
+                                if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)) {
+                                    found = true
+                                    break
+                                }
+                            }
+                        }
+                    } else {
+                        if (loadExtractor(src, data, subtitleCallback, callback)) {
+                            found = true
+                            break
+                        }
+                    }
+                } catch (_: Exception) { }
+                
+                if (found) break
+            }
         }
 
         return found
