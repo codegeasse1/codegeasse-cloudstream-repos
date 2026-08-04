@@ -31,6 +31,9 @@ class AniwavesProvider : MainAPI() {
         "X-Requested-With" to "XMLHttpRequest"
     )
 
+    // Holder for links that failed validation (shown only if nothing else works)
+    class PendingLink(val url: String, val referer: String, val tag: String, val headers: Map<String, String>, val m3u8: Boolean)
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get(request.data, headers = headers).text
         val document = Jsoup.parse(html)
@@ -142,6 +145,8 @@ class AniwavesProvider : MainAPI() {
         val animeId = Regex("""animeId=([^&]+)""").find(data)?.groupValues?.get(1) ?: return false
         val epNum = Regex("""epNum=([^&]+)""").find(data)?.groupValues?.get(1) ?: "1"
 
+        val pendingLinks = mutableListOf<PendingLink>()
+
         fun originOf(url: String): String = Regex("""https?://[^/]+""").find(url)?.value ?: mainUrl
 
         val mediaUrlRegex = Regex("""https?://[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:[^\s"'<>\\]*)?""")
@@ -150,59 +155,75 @@ class AniwavesProvider : MainAPI() {
             url.contains("placeholder") || url.contains("/ads/") || url.contains("static.") ||
             url.contains("trailer") || url.contains("poster") || url.contains("preview")
 
-        // FIXED: Added `suspend` because newExtractorLink is a suspend function
-        suspend fun addUnvalidated(url: String, referer: String, tag: String): Boolean {
-            val isHls = url.contains("m3u8", true)
+        // Emits a link to the player (suspend because newExtractorLink is suspend)
+        suspend fun emitRaw(p: PendingLink) {
             callback(
                 newExtractorLink(
                     source = name,
-                    name = tag,
-                    url = url,
-                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    name = p.tag,
+                    url = p.url,
+                    type = if (p.m3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.quality = Qualities.Unknown.value
-                    this.referer = referer
-                    this.headers = mapOf("Referer" to referer, "User-Agent" to ua)
+                    this.referer = p.referer
+                    this.headers = p.headers.ifEmpty { mapOf("Referer" to p.referer, "User-Agent" to ua) }
                 }
             )
-            return true
         }
 
-        suspend fun addValidatedM3u8(url: String, referer: String, tag: String): Boolean {
+        // Tests a link on-device before showing it. This is what kills the 2001 errors.
+        suspend fun validateLink(url: String, referer: String, hdrs: Map<String, String>, m3u8: Boolean): Boolean {
             return try {
-                val res = app.get(url, headers = mapOf("Referer" to referer, "User-Agent" to ua))
-                val good = res.text.startsWith("#EXTM3U") || url.contains(".m3u8", true)
-                if (good) {
-                    callback(
-                        newExtractorLink(source = name, name = tag, url = url, type = ExtractorLinkType.M3U8) {
-                            this.quality = Qualities.Unknown.value
-                            this.referer = referer
-                            this.headers = mapOf("Referer" to referer, "User-Agent" to ua)
-                        }
-                    )
+                val h = hdrs.toMutableMap()
+                if (!h.containsKey("User-Agent")) h["User-Agent"] = ua
+                if (m3u8) {
+                    val r = app.get(url, headers = h)
+                    r.text.startsWith("#EXTM3U") || url.contains(".m3u8", true)
+                } else {
+                    app.head(url, headers = h).isSuccessful
                 }
-                good
             } catch (e: Exception) {
                 false
             }
         }
 
-        suspend fun addValidatedMp4(url: String, referer: String, tag: String): Boolean {
-            return try {
-                val head = app.head(url, headers = mapOf("Referer" to referer, "User-Agent" to ua))
-                if (head.isSuccessful) {
-                    callback(
-                        newExtractorLink(source = name, name = tag, url = url, type = ExtractorLinkType.VIDEO) {
-                            this.quality = Qualities.Unknown.value
-                            this.referer = referer
-                            this.headers = mapOf("Referer" to referer, "User-Agent" to ua)
-                        }
-                    )
-                }
-                head.isSuccessful
-            } catch (e: Exception) {
-                false
+        suspend fun tryLink(url: String, referer: String, tag: String, hdrs: Map<String, String>, m3u8: Boolean): Boolean {
+            val h = hdrs.toMutableMap()
+            if (h.isEmpty()) h["Referer"] = referer
+            if (!h.containsKey("Referer")) h["Referer"] = referer
+            if (validateLink(url, referer, h, m3u8)) {
+                emitRaw(PendingLink(url, referer, tag, h, m3u8))
+                return true
             }
+            // keep it as absolute last resort, but do NOT show it now
+            if (!isJunk(url)) pendingLinks.add(PendingLink(url, referer, tag, h, m3u8))
+            return false
+        }
+
+        // Runs a CloudStream extractor but INTERCEPTS its links and validates them too
+        suspend fun extractingLoadExtractor(url: String, tag: String): Boolean {
+            val intercepted = mutableListOf<ExtractorLink>()
+            var ok = false
+            try {
+                ok = loadExtractor(url, data, subtitleCallback) { l -> intercepted.add(l) }
+            } catch (e: Exception) {
+                ok = false
+            }
+            if (!ok || intercepted.isEmpty()) return false
+
+            var forwarded = false
+            for (l in intercepted) {
+                val m3u8 = l.type == ExtractorLinkType.M3U8 || l.url.contains("m3u8", true)
+                val h = l.headers.toMutableMap()
+                if (l.referer.isNotBlank()) h["Referer"] = l.referer
+                if (validateLink(l.url, l.referer.ifBlank { url }, h, m3u8)) {
+                    callback(l)
+                    forwarded = true
+                } else {
+                    pendingLinks.add(PendingLink(l.url, l.referer.ifBlank { url }, tag, h, m3u8))
+                }
+            }
+            return forwarded
         }
 
         suspend fun parseSubtitles(json: JSONObject) {
@@ -248,21 +269,14 @@ class AniwavesProvider : MainAPI() {
                         }.replace("\\/", "/")
 
                         if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
-                            if (streamUrl.contains("m3u8")) {
-                                if (addValidatedM3u8(streamUrl, embedUrl, tag)) return true
-                            } else {
-                                if (addValidatedMp4(streamUrl, embedUrl, tag)) return true
-                            }
-                            return addUnvalidated(streamUrl, embedUrl, tag)
+                            if (tryLink(streamUrl, embedUrl, tag, mapOf("Referer" to embedUrl), streamUrl.contains("m3u8", true))) return true
                         }
                         parseSubtitles(echoJson)
                     }
                 } catch (e: Exception) { }
             }
 
-            try {
-                if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true
-            } catch (e: Exception) { }
+            if (extractingLoadExtractor(embedUrl, tag)) return true
 
             try {
                 val embedHtml = app.get(
@@ -293,28 +307,16 @@ class AniwavesProvider : MainAPI() {
                     } catch (e: Exception) { }
                 }
 
-                var fallback: String? = null
                 for (c in candidates.distinct()) {
-                    if (fallback == null && !isJunk(c)) fallback = c
                     if (isJunk(c)) continue
-                    if (c.contains("m3u8")) {
-                        if (addValidatedM3u8(c, embedUrl, tag)) return true
-                    } else {
-                        if (addValidatedMp4(c, embedUrl, tag)) return true
-                    }
-                }
-
-                if (fallback != null) {
-                    return addUnvalidated(fallback, embedUrl, tag)
+                    if (tryLink(c, embedUrl, tag, mapOf("Referer" to embedUrl), c.contains("m3u8", true))) return true
                 }
 
                 val iframeSrc = Jsoup.parse(embedHtml).selectFirst("iframe")?.attr("src") ?: ""
                 if (iframeSrc.isNotBlank()) {
                     val cleanIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
                     if (cleanIframe != embedUrl) {
-                        try {
-                            if (loadExtractor(cleanIframe, data, subtitleCallback, callback)) return true
-                        } catch (e: Exception) { }
+                        if (extractingLoadExtractor(cleanIframe, tag)) return true
                     }
                 }
             } catch (e: Exception) { }
@@ -367,16 +369,13 @@ class AniwavesProvider : MainAPI() {
 
                         if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
                             val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|[?&]id=)([\w-]+)""").find(embedUrl)
-                            try { if (loadExtractor(embedUrl, data, subtitleCallback, callback)) serverFound = true } catch (e: Exception) { }
+                            if (extractingLoadExtractor(embedUrl, tag)) serverFound = true
                             if (!serverFound && embedIdMatch != null) {
-                                val embedId = embedIdMatch.groupValues[1]
                                 for (alt in listOf(
-                                    "https://megacloud.tv/embed-2/e-1/$embedId",
-                                    "https://vidplay.site/e/$embedId"
+                                    "https://megacloud.tv/embed-2/e-1/${embedIdMatch.groupValues[1]}",
+                                    "https://vidplay.site/e/${embedIdMatch.groupValues[1]}"
                                 )) {
-                                    try {
-                                        if (loadExtractor(alt, data, subtitleCallback, callback)) { serverFound = true; break }
-                                    } catch (e: Exception) { }
+                                    if (extractingLoadExtractor(alt, tag)) { serverFound = true; break }
                                 }
                             }
                             if (serverFound) { found = true; break }
@@ -391,6 +390,14 @@ class AniwavesProvider : MainAPI() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+
+        // LAST RESORT: only if NOTHING validated, show held-back links so the list is never empty
+        if (!found && pendingLinks.isNotEmpty()) {
+            for (p in pendingLinks.distinctBy { it.url }) {
+                emitRaw(p)
+            }
+            found = pendingLinks.isNotEmpty()
         }
 
         return found
