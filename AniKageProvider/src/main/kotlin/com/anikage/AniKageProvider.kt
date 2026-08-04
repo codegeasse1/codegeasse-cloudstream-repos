@@ -4,8 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.json.JSONObject
-import org.json.JSONArray
-import android.util.Base64
 
 class AniKageProvider : MainAPI() {
     override var mainUrl = "https://anikage.cc"
@@ -73,7 +71,7 @@ class AniKageProvider : MainAPI() {
         val sections = listOf(
             "trendinganime" to "Trending",
             "seasonalanime" to "Popular This Season",
-            "top10anime" to "Top 10 Anime",
+            "top10Anime" to "Top 10 Anime",
             "popularmovies" to "Popular Movies",
             "upcominganime" to "Coming Soon"
         )
@@ -244,7 +242,7 @@ class AniKageProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // Step 1: Get available servers for this episode
+        // Get available servers from API
         val availableProviders = mutableListOf<String>()
         try {
             val serversResponse = app.get(
@@ -253,99 +251,193 @@ class AniKageProvider : MainAPI() {
             ).text
             
             val serversJson = JSONObject(serversResponse)
-            val serversArray = serversJson.optJSONArray("servers") ?: JSONArray()
-            
-            for (i in 0 until serversArray.length()) {
-                val server = serversArray.getJSONObject(i)
-                val providerId = server.optString("id", "")
-                if (providerId.isNotBlank()) {
-                    availableProviders.add(providerId)
+            val serversArray = serversJson.optJSONArray("servers")
+            if (serversArray != null) {
+                for (i in 0 until serversArray.length()) {
+                    val server = serversArray.getJSONObject(i)
+                    val providerId = server.optString("id", "")
+                    if (providerId.isNotBlank()) {
+                        availableProviders.add(providerId)
+                    }
                 }
             }
         } catch (e: Exception) {
-            // Fallback to hardcoded list if API fails
+            // Fallback if API fails
+        }
+
+        // If no servers found, use default list
+        if (availableProviders.isEmpty()) {
             availableProviders.addAll(listOf("dib", "vibeube", "vidtube", "megatube", "megaplay", "neko", "miko", "wave", "koto"))
         }
 
-        // Step 2: Query sources for each available provider
-        val langs = listOf("sub", "dub")
+        val knownProviders = listOf(
+            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
+        )
+        
+        // Sort providers: prioritize ones from API, then known working ones
+        val activeProviders = mutableListOf<String>()
+        activeProviders.addAll(availableProviders)
+        
+        for (provider in knownProviders) {
+            if (!activeProviders.contains(provider)) {
+                activeProviders.add(provider)
+            }
+        }
 
-        for (provider in availableProviders) {
-            for (lang in langs) {
+        // Sort so Vidtube is queried first, Megaplay last
+        activeProviders.sortBy { provider ->
+            when {
+                provider == "vibeube" || provider == "vidtube" -> 0
+                provider == "megatube" || provider == "megaplay" -> 2
+                else -> 1
+            }
+        }
+
+        val langs = listOf("sub", "dub")
+        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
+
+        for (lang in langs) {
+            for (provider in activeProviders) {
+                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+
                 try {
-                    val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     
-                    val json = JSONObject(responseText)
-                    val sourcesArray = json.optJSONArray("sources") ?: continue
+                    // First, try to extract embed URLs from JSON (these are usually direct working links)
+                    try {
+                        val json = JSONObject(responseText)
+                        val embedsArray = json.optJSONArray("embeds")
+                        if (embedsArray != null) {
+                            for (i in 0 until embedsArray.length()) {
+                                val embed = embedsArray.getJSONObject(i)
+                                val embedUrl = embed.optString("url", "")
+                                val status = embed.optString("status", "")
+                                val type = embed.optString("type", "")
+                                
+                                if (embedUrl.isNotBlank() && status != "blocked") {
+                                    val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
+                                    val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                                    
+                                    val displayProviderName = when {
+                                        isVidtube -> "Vidtube"
+                                        isMegaPlay -> "MegaPlay"
+                                        else -> provider.replaceFirstChar { it.uppercase() }
+                                    }
+
+                                    callback(
+                                        newExtractorLink(
+                                            source = "AniKage",
+                                            name = "$displayProviderName ($lang) - ${type.replaceFirstChar { it.uppercase() }}",
+                                            url = embedUrl,
+                                            type = ExtractorLinkType.M3U8
+                                        ) {
+                                            this.quality = Qualities.Unknown.value
+                                            this.headers = videoHeaders
+                                        }
+                                    )
+                                    found = true
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // JSON parsing failed, continue with regex extraction
+                    }
                     
-                    // Process direct sources
-                    for (i in 0 until sourcesArray.length()) {
-                        val source = sourcesArray.getJSONObject(i)
-                        val url = source.optString("url", "")
-                        val isM3U8 = source.optBoolean("isM3U8", false)
-                        val quality = source.optString("quality", "Unknown")
+                    // Now do the original regex-based URL extraction
+                    val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
+                    
+                    for (match in matches) {
+                        val cleanUrl = match.value.replace("\\/", "/")
+                        if (exclusions.any { cleanUrl.contains(it) }) continue
                         
-                        if (url.isNotBlank()) {
-                            val displayName = provider.replaceFirstChar { it.uppercase() }
+                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                        val isDirectMp4 = cleanUrl.contains(".mp4")
+                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
+                        
+                        if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
+                            val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                            
+                            val displayProviderName = when {
+                                isVidtube -> "Vidtube"
+                                isMegaPlay -> "MegaPlay"
+                                else -> provider.replaceFirstChar { it.uppercase() }
+                            }
+
+                            val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
                             
                             callback(
                                 newExtractorLink(
                                     source = "AniKage",
-                                    name = "$displayName ($lang)",
-                                    url = url,
-                                    type = if (isM3U8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    name = "$displayProviderName ($lang)",
+                                    url = cleanUrl,
+                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.quality = Qualities.Unknown.value
+                                    this.quality = Qualities.Unknown.value 
                                     this.headers = videoHeaders
                                 }
                             )
                             found = true
-                        }
-                    }
-                    
-                    // Process embeds (often have working URLs)
-                    val embedsArray = json.optJSONArray("embeds") ?: continue
-                    for (i in 0 until embedsArray.length()) {
-                        val embed = embedsArray.getJSONObject(i)
-                        val embedUrl = embed.optString("url", "")
-                        val status = embed.optString("status", "")
-                        val type = embed.optString("type", "")
-                        
-                        // Skip blocked embeds
-                        if (status == "blocked" || embedUrl.isBlank()) continue
-                        
-                        val displayName = provider.replaceFirstChar { it.uppercase() }
-                        
-                        callback(
-                            newExtractorLink(
-                                source = "AniKage",
-                                name = "$displayName ($lang) - ${type.replaceFirstChar { it.uppercase() }}",
-                                url = embedUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.quality = Qualities.Unknown.value
-                                this.headers = videoHeaders
+                        } else if (cleanUrl.startsWith("http")) {
+                            val extractedLinks = mutableListOf<ExtractorLink>()
+                            
+                            if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
+                                extractedLinks.add(link)
+                            }) {
+                                found = true
                             }
-                        )
-                        found = true
-                    }
-                    
-                    // Process subtitles
-                    val subtitlesArray = json.optJSONArray("subtitles") ?: continue
-                    for (i in 0 until subtitlesArray.length()) {
-                        val subtitle = subtitlesArray.getJSONObject(i)
-                        val file = subtitle.optString("file", "")
-                        val label = subtitle.optString("label", "Unknown")
-                        
-                        if (file.isNotBlank()) {
-                            subtitleCallback(SubtitleFile(label, file))
+                            
+                            for (link in extractedLinks) {
+                                callback(
+                                    newExtractorLink(
+                                        source = link.source,
+                                        name = link.name,
+                                        url = link.url,
+                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = link.quality
+                                        this.headers = videoHeaders
+                                        this.extractorData = link.extractorData
+                                        this.referer = link.referer
+                                    }
+                                )
+                                found = true
+                            }
                         }
                     }
-                    
                 } catch (e: Exception) {
-                    // Provider doesn't have this episode, continue
+                    // Ignore missing endpoints quietly
                 }
+            }
+        }
+
+        // Fallback: scan the watch page HTML for direct stream URLs
+        if (!found) {
+            try {
+                val html = app.get(cleanData, headers = videoHeaders).text
+                val cleanHtml = html.replace("\\/", "/")
+                val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
+                
+                for (match in matches) {
+                    val extractedUrl = match.value
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
+                    
+                    callback(
+                        newExtractorLink(
+                            source = "AniKage",
+                            name = "Direct Stream",
+                            url = extractedUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = videoHeaders
+                        }
+                    )
+                    found = true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
