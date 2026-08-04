@@ -131,7 +131,13 @@ class NarulDonghuaProvider : MainAPI() {
             var linkFound = false
 
             // ------------------------------------------------------------
-            // narulplex.p2pstream.vip custom player
+            // narulplex.p2pstream.vip custom player — confirmed via network
+            // capture that it exposes api/v1/info?id=X and
+            // api/v1/video?id=X&w=&h=&r=<domain>, eventually resolving to a
+            // signed .txt/.m3u8 CDN URL. The iframe src itself hasn't been
+            // directly captured, only these API calls, so the id-extraction
+            // below tries several common URL shapes (path segment, query
+            // param, fragment) rather than one confirmed pattern.
             // ------------------------------------------------------------
             if (src.contains("narulplex.p2pstream.vip")) {
                 val id = Regex("""[?&]id=([\w-]+)""").find(src)?.groupValues?.get(1)
@@ -172,7 +178,9 @@ class NarulDonghuaProvider : MainAPI() {
             }
 
             // ------------------------------------------------------------
-            // Dailymotion
+            // Dailymotion — confirmed via capture (cdndirector.dailymotion.com
+            // manifest link). CloudStream's built-in extractor handles the
+            // actual stream resolution once given a proper video URL.
             // ------------------------------------------------------------
             if (!linkFound && src.contains("dailymotion")) {
                 val dmId = Regex("""(?:video/|video=|embed/|/e/)([a-zA-Z0-9]+)""").find(src)?.groupValues?.get(1)
@@ -182,55 +190,6 @@ class NarulDonghuaProvider : MainAPI() {
                             linkFound = true
                         }
                     } catch (_: Exception) { }
-                }
-            }
-
-            // ------------------------------------------------------------
-            // Rumble — confirmed final playable URL shape:
-            //   rumble.com/hls-vod/{id}/playlist.m3u8?u=0&b=0
-            // The actual iframe src for this site's Rumble embeds hasn't
-            // been captured directly, so we try loadExtractor first (in
-            // case CloudStream's built-in Rumble support already handles
-            // it), then fall back to guessing the id from common Rumble
-            // embed URL shapes (embed/{id}, embed/v{id}) and building the
-            // hls-vod URL manually.
-            // ------------------------------------------------------------
-            if (!linkFound && src.contains("rumble.com")) {
-                try {
-                    if (loadExtractor(src, data, subtitleCallback, callback)) {
-                        linkFound = true
-                    }
-                } catch (_: Exception) { }
-
-                if (!linkFound) {
-                    val rumbleId = Regex("""rumble\.com/embed/v?([\w-]+)""").find(src)?.groupValues?.get(1)
-                        ?: Regex("""[?&]video=([\w-]+)""").find(src)?.groupValues?.get(1)
-
-                    if (rumbleId != null) {
-                        try {
-                            val playlistUrl = "https://rumble.com/hls-vod/$rumbleId/playlist.m3u8?u=0&b=0"
-                            val playlistText = app.get(
-                                playlistUrl,
-                                headers = mapOf("Referer" to src, "User-Agent" to "Mozilla/5.0")
-                            ).text
-
-                            if (playlistText.contains("#EXTM3U")) {
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "Rumble",
-                                        url = playlistUrl,
-                                        type = ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = src
-                                        this.quality = Qualities.Unknown.value
-                                        this.headers = mapOf("Referer" to src)
-                                    }
-                                )
-                                linkFound = true
-                            }
-                        } catch (_: Exception) { }
-                    }
                 }
             }
 
