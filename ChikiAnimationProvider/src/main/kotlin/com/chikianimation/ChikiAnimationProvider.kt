@@ -190,15 +190,44 @@ class ChikiAnimationProvider : MainAPI() {
         // Multi Player: chiki.rpmstream.live/#<id>
         suspend fun handleRpmStream(embedUrl: String): Boolean {
             try {
-                var id = embedUrl.substringAfterLast("#").trim()
-                if (id.contains("?id=")) id = id.substringAfter("?id=")
-                id = id.substringBefore("&").trim()
-                if (id.isBlank()) return false
+                var shortId = embedUrl.substringAfterLast("#").trim()
+                if (shortId.contains("?id=")) shortId = shortId.substringAfter("?id=")
+                shortId = shortId.substringBefore("&").trim()
+                if (shortId.isBlank()) return false
+
+                // Confirmed via devtools: the iframe fragment holds a SHORT
+                // code (e.g. "mhl6wr"), but the actual playable video uses a
+                // full UUID (e.g. "b78eedac-ecff-4718-9020-847ea0e4630c")
+                // that is NOT the same string. Calling the video API
+                // directly with the short code silently returns nothing.
+                // We first hit an info/player-style endpoint with the short
+                // code to discover the real UUID hiding in that response,
+                // then use THAT for the actual video request.
+                val uuidRegex = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
+                var realId = shortId
+                val resolveEndpoints = listOf(
+                    "https://chiki.rpmstream.live/api/v1/info?id=$shortId",
+                    "https://chiki.rpmstream.live/api/v1/player?id=$shortId",
+                    "https://chiki.rpmstream.live/$shortId",
+                    "https://chiki.rpmstream.live/e/$shortId"
+                )
+                for (rep in resolveEndpoints) {
+                    val res = try {
+                        app.get(rep, headers = mapOf(
+                            "User-Agent" to UA,
+                            "Referer" to "https://chiki.rpmstream.live/",
+                            "X-Requested-With" to "XMLHttpRequest"
+                        )).text
+                    } catch (e: Exception) { continue }
+                    val match = uuidRegex.find(res)
+                    if (match != null) { realId = match.value; break }
+                }
+
                 val endpoints = listOf(
-                    "https://chiki.rpmstream.live/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online",
-                    "https://chiki.rpmstream.live/api/v1/video?id=$id",
-                    "https://chiki.rpmstream.live/api/v1/info?id=$id",
-                    "https://chiki.rpmstream.live/api/v1/player?id=$id"
+                    "https://chiki.rpmstream.live/api/v1/video?id=$realId&w=1280&h=800&r=chikianimation.online",
+                    "https://chiki.rpmstream.live/api/v1/video?id=$realId",
+                    "https://chiki.rpmstream.live/api/v1/info?id=$realId",
+                    "https://chiki.rpmstream.live/api/v1/player?id=$realId"
                 )
                 for (ep in endpoints) {
                     val res = try {
