@@ -150,20 +150,35 @@ class AniwavesProvider : MainAPI() {
             url.contains("placeholder") || url.contains("/ads/") || url.contains("static.") ||
             url.contains("trailer") || url.contains("poster") || url.contains("preview")
 
-        // ------------------------------------------------------------
-        // VALIDATION: only hand URLs to the player after a real request
-        // succeeds. This is what fixes ERROR_CODE_IO_NETWORK_CONNECTION_FAILED.
-        // ------------------------------------------------------------
+        // Last-resort emitter (old behaviour): guarantees a link is always shown
+        fun addUnvalidated(url: String, referer: String, tag: String): Boolean {
+            val isHls = url.contains("m3u8", true)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = tag,
+                    url = url,
+                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.quality = Qualities.Unknown.value
+                    this.referer = referer
+                    this.headers = mapOf("Referer" to referer, "User-Agent" to ua)
+                }
+            )
+            return true
+        }
+
+        // Preferred emitter: verify the stream actually answers first
         suspend fun addValidatedM3u8(url: String, referer: String, tag: String): Boolean {
             return try {
-                val res = app.get(url, headers = mapOf("Referer" to referer, "Origin" to originOf(referer), "User-Agent" to ua))
+                val res = app.get(url, headers = mapOf("Referer" to referer, "User-Agent" to ua))
                 val good = res.text.startsWith("#EXTM3U") || url.contains(".m3u8", true)
                 if (good) {
                     callback(
                         newExtractorLink(source = name, name = tag, url = url, type = ExtractorLinkType.M3U8) {
                             this.quality = Qualities.Unknown.value
                             this.referer = referer
-                            this.headers = mapOf("Referer" to referer, "Origin" to originOf(referer), "User-Agent" to ua)
+                            this.headers = mapOf("Referer" to referer, "User-Agent" to ua)
                         }
                     )
                 }
@@ -181,7 +196,7 @@ class AniwavesProvider : MainAPI() {
                         newExtractorLink(source = name, name = tag, url = url, type = ExtractorLinkType.VIDEO) {
                             this.quality = Qualities.Unknown.value
                             this.referer = referer
-                            this.headers = mapOf("Referer" to referer, "Origin" to originOf(referer), "User-Agent" to ua)
+                            this.headers = mapOf("Referer" to referer, "User-Agent" to ua)
                         }
                     )
                 }
@@ -203,7 +218,7 @@ class AniwavesProvider : MainAPI() {
         }
 
         suspend fun resolveEmbed(embedUrl: String, tag: String): Boolean {
-            // ---------- EchoVideo (custom API, with validation + subs) ----------
+            // ---------- EchoVideo custom API ----------
             if (embedUrl.contains("echovideo")) {
                 try {
                     val echoId = embedUrl.substringBefore("?").substringAfterLast("/")
@@ -227,25 +242,25 @@ class AniwavesProvider : MainAPI() {
                         }.replace("\\/", "/")
 
                         if (streamUrl.isNotBlank() && streamUrl.startsWith("http")) {
-                            if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4")) {
-                                if (streamUrl.contains(".m3u8")) {
-                                    if (addValidatedM3u8(streamUrl, embedUrl, tag)) return true
-                                } else {
-                                    if (addValidatedMp4(streamUrl, embedUrl, tag)) return true
-                                }
+                            if (streamUrl.contains("m3u8")) {
+                                if (addValidatedM3u8(streamUrl, embedUrl, tag)) return true
+                            } else {
+                                if (addValidatedMp4(streamUrl, embedUrl, tag)) return true
                             }
+                            // old behaviour fallback: emit anyway so the picker is never empty
+                            return addUnvalidated(streamUrl, embedUrl, tag)
                         }
                         parseSubtitles(echoJson)
                     }
                 } catch (e: Exception) { }
             }
 
-            // ---------- Let CloudStream / installed extractor repos try ----------
+            // ---------- installed CloudStream extractors ----------
             try {
                 if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true
             } catch (e: Exception) { }
 
-            // ---------- Deep scan of the embed page ----------
+            // ---------- deep scan ----------
             try {
                 val embedHtml = app.get(
                     embedUrl,
@@ -262,7 +277,6 @@ class AniwavesProvider : MainAPI() {
                     } catch (e: Exception) { }
                 }
 
-                // base64 blobs
                 for (b64 in Regex("""["']([A-Za-z0-9+/=]{60,})["']""").findAll(embedHtml)) {
                     try {
                         val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
@@ -270,13 +284,20 @@ class AniwavesProvider : MainAPI() {
                     } catch (e: Exception) { }
                 }
 
+                var fallback: String? = null
                 for (c in candidates.distinct()) {
+                    if (fallback == null && !isJunk(c)) fallback = c
                     if (isJunk(c)) continue
-                    if (c.contains(".m3u8")) {
+                    if (c.contains("m3u8")) {
                         if (addValidatedM3u8(c, embedUrl, tag)) return true
                     } else {
                         if (addValidatedMp4(c, embedUrl, tag)) return true
                     }
+                }
+
+                // LAST RESORT: emit first candidate unvalidated (never show "No Links Found")
+                if (fallback != null) {
+                    return addUnvalidated(fallback, embedUrl, tag)
                 }
 
                 // iframe hop
@@ -302,15 +323,16 @@ class AniwavesProvider : MainAPI() {
             val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
             val serverDoc = Jsoup.parse(serverHtml)
 
+            // RESTORED old (working) ID collection logic
             val serverIds = mutableListOf<String>()
-            serverDoc.select("li, a, div, span").forEach { el ->
-                val id = el.attr("data-id").ifBlank { el.attr("data-link") }.ifBlank { el.attr("data-server") }
-                if (id.isNotBlank() && id.matches(Regex("""^\w+$""")) && !serverIds.contains(id)) {
+            serverDoc.select("a, div, li, span").forEach { el ->
+                val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
+                if (id.isNotBlank() && !serverIds.contains(id)) {
                     serverIds.add(id)
                 }
             }
             if (serverIds.isEmpty()) {
-                Regex("""data-(?:link-)?id="([^"']+)" """).findAll(serverHtml).forEach { m ->
+                Regex("""data-(?:link-)?id=["']([^"'>\s]+)["']""").findAll(serverHtml).forEach { m ->
                     val v = m.groupValues[1].trim()
                     if (v.isNotBlank() && !serverIds.contains(v)) serverIds.add(v)
                 }
@@ -337,7 +359,7 @@ class AniwavesProvider : MainAPI() {
                         if (embedUrl.startsWith("//")) embedUrl = "https:$embedUrl"
                         if (embedUrl.isBlank() || !embedUrl.startsWith("http")) continue
 
-                        // Vidplay / MegaCloud family: fix broken id regex, try real URL first
+                        // Vidplay / MegaCloud family (fixed regex, no more crash)
                         if (embedUrl.contains("vidplay") || embedUrl.contains("mewcdn") || embedUrl.contains("megacloud")) {
                             val embedIdMatch = Regex("""(?:/e/|/embed-\d+/|/v/|[?&]id=)([\w-]+)""").find(embedUrl)
                             try { if (loadExtractor(embedUrl, data, subtitleCallback, callback)) serverFound = true } catch (e: Exception) { }
@@ -347,7 +369,9 @@ class AniwavesProvider : MainAPI() {
                                     "https://megacloud.tv/embed-2/e-1/$embedId",
                                     "https://vidplay.site/e/$embedId"
                                 )) {
-                                    try { if (loadExtractor(alt, data, subtitleCallback, callback)) { serverFound = true; break } } catch (e: Exception) { }
+                                    try {
+                                        if (loadExtractor(alt, data, subtitleCallback, callback)) { serverFound = true; break }
+                                    } catch (e: Exception) { }
                                 }
                             }
                             if (serverFound) { found = true; break }
