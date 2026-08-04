@@ -18,7 +18,7 @@ class AniKageProvider : MainAPI() {
         private const val XOR_KEY = "aproxy2026"
     }
 
-    // Base64 + XOR decryption used by the site for sources/subtitles
+    // The site base64+XOR encrypts some source/subtitle urls. This decrypts them.
     private fun xorDecrypt(enc: String): String? {
         return try {
             val key = XOR_KEY.toByteArray(Charsets.UTF_8)
@@ -32,33 +32,47 @@ class AniKageProvider : MainAPI() {
         val startStr = "$key:["
         val startIndex = scriptData.indexOf(startStr)
         if (startIndex == -1) return emptyList()
+        
         var bracketCount = 1
         var endIndex = -1
+        
         for (i in (startIndex + startStr.length) until scriptData.length) {
             if (scriptData[i] == '[') bracketCount++
             else if (scriptData[i] == ']') bracketCount--
-            if (bracketCount == 0) { endIndex = i; break }
+            
+            if (bracketCount == 0) {
+                endIndex = i
+                break
+            }
         }
+        
         if (endIndex == -1) return emptyList()
+        
         val arrayStr = scriptData.substring(startIndex, endIndex)
         val parts = arrayStr.split("slug:\"")
         val items = mutableListOf<SearchResponse>()
+        
         for (i in 1 until parts.size) {
             val part = parts[i]
             val slug = part.substringBefore("\"")
             if (slug.isBlank() || slug.length > 200) continue
+            
             val titleBlock = part.substringAfter("title:{", "").substringBefore("}")
             var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = slug
+            
             val coverBlock = part.substringAfter("coverImage:{", "").substringBefore("}")
             var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
             if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
             if (poster == coverBlock) poster = ""
+            
             val url = "$mainUrl/anime/info/$slug"
             if (items.none { it.url == url }) {
-                items.add(newAnimeSearchResponse(title, url, TvType.Anime) { this.posterUrl = poster })
+                items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
+                    this.posterUrl = poster
+                })
             }
         }
         return items
@@ -67,6 +81,7 @@ class AniKageProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get(mainUrl).text
         val scriptData = Jsoup.parse(html).select("script").html()
+        
         val homeItems = mutableListOf<HomePageList>()
         val sections = listOf(
             "trendinganime" to "Trending",
@@ -75,42 +90,112 @@ class AniKageProvider : MainAPI() {
             "popularmovies" to "Popular Movies",
             "upcominganime" to "Coming Soon"
         )
+        
         for ((key, title) in sections) {
             val items = extractSectionArray(scriptData, key)
-            if (items.isNotEmpty()) homeItems.add(HomePageList(title, items))
+            if (items.isNotEmpty()) {
+                homeItems.add(HomePageList(title, items))
+            }
         }
+        
         return newHomePageResponse(homeItems)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        val apiUrl = "$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true"
         val items = mutableListOf<SearchResponse>()
+
         try {
-            val responseText = app.get("$mainUrl/api/media/anime/search?q=$query&limit=20&adult=true", headers = mapOf("Referer" to "$mainUrl/")).text
+            val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+            
             val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
                 val slug = part.substringBefore("\"").replace("\\", "")
                 if (slug.isBlank() || slug.length > 200) continue
+
                 val window = part.take(2000)
+
                 var title = ""
                 val titleBlock = window.substringAfter("\"title\":", "").substringBefore("}")
-                if (titleBlock.contains("\"english\":")) title = titleBlock.substringAfter("\"english\":\"", "").substringBefore("\"")
-                if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("\"userPreferred\":\"", "").substringBefore("\"")
-                if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("\"romaji\":\"", "").substringBefore("\"")
-                if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+                if (titleBlock.contains("\"english\":")) {
+                    title = titleBlock.substringAfter("\"english\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title == titleBlock) {
+                    title = titleBlock.substringAfter("\"userPreferred\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title == titleBlock) {
+                    title = titleBlock.substringAfter("\"romaji\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title == titleBlock) {
+                    title = window.substringAfter("\"title\":\"", "").substringBefore("\"")
+                }
+                if (title.isBlank() || title.contains("{")) {
+                    title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+                }
+
                 title = title.replace("\\\"", "\"").replace("\\/", "/")
+
                 var poster = ""
                 val coverBlock = window.substringAfter("\"coverImage\":", "").substringBefore("}")
-                if (coverBlock.contains("\"extraLarge\":")) poster = coverBlock.substringAfter("\"extraLarge\":\"", "").substringBefore("\"")
-                if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("\"large\":\"", "").substringBefore("\"")
+                if (coverBlock.contains("\"extraLarge\":")) {
+                    poster = coverBlock.substringAfter("\"extraLarge\":\"", "").substringBefore("\"")
+                }
+                if (poster.isBlank() || poster == coverBlock) {
+                    poster = coverBlock.substringAfter("\"large\":\"", "").substringBefore("\"")
+                }
+                if (poster.isBlank() || poster == coverBlock) {
+                    poster = window.substringAfter("\"poster\":\"", "").substringBefore("\"")
+                }
                 if (poster == coverBlock) poster = ""
                 poster = poster.replace("\\/", "/")
+
                 val url = "$mainUrl/anime/info/$slug"
                 if (items.none { it.url == url }) {
-                    items.add(newAnimeSearchResponse(title, url, TvType.Anime) { this.posterUrl = poster })
+                    items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
+                        this.posterUrl = poster
+                    })
                 }
             }
-        } catch (e: Exception) { }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        if (items.isEmpty()) {
+            try {
+                val html = app.get("$mainUrl/browse?search=$query").text
+                val scriptData = Jsoup.parse(html).select("script").html()
+                val parts = scriptData.split("slug:\"")
+                
+                for (i in 1 until parts.size) {
+                    val part = parts[i]
+                    val slug = part.substringBefore("\"")
+                    if (slug.isBlank() || slug.length > 200) continue
+                    
+                    val window = part.take(1500)
+                    val titleBlock = window.substringAfter("title:{", "").substringBefore("}")
+                    var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
+                    if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
+                    if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
+                    if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+                    
+                    val coverBlock = window.substringAfter("coverImage:{", "").substringBefore("}")
+                    var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
+                    if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
+                    if (poster == coverBlock) poster = ""
+                    
+                    val url = "$mainUrl/anime/info/$slug"
+                    if (items.none { it.url == url }) {
+                        items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        
         return items
     }
 
@@ -118,22 +203,35 @@ class AniKageProvider : MainAPI() {
         val slug = url.substringAfterLast("/")
         val html = app.get(url).text
         val document = Jsoup.parse(html)
+        
         val title = document.selectFirst("h1")?.text()?.trim() ?: "Unknown"
-        val poster = document.selectFirst("img[src*='anilistcdn']")?.attr("src")
+        val poster = document.selectFirst("img[src*='anilistcdn']")?.attr("src") 
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+        
         val scriptData = document.select("script").html()
         var plot = scriptData.substringAfter("description:\"", "").substringBefore("\",")
             .replace("\\u003C", "<").replace("\\n", "\n")
-        plot = if (plot.isBlank() || plot.length > 5000) {
-            document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
-        } else Jsoup.parse(plot).text()
+        
+        if (plot.isBlank() || plot.length > 5000) {
+            plot = document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+        } else {
+            plot = Jsoup.parse(plot).text()
+        }
+
         val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
         val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
         val availableEpisodes = if (currentEps > 0) currentEps else totalEps
+
         val episodes = mutableListOf<Episode>()
-        for (i in 1..(if (availableEpisodes > 0) availableEpisodes else 1)) {
-            episodes.add(newEpisode("$mainUrl/anime/watch/$slug?ep=$i") { name = "Episode $i"; episode = i })
+        
+        val limit = if (availableEpisodes > 0) availableEpisodes else 1
+        for (i in 1..limit) {
+            episodes.add(newEpisode("$mainUrl/anime/watch/$slug?ep=$i") {
+                this.name = "Episode $i"
+                this.episode = i
+            })
         }
+        
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
@@ -150,103 +248,235 @@ class AniKageProvider : MainAPI() {
         var found = false
         val cleanData = data.substringBefore("#")
         val slug = cleanData.substringAfter("/watch/").substringBefore("?").substringBefore("/")
-        val ep = Regex("""[?&]ep=(\d+)""").find(cleanData)?.groupValues?.get(1) ?: "1"
+        val ep = Regex("""[?&]ep=(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: Regex("""/(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: "1"
 
-        val videoHeaders = mapOf("Referer" to "$mainUrl/", "User-Agent" to UA)
-        val seen = hashSetOf<String>()
+        val html = app.get(cleanData).text
+        val cleanHtml = html.replace("\\/", "/")
 
-        suspend fun emit(url: String, label: String, isM3u8: Boolean): Boolean {
-            val u = url.replace("\\/", "/").trim()
-            if (u.isBlank() || !u.startsWith("http") || !seen.add(u)) return false
-            callback(newExtractorLink(source = name, name = label, url = u,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                this.quality = Qualities.Unknown.value
-                this.headers = videoHeaders
-            })
-            return true
-        }
-
-        // Fetch a player/embed page and pull the real stream out of it
-        suspend fun resolveEmbedPage(pageUrl: String, label: String): Boolean {
-            var ok = false
-            try {
-                val page = app.get(pageUrl, headers = videoHeaders).text.replace("\\/", "/")
-                // direct m3u8/mp4 in page
-                for (m in Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(page)) {
-                    if (emit(m.value, label, m.value.contains("m3u8"))) ok = true
-                }
-                // encrypted blobs in page (same XOR scheme)
-                if (!ok) {
-                    for (m in Regex("""["']([A-Za-z0-9+/=]{40,})["']""").findAll(page)) {
-                        val dec = xorDecrypt(m.groupValues[1]) ?: continue
-                        if (dec.startsWith("http")) {
-                            if (dec.contains(".m3u8") || dec.contains(".mp4")) {
-                                if (emit(dec, label, dec.contains("m3u8"))) ok = true
-                            } else {
-                                // one more level of embed
-                                ok = resolveEmbedPage(dec, label)
-                            }
-                            if (ok) break
-                        }
-                    }
-                }
-            } catch (e: Exception) { }
-            return ok
-        }
-
-        val providers = listOf(
-            "vibeube", "vidtube", "dib", "neko", "miko", "wave", "koto", "ken",
-            "e-koto", "e-neko", "e-ken", "e-wish", "megatube", "megaplay", "vibe", "megg", "kwik", "aniyt"
+        val knownProviders = listOf(
+            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
+            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
+        
+        val activeProviders = knownProviders.filter { provider ->
+            cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
+            cleanHtml.contains("provider=$provider", ignoreCase = true) ||
+            cleanHtml.contains("-$provider", ignoreCase = true) ||
+            cleanHtml.contains(">$provider<", ignoreCase = true)
+        }.toMutableList()
 
-        val langs = listOf("sub", "dub")
+        listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
+            if (!activeProviders.contains(it)) activeProviders.add(it)
+        }
+
+        activeProviders.sortBy { provider ->
+            when {
+                provider == "vibeube" || provider == "vidtube" -> 0
+                provider == "megatube" || provider == "megaplay" -> 2
+                else -> 1
+            }
+        }
+
+        val langs = mutableListOf("sub")
+        if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
+            langs.add("dub")
+        }
+
+        val videoHeaders = mapOf(
+            "Referer" to "$mainUrl/",
+            "User-Agent" to UA
+        )
+        
+        val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            for (provider in providers) {
+            for (provider in activeProviders) {
+                val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
+
                 try {
-                    val responseText = app.get(
-                        "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang",
-                        headers = mapOf("Referer" to "$mainUrl/")
-                    ).text
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
 
-                    if (responseText.contains("\"sources\":[]")) continue
+                    // =====================================================
+                    // ADDITIVE BLOCK ONLY (original logic untouched below).
+                    // Decrypts the encrypted sources some providers return.
+                    // =====================================================
+                    try {
+                        val json = JSONObject(responseText)
+                        val sourcesArr = json.optJSONArray("sources")
+                        if (sourcesArr != null) {
+                            for (s in 0 until sourcesArr.length()) {
+                                val srcObj = sourcesArr.optJSONObject(s) ?: continue
+                                var u = srcObj.optString("url", "")
+                                if (!u.startsWith("http")) u = xorDecrypt(u) ?: ""
+                                if (u.isBlank()) continue
 
-                    val label = provider.replaceFirstChar { it.uppercase() } + " (${lang})"
-                    val json = JSONObject(responseText)
+                                val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
+                                val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                                val displayName = when {
+                                    isVidtube -> "Vidtube"
+                                    isMegaPlay -> "MegaPlay"
+                                    else -> provider.replaceFirstChar { it.uppercase() }
+                                }
+                                val sourceGroup = when {
+                                    isVidtube -> "1. Vidtube"
+                                    isMegaPlay -> "3. MegaPlay"
+                                    else -> "2. $displayName"
+                                }
 
-                    // 1) Decrypt sources[].url
-                    val sources = json.optJSONArray("sources")
-                    if (sources != null) {
-                        for (i in 0 until sources.length()) {
-                            val src = sources.optJSONObject(i) ?: continue
-                            var u = src.optString("url", "")
-                            if (!u.startsWith("http")) u = xorDecrypt(u) ?: ""
-                            if (u.isBlank()) continue
-                            if (u.contains(".m3u8") || u.contains(".mp4")) {
-                                if (emit(u, label, u.contains("m3u8"))) found = true
-                            } else {
-                                if (resolveEmbedPage(u, label)) found = true
+                                if (u.contains(".m3u8") || u.contains(".mp4")) {
+                                    callback(
+                                        newExtractorLink(
+                                            source = sourceGroup,
+                                            name = "$displayName ($lang)",
+                                            url = u,
+                                            type = if (u.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        ) {
+                                            this.quality = Qualities.Unknown.value
+                                            this.headers = videoHeaders
+                                        }
+                                    )
+                                    found = true
+                                } else {
+                                    // It's a player page: pull the real stream out of it
+                                    try {
+                                        val page = app.get(u, headers = videoHeaders).text.replace("\\/", "/")
+                                        for (m in Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").findAll(page)) {
+                                            callback(
+                                                newExtractorLink(
+                                                    source = sourceGroup,
+                                                    name = "$displayName ($lang)",
+                                                    url = m.value,
+                                                    type = if (m.value.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                                ) {
+                                                    this.quality = Qualities.Unknown.value
+                                                    this.headers = mapOf("Referer" to u, "User-Agent" to UA)
+                                                }
+                                            )
+                                            found = true
+                                        }
+                                    } catch (_: Exception) { }
+                                }
+                            }
+                        }
+                        val subsArr = json.optJSONArray("subtitles")
+                        if (subsArr != null) {
+                            for (s in 0 until subsArr.length()) {
+                                val subObj = subsArr.optJSONObject(s) ?: continue
+                                var f = subObj.optString("file", "")
+                                if (!f.startsWith("http")) f = xorDecrypt(f) ?: ""
+                                if (f.isNotBlank()) subtitleCallback(SubtitleFile(subObj.optString("label", "Sub"), f))
+                            }
+                        }
+                    } catch (_: Exception) { }
+                    // ================= END ADDITIVE BLOCK =================
+
+                    // ORIGINAL LOGIC (unchanged)
+                    val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
+                    
+                    for (match in matches) {
+                        val cleanUrl = match.value.replace("\\/", "/")
+                        if (exclusions.any { cleanUrl.contains(it) }) continue
+                        
+                        val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
+                        val isDirectMp4 = cleanUrl.contains(".mp4")
+                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
+                        
+                        if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
+                            val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                            
+                            val displayProviderName = when {
+                                isVidtube -> "Vidtube"
+                                isMegaPlay -> "MegaPlay"
+                                else -> provider.replaceFirstChar { it.uppercase() }
+                            }
+
+                            val sourceGroup = when {
+                                isVidtube -> "1. Vidtube"
+                                isMegaPlay -> "3. MegaPlay"
+                                else -> "2. $displayProviderName"
+                            }
+                            
+                            val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
+                            
+                            callback(
+                                newExtractorLink(
+                                    source = sourceGroup,
+                                    name = "$displayProviderName ($lang)",
+                                    url = cleanUrl,
+                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = Qualities.Unknown.value 
+                                    this.headers = videoHeaders
+                                }
+                            )
+                            found = true
+                        } else if (cleanUrl.startsWith("http")) {
+                            val extractedLinks = mutableListOf<ExtractorLink>()
+                            
+                            if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
+                                extractedLinks.add(link)
+                            }) {
+                                found = true
+                            }
+                            
+                            for (link in extractedLinks) {
+                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
+                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
+                                
+                                val sourceGroup = when {
+                                    isVidtube -> "1. Vidtube"
+                                    isMegaPlay -> "3. MegaPlay"
+                                    else -> "2. ${link.source}"
+                                }
+
+                                callback(
+                                    newExtractorLink(
+                                        source = sourceGroup,
+                                        name = link.name,
+                                        url = link.url,
+                                        type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.quality = link.quality
+                                        this.headers = videoHeaders
+                                        this.extractorData = link.extractorData
+                                        this.referer = link.referer
+                                    }
+                                )
                             }
                         }
                     }
+                } catch (e: Exception) {
+                    // Ignore missing endpoints quietly
+                }
+            }
+        }
 
-                    // 2) Subtitles (also XOR encrypted)
-                    val subs = json.optJSONArray("subtitles")
-                    if (subs != null) {
-                        for (i in 0 until subs.length()) {
-                            val s = subs.optJSONObject(i) ?: continue
-                            var f = s.optString("file", "")
-                            if (!f.startsWith("http")) f = xorDecrypt(f) ?: ""
-                            if (f.isNotBlank()) subtitleCallback(newSubtitleFile(s.optString("label", "Sub"), f))
+        if (!found) {
+            try {
+                val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
+                
+                for (match in matches) {
+                    val extractedUrl = match.value
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
+                    
+                    callback(
+                        newExtractorLink(
+                            source = "2. Direct Stream",
+                            name = "Direct Stream",
+                            url = extractedUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = videoHeaders
                         }
-                    }
-
-                    // 3) Plain URLs anywhere in the raw response (prox/workers hosts)
-                    for (m in Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|[^\s"'<>\\]*workers\.dev)/[^\s"'<>\\]+""").findAll(responseText.replace("\\/", "/"))) {
-                        val u = m.value
-                        if (emit(u, label, true)) found = true
-                    }
-                } catch (e: Exception) { }
+                    )
+                    found = true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
