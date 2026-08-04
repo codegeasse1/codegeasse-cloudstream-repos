@@ -349,7 +349,6 @@ class ReAnimeProvider : MainAPI() {
             return true
         }
 
-        // FIXED: Made pushSubs a suspend function because newSubtitleFile is suspend
         suspend fun pushSubs(text: String) {
             for (m in SUB_REGEX.findAll(text)) {
                 val u = m.value.unesc()
@@ -372,7 +371,6 @@ class ReAnimeProvider : MainAPI() {
 
         val pages = mutableListOf<String>()
 
-        // FIXED: Replaced ALL runCatching with standard try/catch to safely call suspend functions
         try { pages += app.get(cleanData, headers = siteHeaders).text } catch (e: Exception) {}
         try { pages += app.get("$mainUrl/watch/$slug?ep=$epNum", headers = siteHeaders).text } catch (e: Exception) {}
 
@@ -383,8 +381,23 @@ class ReAnimeProvider : MainAPI() {
             "$mainUrl/api/v1/watch/$slug?ep=$epNum",
             "$mainUrl/api/v1/episode/$slug-episode-$epNum/servers"
         )
+        
+        var canWatch = true // Assume true unless API says otherwise
+        
         for (u in apiCandidates) {
-            try { pages += app.get(u, headers = siteHeaders).text } catch (e: Exception) {}
+            try { 
+                val res = app.get(u, headers = siteHeaders).text
+                pages += res
+                
+                // Check if the site explicitly says this episode has no servers
+                if (u.contains("/api/v1/watch/")) {
+                    val json = JSONObject(res)
+                    val animeObj = json.optJSONObject("anime")
+                    if (animeObj != null && !animeObj.optBoolean("can_watch", true)) {
+                        canWatch = false
+                    }
+                }
+            } catch (e: Exception) {}
         }
 
         if (aniId.isNotBlank()) {
@@ -443,7 +456,12 @@ class ReAnimeProvider : MainAPI() {
         if (found) return true
 
         if (videoIds.isEmpty()) {
-            debugNote(callback, "no video id found in ${pages.size} pages")
+            // Show a helpful message if the site says it's not available
+            if (!canWatch) {
+                debugNote(callback, "Site says: Not available yet (can_watch=false)")
+            } else {
+                debugNote(callback, "no video id found in ${pages.size} pages")
+            }
             return false
         }
         debugNote(callback, "ids=${videoIds.joinToString(",").take(60)}")
@@ -555,7 +573,13 @@ class ReAnimeProvider : MainAPI() {
             if (found) break
         }
 
-        if (!found) debugNote(callback, "ids ok but no token returned")
+        if (!found) {
+            if (!canWatch) {
+                debugNote(callback, "Site confirms: No servers available (can_watch=false)")
+            } else {
+                debugNote(callback, "ids ok but no token returned")
+            }
+        }
         return found
     }
 }
