@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -166,7 +167,6 @@ class ChikiAnimationProvider : MainAPI() {
     ): Boolean {
         var found = false
 
-        // Try to get the page content
         val response = try {
             app.get(data)
         } catch (e: Exception) {
@@ -178,7 +178,7 @@ class ChikiAnimationProvider : MainAPI() {
         val document = response.document
         val pageHtml = response.text
 
-        // 1. Direct Dailymotion Embed - Multiple patterns
+        // 1. Direct Dailymotion Embed
         val dmPatterns = listOf(
             Regex("""geo\.dailymotion\.com/player\.html\?video=([a-zA-Z0-9_]+)"""),
             Regex("""dailymotion\.com/embed/video/([a-zA-Z0-9_]+)"""),
@@ -198,7 +198,7 @@ class ChikiAnimationProvider : MainAPI() {
             }
         }
 
-        // 2. Process all mirror options with better decoding
+        // 2. Process all mirror options
         val options = document.select("select#serverlist option, select option, select[name*='server'] option")
         
         for (option in options) {
@@ -206,7 +206,6 @@ class ChikiAnimationProvider : MainAPI() {
             if (value.isBlank()) continue
 
             try {
-                // Try multiple decoding methods
                 var decoded = try {
                     String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8)
                 } catch (e: Exception) {
@@ -217,7 +216,6 @@ class ChikiAnimationProvider : MainAPI() {
                     }
                 }
 
-                // Extract src from decoded value
                 val srcPatterns = listOf(
                     Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE),
                     Regex("""["']([^"']*\.(?:html|php)[^"']*)["']"""),
@@ -236,9 +234,7 @@ class ChikiAnimationProvider : MainAPI() {
                 if (src.isNullOrBlank()) continue
                 src = fixRelativeUrl(src, data) ?: continue
 
-                // Handle different server types
                 when {
-                    // Dailymotion
                     src.contains("dailymotion", ignoreCase = true) -> {
                         val vidPatterns = listOf(
                             Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)"""),
@@ -257,7 +253,6 @@ class ChikiAnimationProvider : MainAPI() {
                         }
                     }
 
-                    // videoplayerst.online
                     src.contains("videoplayerst.online", ignoreCase = true) -> {
                         val code = Regex("""code=([a-zA-Z0-9_]+)""").find(src)?.groupValues?.get(1)
                         if (code != null) {
@@ -267,14 +262,12 @@ class ChikiAnimationProvider : MainAPI() {
                         }
                     }
 
-                    // Rumble
                     src.contains("rumble.com", ignoreCase = true) -> {
                         if (loadExtractor(src, data, subtitleCallback, callback)) {
                             found = true
                         }
                     }
 
-                    // rpmstream.live
                     src.contains("rpmstream.live", ignoreCase = true) -> {
                         val fragmentId = src.substringAfterLast("#").ifBlank {
                             Regex("""[?&]id=([^&]+)""").find(src)?.groupValues?.get(1)
@@ -311,14 +304,12 @@ class ChikiAnimationProvider : MainAPI() {
                         }
                     }
 
-                    // Generic fallback - handle any embed URL
                     else -> {
                         try {
                             val res = app.get(src, headers = mapOf("Referer" to data))
                             val doc = res.document
                             val embedHtml = res.text
 
-                            // Extract subtitles
                             doc.select("track").forEach { track ->
                                 val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
                                 val label = track.attr("label").ifBlank { 
@@ -330,7 +321,6 @@ class ChikiAnimationProvider : MainAPI() {
                                 }
                             }
 
-                            // Try to extract streams from video/source tags
                             var foundStream = false
                             
                             doc.select("source, video").forEach { element ->
@@ -354,21 +344,21 @@ class ChikiAnimationProvider : MainAPI() {
                                         } catch (_: Exception) { }
                                     } else {
                                         callback(
-                                            ExtractorLink(
+                                            newExtractorLink(
                                                 source = this.name,
                                                 name = "Server",
                                                 url = streamUrl,
-                                                referer = src,
-                                                quality = Qualities.Unknown.value,
-                                                isM3u8 = false
-                                            )
+                                                type = com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
+                                            ) {
+                                                this.referer = src
+                                                this.quality = Qualities.Unknown.value
+                                            }
                                         )
                                         foundStream = true
                                     }
                                 }
                             }
 
-                            // Regex fallback for m3u8/mp4 in HTML
                             if (!foundStream) {
                                 val streamPatterns = listOf(
                                     Regex("""https?://[^\s"'<>]+\.m3u8(?:\?[^\s"'<>]*)?"""),
@@ -393,14 +383,15 @@ class ChikiAnimationProvider : MainAPI() {
                                             } catch (_: Exception) { }
                                         } else {
                                             callback(
-                                                ExtractorLink(
+                                                newExtractorLink(
                                                     source = this.name,
                                                     name = "Server",
                                                     url = streamUrl,
-                                                    referer = src,
-                                                    quality = Qualities.Unknown.value,
-                                                    isM3u8 = false
-                                                )
+                                                    type = com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
+                                                ) {
+                                                    this.referer = src
+                                                    this.quality = Qualities.Unknown.value
+                                                }
                                             )
                                             foundStream = true
                                         }
@@ -421,7 +412,6 @@ class ChikiAnimationProvider : MainAPI() {
             } catch (_: Exception) { }
         }
 
-        // 3. Direct iframe search in page HTML
         if (!found) {
             val iframePattern = Regex("""<iframe[^>]+src=["']([^"']+)["']""")
             val iframes = iframePattern.findAll(pageHtml)
