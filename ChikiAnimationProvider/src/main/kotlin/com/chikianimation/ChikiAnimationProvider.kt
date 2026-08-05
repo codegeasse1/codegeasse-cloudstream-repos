@@ -140,10 +140,13 @@ class ChikiAnimationProvider : MainAPI() {
             .replace("\\u002F", "/").replace("\\u002f", "/")
             .replace("\\u0026", "&").replace("&amp;", "&")
 
-        fun extractStreamUrl(text: String): String? =
-            Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(text)?.value
-                ?: Regex("""https?://[^\s"'<>\\]*chunklist[^\s"'<>\\]*""").find(text)?.value
-                ?: Regex("""https?://[^\s"'<>\\]*(?:rumble\.cloud|rmbl\.ws)[^\s"'<>\\]*""").find(text)?.value
+        fun extractStreamUrl(text: String): String? {
+            Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(text)?.value?.let { return it }
+            Regex("""https?://[^\s"'<>\\]*chunklist[^\s"'<>\\]*""").find(text)?.value?.let { return it }
+            Regex("""https?://[^\s"'<>\\]*(?:rumble\.cloud|rmbl\.ws)[^\s"'<>\\]*""").find(text)?.value?.let { return it }
+            Regex("""//[a-z0-9][a-z0-9.-]+/[^\s"'<>\\]*\.m3u8[^\s"'<>\\]*""").find(text)?.value?.let { return "https:$it" }
+            return null
+        }
 
         suspend fun addM3u8(url: String, referer: String, label: String): Boolean {
             return try {
@@ -169,25 +172,61 @@ class ChikiAnimationProvider : MainAPI() {
             }
         }
 
-        val jsonUrlRegex = Regex("\"(?:url|source|sources|file|src|playlist|video|stream|playback)\"\\s*:\\s*\"([^\"]+)\"")
+        val jsonUrlRegex = Regex("\"(?:url|source|sources|file|src|playlist|video|stream|playback|embed|iframe|link)\"\\s*:\\s*\"([^\"]+)\"")
 
         suspend fun scanForStream(text: String, referer: String, label: String): Boolean {
             val t = unescape(text)
             if (t.trim().startsWith("#EXTM3U")) {
-                // master playlist with absolute lines
                 extractStreamUrl(t)?.let { if (addM3u8(it, referer, label)) return true }
                 return false
             }
             extractStreamUrl(t)?.let { if (addM3u8(it, referer, label)) return true }
             for (m in jsonUrlRegex.findAll(t)) {
                 val u = unescape(m.groupValues[1])
-                if (u.startsWith("http")) { if (addM3u8(u, referer, label)) return true }
+                if (u.startsWith("http") || u.startsWith("//")) {
+                    if (addM3u8(if (u.startsWith("//")) "https:$u" else u, referer, label)) return true
+                }
             }
             for (m in Regex("\"([A-Za-z0-9+/=]{60,})\"").findAll(t)) {
                 val dec = try { String(Base64.decode(m.groupValues[1], Base64.DEFAULT)) } catch (e: Exception) { null } ?: continue
                 extractStreamUrl(unescape(dec))?.let { if (addM3u8(it, referer, label)) return true }
             }
             return false
+        }
+
+        // VPST: videoplayerst.online/watch.php?code=..
+        suspend fun handleVpst(embedUrl: String): Boolean {
+            try {
+                val res = app.get(embedUrl, headers = mapOf(
+                    "User-Agent" to UA,
+                    "Referer" to "https://videoplayerst.online/"
+                )).text
+                if (scanForStream(res, "https://videoplayerst.online/", "VPST")) return true
+            } catch (e: Exception) { }
+            return false
+        }
+
+        // Rumble embed
+        suspend fun handleRumble(embedUrl: String): Boolean {
+            try {
+                val res = app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to "https://rumble.com/")).text
+                if (scanForStream(res, "https://rumble.com/", "Rumble")) return true
+                try { if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true } catch (e: Exception) { }
+            } catch (e: Exception) { }
+            return false
+        }
+
+        // Dailymotion with deleted-video pre-check
+        suspend fun handleDailymotion(embedUrl: String): Boolean {
+            val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                ?: return false
+            try {
+                val meta = app.get("https://www.dailymotion.com/player/metadata/video/$vid", headers = mapOf("User-Agent" to UA)).text
+                if (meta.contains("\"error\"") || !meta.contains("\"qualities\"")) return false
+            } catch (e: Exception) { return false }
+            return try {
+                loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)
+            } catch (e: Exception) { false }
         }
 
         // Multi Player: chiki.rpmstream.live/#<id>
@@ -215,12 +254,20 @@ class ChikiAnimationProvider : MainAPI() {
 
                 for (ep in endpoints) {
                     val res = try { app.get(ep, headers = hdr).text } catch (e: Exception) { continue }
-                    // endpoint answered with the playlist itself -> play it directly
                     if (res.trim().startsWith("#EXTM3U")) {
                         if (addM3u8(ep, referer, "Multi Player")) return true
                     }
                     if (scanForStream(res, referer, "Multi Player")) return true
-                    // collect tokens for the player endpoint
+
+                    // the API may hand us another embed (vpst / rumble) -> delegate
+                    for (m in Regex("""https?://[^\s"'<>\\]+""").findAll(unescape(res))) {
+                        val u = m.value
+                        when {
+                            u.contains("videoplayerst.online") -> if (handleVpst(u)) return true
+                            u.contains("rumble.com/embed") || u.contains("rmbl.ws") -> if (handleRumble(u)) return true
+                        }
+                    }
+
                     for (m in Regex("[a-f0-9]{96,}").findAll(res)) tokens.add(m.value)
                     for (m in Regex("\"(?:t|token|key|sig|signature|auth)\"\\s*:\\s*\"([^\"]+)\"").findAll(res)) tokens.add(m.groupValues[1])
                 }
@@ -235,41 +282,6 @@ class ChikiAnimationProvider : MainAPI() {
                 }
             } catch (e: Exception) { }
             return false
-        }
-
-        // VPST: videoplayerst.online/watch.php?code=..
-        suspend fun handleVpst(embedUrl: String): Boolean {
-            try {
-                val res = app.get(embedUrl, headers = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to "https://videoplayerst.online/"
-                )).text
-                if (scanForStream(res, "https://videoplayerst.online/", "VPST")) return true
-            } catch (e: Exception) { }
-            return false
-        }
-
-        // Rumble embed
-        suspend fun handleRumble(embedUrl: String): Boolean {
-            try {
-                val res = app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to "https://rumble.com/")).text
-                if (scanForStream(res, "https://rumble.com/", "Rumble")) return true
-                try { if (loadExtractor(embedUrl, data, subtitleCallback, callback)) return true } catch (e: Exception) { }
-            } catch (e: Exception) { }
-            return false
-        }
-
-        // Dailymotion with deleted-video pre-check so we skip to next server
-        suspend fun handleDailymotion(embedUrl: String): Boolean {
-            val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
-                ?: return false
-            try {
-                val meta = app.get("https://www.dailymotion.com/player/metadata/video/$vid", headers = mapOf("User-Agent" to UA)).text
-                if (meta.contains("\"error\"") || !meta.contains("\"qualities\"")) return false
-            } catch (e: Exception) { return false }
-            return try {
-                loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)
-            } catch (e: Exception) { false }
         }
 
         suspend fun handleEmbed(embedUrl: String): Boolean {
