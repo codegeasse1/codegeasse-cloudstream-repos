@@ -24,9 +24,17 @@ jobs:
         with:
           gradle-version: '8.4'
 
+      # Ensure a Gradle wrapper exists so CI and local runs are consistent
+      - name: Ensure Gradle wrapper
+        run: |
+          if [ ! -f ./gradlew ]; then
+            echo "Generating Gradle wrapper (Gradle 8.4)"
+            gradle wrapper --gradle-version 8.4
+          fi
+
       # 1. Clean the project so no old classes remain
       - name: Clean project
-        run: gradle clean
+        run: ./gradlew clean --no-daemon --stacktrace
 
       # 2. Clear Gradle cache directory
       - name: Clear Gradle cache
@@ -34,9 +42,9 @@ jobs:
           rm -rf ~/.gradle/caches/* || true
           rm -rf ~/.gradle/wrapper/* || true
 
-      # 3. Build the plugins
+      # 3. Build the plugins (use wrapper and enable stacktrace/info for diagnostics)
       - name: Build plugins
-        run: gradle make makePluginsJson
+        run: ./gradlew make makePluginsJson --no-daemon --stacktrace --info
 
       # 4. Collect the output files
       - name: Collect build output
@@ -44,7 +52,7 @@ jobs:
           mkdir -p release
           find . -name "*.cs3" -not -path "./release/*" -exec cp {} release/ \;
           cp build/plugins.json release/plugins.json
-          echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]}'> release/repo.json
+          echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/build[...]'
 
       # 5. Push to the `builds` branch
       - name: Push to builds branch
