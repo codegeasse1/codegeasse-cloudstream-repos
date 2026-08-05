@@ -13,6 +13,11 @@ class LeakPornerProvider : MainAPI() {
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.NSFW)
 
+    companion object {
+        // Image CDN requires a Referer header to load properly
+        private const val IMG_REFERER = "https://leakporner.org/"
+    }
+
     // ---------- Main Page ----------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) mainUrl else "$mainUrl/page/$page/"
@@ -57,6 +62,7 @@ class LeakPornerProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = fixUrl(poster)
+            this.posterHeaders = mapOf("Referer" to IMG_REFERER) // Fixes Details page image
         }
     }
 
@@ -74,13 +80,13 @@ class LeakPornerProvider : MainAPI() {
         // 1. Scrape custom spans with data-embed
         document.select("span.change-video[data-embed], div.change-video[data-embed], a.change-video[data-embed]").forEach {
             val src = it.attr("data-embed")
-            if (src.isNotBlank()) iframeUrls.add(fixUrl(src))
+            if (src.isNotBlank() && !src.startsWith("blob:")) iframeUrls.add(fixUrl(src))
         }
 
         // 2. Scrape standard iframes
         document.select("iframe").forEach {
             val src = it.attr("src").ifBlank { it.attr("data-src") }
-            if (src.isNotBlank()) iframeUrls.add(fixUrl(src))
+            if (src.isNotBlank() && !src.startsWith("blob:")) iframeUrls.add(fixUrl(src))
         }
 
         // 3. Scrape Base64 encoded iframes
@@ -90,18 +96,21 @@ class LeakPornerProvider : MainAPI() {
             runCatching {
                 val decoded = String(Base64.getDecoder().decode(match.groupValues[1]))
                 val srcMatch = Regex("""src=["']([^"']+)["']""").find(decoded)
-                srcMatch?.groupValues?.get(1)?.let { iframeUrls.add(fixUrl(it)) }
+                srcMatch?.groupValues?.get(1)?.let { 
+                    if (!it.startsWith("blob:")) iframeUrls.add(fixUrl(it)) 
+                }
             }
         }
 
-        // 4. Process all gathered iframes (Replaced forEach with standard for-loop to allow suspend functions)
+        // 4. Process all gathered iframes 
+        // MUST use standard for-loop here to properly await suspend functions!
         for (iframeUrl in iframeUrls) {
             runCatching {
-                // Pass to built-in CloudStream extractors first (loadExtractor is a suspend function)
+                // Pass to built-in CloudStream extractors first
                 if (loadExtractor(iframeUrl, data, subtitleCallback, callback)) {
                     found = true
                 } else {
-                    // Deep scrape: Fetch the 3rd-party iframe HTML (app.get is a suspend function)
+                    // Deep scrape: Fetch the 3rd-party iframe HTML
                     val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to data)).text
                     
                     // Dig for hidden file objects
@@ -139,7 +148,6 @@ class LeakPornerProvider : MainAPI() {
 
     // ---------- Helpers ----------
     
-    // FIX: Added 'suspend' modifier here because newExtractorLink is a suspend function
     private suspend fun addStreamLink(rawUrl: String, referer: String, callback: (ExtractorLink) -> Unit) {
         val safeUrl = if (rawUrl.contains(".txt") && !rawUrl.contains(".m3u8")) "$rawUrl#.m3u8" else rawUrl
         val isM3u8 = safeUrl.contains(".m3u8")
@@ -176,6 +184,7 @@ class LeakPornerProvider : MainAPI() {
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = fixUrl(poster)
+            this.posterHeaders = mapOf("Referer" to IMG_REFERER) // Fixes Main Page / Search image
         }
     }
 
