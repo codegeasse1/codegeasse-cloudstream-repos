@@ -1,32 +1,37 @@
 plugins {
     id("com.android.library")
-    id("kotlin-android")
-    id("com.lagradost.cloudstream3.gradle")
+    kotlin("android")
+    id("com.lagradost.cloudstream3.gradle") // ✅ Required to build .cs3 extensions
 }
 
-version = 1
-
+// ✅ CloudStream's native DSL for extension metadata (Replaces the hacky _ext properties)
 cloudstream {
-    description = "Scraper for ZH Anime"
-    authors = listOf("Codegeasse")
-    status = 1
-    tvTypes = listOf("Anime")
-    iconUrl = "https://www.google.com/s2/favicons?domain=zhanime.online&sz=%size%"
+    name = "LeakPorner"
+    description = "Watch Onlyfans leaks from leakporner.org"
+    version = 1
+    authors = listOf("codegeasse")
+    tvTypes = listOf("NSFW")
+    language = "en"
 }
 
 android {
-    namespace = "com.zh.anime"
-    compileSdk = 33
+    namespace = "com.leakporner"
+    compileSdk = 33 // CloudStream currently targets 33, but 34 is fine if your environment supports it
     
     defaultConfig {
         minSdk = 21
     }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
 }
 
 dependencies {
-    val cloudstreamApi = "com.github.recloudstream:cloudstream:master-SNAPSHOT"
-    compileOnly(cloudstreamApi)
+    // ✅ Matches your GitHub Actions workflow which fetches the jar locally
+    compileOnly(files("cloudstream.jar"))
     
-    implementation("org.jsoup:jsoup:1.15.3")
-    // implementation("org.json:json:20230227") // Uncomment if you end up needing JSON parsing
+    // (Optional but recommended) Include Jsoup if you are scraping HTML
+    implementation("org.jsoup:jsoup:1.15.3") 
 }
