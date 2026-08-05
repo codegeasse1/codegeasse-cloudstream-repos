@@ -107,61 +107,113 @@ class PimpBunnyProvider : MainAPI() {
         var found = false
         val mainHtml = app.get(data, headers = headers).text
 
-        suspend fun searchForStream(html: String, referer: String) {
-            // Direct M3U8
-            Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
-                val url = match.value.replace("&amp;", "&")
-                callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
-            }
-            // Direct MP4
-            Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(html).forEach { match ->
+        suspend fun processM3u8(url: String, referer: String) {
+            try {
+                val playlist = app.get(url, headers = mapOf("Referer" to referer)).text
+                if (playlist.contains("#EXT-X-STREAM-INF")) {
+                    // Master playlist – extract each variant
+                    val lines = playlist.lines()
+                    var i = 0
+                    while (i < lines.size) {
+                        val line = lines[i]
+                        if (line.startsWith("#EXT-X-STREAM-INF")) {
+                            // parse resolution: e.g., "RESOLUTION=1280x720"
+                            val resolution = Regex("RESOLUTION=(\\d+x\\d+)").find(line)?.groupValues?.get(1)
+                            val quality = when {
+                                resolution != null -> {
+                                    val height = resolution.substringAfter("x").toIntOrNull() ?: 0
+                                    when {
+                                        height >= 2160 -> Qualities.P2160.value
+                                        height >= 1440 -> Qualities.P1440.value
+                                        height >= 1080 -> Qualities.P1080.value
+                                        height >= 720  -> Qualities.P720.value
+                                        height >= 480  -> Qualities.P480.value
+                                        height >= 360  -> Qualities.P360.value
+                                        height >= 240  -> Qualities.P240.value
+                                        else -> Qualities.P144.value
+                                    }
+                                }
+                                else -> Qualities.Unknown.value
+                            }
+                            // next line should be the URI
+                            if (i + 1 < lines.size) {
+                                val uri = lines[i + 1].trim()
+                                if (uri.isNotEmpty() && !uri.startsWith("#")) {
+                                    val streamUrl = if (uri.startsWith("http")) uri
+                                    else {
+                                        // resolve relative URL
+                                        val base = url.substringBeforeLast("/") + "/"
+                                        base + uri
+                                    }
+                                    val label = if (resolution != null) "$name - $resolution" else "$name - Variant"
+                                    callback(newExtractorLink(name, label, streamUrl, ExtractorLinkType.M3U8) {
+                                        this.referer = referer
+                                        this.quality = quality
+                                    })
+                                    found = true
+                                }
+                            }
+                        }
+                        i++
+                    }
+                } else {
+                    // Simple m3u8 (no variants)
+                    callback(newExtractorLink(name, "$name Stream", url, ExtractorLinkType.M3U8) {
+                        this.referer = referer
+                        this.quality = Qualities.Unknown.value
+                    })
+                    found = true
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 1. Direct M3U8 links
+        Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(mainHtml).forEach { match ->
+            val url = match.value.replace("&amp;", "&")
+            processM3u8(url, data)
+        }
+
+        // 2. Direct MP4 links (only add if m3u8 not found? We'll add them anyway but they might not work)
+        if (!found) {
+            Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(mainHtml).forEach { match ->
                 val url = match.value.replace("&amp;", "&")
                 callback(newExtractorLink(name, "$name MP4", url, ExtractorLinkType.VIDEO) {
-                    this.referer = referer
+                    this.referer = data
                     this.quality = Qualities.Unknown.value
                 })
                 found = true
-            }
-            // Player JSON objects (common in KVS)
-            val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
-                "config", "playInfo", "playerConfig", "videoInfo")
-            for (pName in playerNames) {
-                val match = Regex("""$pName\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL).find(html)
-                if (match != null) {
-                    try {
-                        val json = match.groupValues[1]
-                        // fixed regex: match "encrypt": <number>
-                        val encrypt = Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        // fixed regex: match "url": "<value>"
-                        val urlEncoded = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
-                        val realUrl = when (encrypt) {
-                            1 -> String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8)
-                            2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
-                            else -> urlEncoded
-                        }
-                        if (realUrl.contains(".m3u8") || realUrl.contains(".mp4")) {
-                            callback(newExtractorLink(name, "Player", realUrl,
-                                if (realUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = referer
-                                this.quality = Qualities.Unknown.value
-                            })
-                            found = true
-                            break
-                        }
-                    } catch (_: Exception) {}
-                }
             }
         }
 
-        // 1. Search main page
-        searchForStream(mainHtml, data)
+        // 3. Player JSON
+        val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
+            "config", "playInfo", "playerConfig", "videoInfo")
+        for (pName in playerNames) {
+            val match = Regex("""$pName\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL).find(mainHtml)
+            if (match != null) {
+                try {
+                    val json = match.groupValues[1]
+                    val encrypt = Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val urlEncoded = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                    val realUrl = when (encrypt) {
+                        1 -> String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8)
+                        2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
+                        else -> urlEncoded
+                    }
+                    if (realUrl.contains(".m3u8")) {
+                        processM3u8(realUrl, data)
+                    } else if (realUrl.contains(".mp4")) {
+                        callback(newExtractorLink(name, "$name MP4", realUrl, ExtractorLinkType.VIDEO) {
+                            this.referer = data
+                            this.quality = Qualities.Unknown.value
+                        })
+                        found = true
+                    }
+                } catch (_: Exception) {}
+            }
+        }
 
-        // 2. Iframes
+        // 4. Iframes
         if (!found) {
             val document = app.get(data, headers = headers).document
             val iframes = document.select("iframe")
@@ -170,14 +222,14 @@ class PimpBunnyProvider : MainAPI() {
                 if (src.isNotBlank() && src.startsWith("http")) {
                     try {
                         val iframeHtml = app.get(src, headers = headers + ("Referer" to data)).text
-                        searchForStream(iframeHtml, src)
-                        if (found) break
+                        // Re-run extraction on iframe content
+                        loadLinks(iframeHtml, isCasting, subtitleCallback, callback) // recursive
                     } catch (_: Exception) {}
                 }
             }
         }
 
-        // 3. API fallback (if a video_key parameter exists)
+        // 5. API fallback
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             val apiUrls = listOf(
@@ -189,17 +241,11 @@ class PimpBunnyProvider : MainAPI() {
             for (api in apiUrls) {
                 try {
                     val json = app.get(api, headers = headers).text
-                    // fixed regex: match "url": "<value>"
                     val urlMatch = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)
                     if (urlMatch != null) {
                         val streamUrl = urlMatch.groupValues[1]
                         if (streamUrl.contains(".m3u8")) {
-                            callback(newExtractorLink(name, "API", streamUrl, ExtractorLinkType.M3U8) {
-                                this.referer = data
-                                this.quality = Qualities.Unknown.value
-                            })
-                            found = true
-                            break
+                            processM3u8(streamUrl, data)
                         }
                     }
                 } catch (_: Exception) {}
