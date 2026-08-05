@@ -32,23 +32,22 @@ kotlin {
     }
 }
 
-// ✅ FIX 2: Pass "NSFW" as a String instead of the unresolved Enum
-cloudstream {
-    // ... your other cloudstream configs ...
-    set("extNetworkType", "NSFW") 
-}
+// NOTE: Avoid calling an unresolved `set(...)` function in this DSL. Use project extra properties
+// to expose the metadata expected by the CloudStream plugin at runtime.
+
+// Set extension metadata – CloudStream uses these properties to identify the extension
+// Use the Kotlin DSL way to set extra properties on the project
+val _ext = project.extensions.extraProperties
+_ext["extName"] = "LeakPornerProvider"
+_ext["extVersionCode"] = 1
+_ext["extVersionName"] = "1.0.0"
+_ext["extDescription"] = "Watch Onlyfans leaks from leakporner.org"
+_ext["extAuthor"] = "YourName"
+_ext["extLanguage"] = "en"
+// Provide network type as a plain String (avoid unresolved enum reference)
+_ext["extNetworkType"] = "NSFW"
+
 
 dependencies {
     implementation(project(":cloudstream3"))
-}
-
-// Extension metadata – CloudStream uses this to identify the extension
-ext {
-    set("extName", "LeakPornerProvider")
-    set("extVersionCode", 1)
-    set("extVersionName", "1.0.0")
-    set("extDescription", "Watch Onlyfans leaks from leakporner.org")
-    set("extAuthor", "YourName")
-    set("extLanguage", "en")
-    set("extNetworkType", ProviderType.NSFW)  // NSFW provider
 }
