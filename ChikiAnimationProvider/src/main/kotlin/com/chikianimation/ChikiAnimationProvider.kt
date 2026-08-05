@@ -148,7 +148,7 @@ class ChikiAnimationProvider : MainAPI() {
         } catch (e: Exception) { null }
     }
 
-    override suspend fun loadLinks(
+      override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -242,75 +242,68 @@ class ChikiAnimationProvider : MainAPI() {
             } catch (e: Exception) { false }
         }
 
-        // Multi Player: encrypted /api/v1/video + runtime key hunt + hlsmod proxy
+        // Multi Player: Fetches API JSON config and extracts the stream URL
         suspend fun handleRpmStream(embedUrl: String): Boolean {
             try {
-                var id = embedUrl.substringAfterLast("#").trim()
-                if (id.contains("?id=")) id = id.substringAfter("?id=")
-                id = id.substringBefore("&").trim()
+                var id = embedUrl.substringAfterLast("#", "").trim()
+                if (id.isBlank() || id.contains("/")) {
+                    id = embedUrl.substringAfter("?id=", "").substringBefore("&").trim()
+                }
+                if (id.isBlank()) {
+                    id = embedUrl.substringAfterLast("/").trim()
+                }
                 if (id.isBlank()) return false
 
                 val referer = "$RPM/"
                 val hdr = mapOf("User-Agent" to UA, "Referer" to referer, "X-Requested-With" to "XMLHttpRequest")
 
-                // 1) plain answers first
+                // The JS uses fetch('/api/...?id=' + hash) to get the video config as JSON
                 val endpoints = listOf(
-                    "$RPM/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online",
                     "$RPM/api/v1/video?id=$id",
-                    "$RPM/api/v1/info?id=$id"
+                    "$RPM/api/v1/info?id=$id",
+                    "$RPM/api/video?id=$id",
+                    "$RPM/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online"
                 )
 
-                var blobHex = ""
                 for (ep in endpoints) {
                     val res = try { app.get(ep, headers = hdr).text } catch (e: Exception) { continue }
-                    if (res.trim().startsWith("#EXTM3U")) { if (addM3u8(ep, referer, "Multi Player")) return true }
+                    if (res.isBlank()) continue
+                    
+                    // Direct M3U8 response
+                    if (res.trim().startsWith("#EXTM3U")) { 
+                        if (addM3u8(ep, referer, "Multi Player")) return true 
+                    }
+                    
+                    // JSON response containing the stream URL
                     if (scanForStream(res, referer, "Multi Player")) return true
-                    if (blobHex.isBlank() && res.trim().matches(Regex("""[0-9a-fA-F\s]{200,}"""))) blobHex = res.trim()
+                    
+                    // Base64 encoded response fallback
+                    try {
+                        val decoded = String(Base64.decode(res.trim(), Base64.DEFAULT))
+                        if (scanForStream(decoded, referer, "Multi Player")) return true
+                    } catch (e: Exception) {}
                 }
 
-                // 2) decrypt the blob: hunt AES key inside the site's JS bundle
-                if (blobHex.isNotBlank()) {
-                    val blob = hexToBytes(blobHex.replace("\\s".toRegex(), ""))
-                    if (blob != null) {
-                        val jsPath = Regex("""src="(/assets/[^"]+\.js)"""").find(
-                            app.get(RPM + "/", headers = mapOf("User-Agent" to UA, "Referer" to data)).text
-                        )?.groupValues?.get(1)
-
-                        if (jsPath != null) {
-                            val js = try { app.get("$RPM$jsPath", headers = mapOf("User-Agent" to UA)).text } catch (e: Exception) { "" }
-                            val candidates = linkedSetOf<String>()
-                            for (m in Regex("""["']([A-Za-z0-9+/=]{16,44})["']""").findAll(js)) candidates.add(m.groupValues[1])
-                            for (m in Regex("""["']([0-9a-fA-F]{32,64})["']""").findAll(js)) candidates.add(m.groupValues[1])
-
-                            outer@ for (c in candidates.take(300)) {
-                                val keyBytes = if (c.matches(Regex("""^[0-9a-fA-F]+$""")) && c.length % 2 == 0)
-                                    hexToBytes(c) ?: c.toByteArray(Charsets.UTF_8)
-                                else c.toByteArray(Charsets.UTF_8)
-
-                                for (blobTry in listOf(blob, blob.copyOfRange(16, blob.size))) {
-                                    for (iv in listOf(ByteArray(16), keyBytes.copyOfRange(0, 16))) {
-                                        val dec = aesDecrypt(blobTry, keyBytes, iv) ?: continue
-                                        val ok = dec.startsWith("#EXTM3U") || dec.trim().startsWith("{") || dec.contains("m3u8")
-                                        if (!ok) continue
-
-                                        // rewrite upstream urls through the hlsmod proxy like the browser does
-                                        val proxied = Regex("""https?://([a-z0-9.-]+)/([^\s"'<>\\]+)""").replace(dec) { mr ->
-                                            "$RPM/hlsmod/${mr.groupValues[1]}/${mr.groupValues[2].let {
-                                                if (it.contains("?")) "${it.substringBefore("?")}?${it.substringAfter("?")}" else it
-                                            }}?v=${System.currentTimeMillis() / 1000}"
-                                        }
-
-                                        val stream = extractStreamUrl(proxied) ?: extractStreamUrl(dec)
-                                        if (stream != null) {
-                                            if (addM3u8(stream, referer, "Multi Player")) return true
-                                        } else if (proxied.trim().startsWith("#EXTM3U")) {
-                                            if (addM3u8("$RPM/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online", referer, "Multi Player")) return true
-                                        }
-                                    }
-                                }
-                            }
+                // Fallback: Fetch the embed page itself to find the exact API endpoint or inline sources
+                val embedPage = try { 
+                    app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)).text 
+                } catch (e: Exception) { "" }
+                
+                if (embedPage.isNotBlank()) {
+                    // Look for dynamic API calls like fetch("/api/...id...")
+                    val apiMatches = Regex("""fetch\s*\(\s*['"]([^'"]+)['"]""").findAll(embedPage)
+                    for (match in apiMatches) {
+                        var apiUrl = match.groupValues[1]
+                        if (apiUrl.contains("id=") || apiUrl.contains("/api/")) {
+                            apiUrl = apiUrl.replace("'+id+'", id).replace("\${id}", id).replace("+id+", id)
+                            val fullApiUrl = if (apiUrl.startsWith("http")) apiUrl else "$RPM${apiUrl}"
+                            val res = try { app.get(fullApiUrl, headers = hdr).text } catch (e: Exception) { "" }
+                            if (res.isNotBlank() && scanForStream(res, referer, "Multi Player")) return true
                         }
                     }
+                    
+                    // Scan the embed page itself for any hidden sources
+                    if (scanForStream(embedPage, referer, "Multi Player")) return true
                 }
             } catch (e: Exception) { }
             return false
@@ -374,4 +367,3 @@ class ChikiAnimationProvider : MainAPI() {
 
         return found
     }
-}
