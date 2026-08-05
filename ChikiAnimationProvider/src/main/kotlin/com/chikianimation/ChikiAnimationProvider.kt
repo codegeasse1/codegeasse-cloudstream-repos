@@ -11,6 +11,9 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class ChikiAnimationProvider : MainAPI() {
     override var mainUrl = "https://chikianimation.online"
@@ -22,6 +25,7 @@ class ChikiAnimationProvider : MainAPI() {
 
     companion object {
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        private const val RPM = "https://chiki.rpmstream.live"
     }
 
     override val mainPage = mainPageOf(
@@ -125,6 +129,25 @@ class ChikiAnimationProvider : MainAPI() {
         }
     }
 
+    private fun hexToBytes(hex: String): ByteArray? {
+        if (hex.length % 2 != 0 || hex.length < 32) return null
+        if (!hex.all { it in "0123456789abcdefABCDEF" }) return null
+        return try {
+            ByteArray(hex.length / 2) { i ->
+                ((Character.digit(hex[i * 2], 16) shl 4) + Character.digit(hex[i * 2 + 1], 16)).toByte()
+            }
+        } catch (e: Exception) { null }
+    }
+
+    private fun aesDecrypt(blob: ByteArray, key: ByteArray, iv: ByteArray): String? {
+        if (key.size !in intArrayOf(16, 24, 32) || iv.size != 16) return null
+        return try {
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            String(cipher.doFinal(blob), Charsets.UTF_8)
+        } catch (e: Exception) { null }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -143,7 +166,7 @@ class ChikiAnimationProvider : MainAPI() {
         fun extractStreamUrl(text: String): String? {
             Regex("""https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*""").find(text)?.value?.let { return it }
             Regex("""https?://[^\s"'<>\\]*chunklist[^\s"'<>\\]*""").find(text)?.value?.let { return it }
-            Regex("""https?://[^\s"'<>\\]*(?:rumble\.cloud|rmbl\.ws)[^\s"'<>\\]*""").find(text)?.value?.let { return it }
+            Regex("""https?://[^\s"'<>\\]*(?:rumble\.cloud|rmbl\.ws|tiktokcdn\.com)[^\s"'<>\\]*""").find(text)?.value?.let { return it }
             Regex("""//[a-z0-9][a-z0-9.-]+/[^\s"'<>\\]*\.m3u8[^\s"'<>\\]*""").find(text)?.value?.let { return "https:$it" }
             return null
         }
@@ -187,26 +210,17 @@ class ChikiAnimationProvider : MainAPI() {
                     if (addM3u8(if (u.startsWith("//")) "https:$u" else u, referer, label)) return true
                 }
             }
-            for (m in Regex("\"([A-Za-z0-9+/=]{60,})\"").findAll(t)) {
-                val dec = try { String(Base64.decode(m.groupValues[1], Base64.DEFAULT)) } catch (e: Exception) { null } ?: continue
-                extractStreamUrl(unescape(dec))?.let { if (addM3u8(it, referer, label)) return true }
-            }
             return false
         }
 
-        // VPST: videoplayerst.online/watch.php?code=..
         suspend fun handleVpst(embedUrl: String): Boolean {
             try {
-                val res = app.get(embedUrl, headers = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to "https://videoplayerst.online/"
-                )).text
+                val res = app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to "https://videoplayerst.online/")).text
                 if (scanForStream(res, "https://videoplayerst.online/", "VPST")) return true
             } catch (e: Exception) { }
             return false
         }
 
-        // Rumble embed
         suspend fun handleRumble(embedUrl: String): Boolean {
             try {
                 val res = app.get(embedUrl, headers = mapOf("User-Agent" to UA, "Referer" to "https://rumble.com/")).text
@@ -216,7 +230,6 @@ class ChikiAnimationProvider : MainAPI() {
             return false
         }
 
-        // Dailymotion with deleted-video pre-check
         suspend fun handleDailymotion(embedUrl: String): Boolean {
             val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
                 ?: return false
@@ -229,7 +242,7 @@ class ChikiAnimationProvider : MainAPI() {
             } catch (e: Exception) { false }
         }
 
-        // Multi Player: chiki.rpmstream.live/#<id>
+        // Multi Player: encrypted /api/v1/video + runtime key hunt + hlsmod proxy
         suspend fun handleRpmStream(embedUrl: String): Boolean {
             try {
                 var id = embedUrl.substringAfterLast("#").trim()
@@ -237,48 +250,67 @@ class ChikiAnimationProvider : MainAPI() {
                 id = id.substringBefore("&").trim()
                 if (id.isBlank()) return false
 
-                val referer = "https://chiki.rpmstream.live/"
-                val hdr = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to referer,
-                    "X-Requested-With" to "XMLHttpRequest"
-                )
+                val referer = "$RPM/"
+                val hdr = mapOf("User-Agent" to UA, "Referer" to referer, "X-Requested-With" to "XMLHttpRequest")
 
+                // 1) plain answers first
                 val endpoints = listOf(
-                    "https://chiki.rpmstream.live/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online",
-                    "https://chiki.rpmstream.live/api/v1/video?id=$id",
-                    "https://chiki.rpmstream.live/api/v1/info?id=$id"
+                    "$RPM/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online",
+                    "$RPM/api/v1/video?id=$id",
+                    "$RPM/api/v1/info?id=$id"
                 )
 
-                val tokens = mutableListOf<String>()
-
+                var blobHex = ""
                 for (ep in endpoints) {
                     val res = try { app.get(ep, headers = hdr).text } catch (e: Exception) { continue }
-                    if (res.trim().startsWith("#EXTM3U")) {
-                        if (addM3u8(ep, referer, "Multi Player")) return true
-                    }
+                    if (res.trim().startsWith("#EXTM3U")) { if (addM3u8(ep, referer, "Multi Player")) return true }
                     if (scanForStream(res, referer, "Multi Player")) return true
-
-                    // the API may hand us another embed (vpst / rumble) -> delegate
-                    for (m in Regex("""https?://[^\s"'<>\\]+""").findAll(unescape(res))) {
-                        val u = m.value
-                        when {
-                            u.contains("videoplayerst.online") -> if (handleVpst(u)) return true
-                            u.contains("rumble.com/embed") || u.contains("rmbl.ws") -> if (handleRumble(u)) return true
-                        }
-                    }
-
-                    for (m in Regex("[a-f0-9]{96,}").findAll(res)) tokens.add(m.value)
-                    for (m in Regex("\"(?:t|token|key|sig|signature|auth)\"\\s*:\\s*\"([^\"]+)\"").findAll(res)) tokens.add(m.groupValues[1])
+                    if (blobHex.isBlank() && res.trim().matches(Regex("""[0-9a-fA-F\s]{200,}"""))) blobHex = res.trim()
                 }
 
-                for (tok in tokens.distinct()) {
-                    val playerUrl = "https://chiki.rpmstream.live/api/v1/player?t=$tok"
-                    val res = try { app.get(playerUrl, headers = hdr).text } catch (e: Exception) { continue }
-                    if (res.trim().startsWith("#EXTM3U")) {
-                        if (addM3u8(playerUrl, referer, "Multi Player")) return true
+                // 2) decrypt the blob: hunt AES key inside the site's JS bundle
+                if (blobHex.isNotBlank()) {
+                    val blob = hexToBytes(blobHex.replace("\\s".toRegex(), ""))
+                    if (blob != null) {
+                        val jsPath = Regex("""src="(/assets/[^"]+\.js)"""").find(
+                            app.get(RPM + "/", headers = mapOf("User-Agent" to UA, "Referer" to data)).text
+                        )?.groupValues?.get(1)
+
+                        if (jsPath != null) {
+                            val js = try { app.get("$RPM$jsPath", headers = mapOf("User-Agent" to UA)).text } catch (e: Exception) { "" }
+                            val candidates = linkedSetOf<String>()
+                            for (m in Regex("""["']([A-Za-z0-9+/=]{16,44})["']""").findAll(js)) candidates.add(m.groupValues[1])
+                            for (m in Regex("""["']([0-9a-fA-F]{32,64})["']""").findAll(js)) candidates.add(m.groupValues[1])
+
+                            outer@ for (c in candidates.take(300)) {
+                                val keyBytes = if (c.matches(Regex("""^[0-9a-fA-F]+$""")) && c.length % 2 == 0)
+                                    hexToBytes(c) ?: c.toByteArray(Charsets.UTF_8)
+                                else c.toByteArray(Charsets.UTF_8)
+
+                                for (blobTry in listOf(blob, blob.copyOfRange(16, blob.size))) {
+                                    for (iv in listOf(ByteArray(16), keyBytes.copyOfRange(0, 16))) {
+                                        val dec = aesDecrypt(blobTry, keyBytes, iv) ?: continue
+                                        val ok = dec.startsWith("#EXTM3U") || dec.trim().startsWith("{") || dec.contains("m3u8")
+                                        if (!ok) continue
+
+                                        // rewrite upstream urls through the hlsmod proxy like the browser does
+                                        val proxied = Regex("""https?://([a-z0-9.-]+)/([^\s"'<>\\]+)""").replace(dec) { mr ->
+                                            "$RPM/hlsmod/${mr.groupValues[1]}/${mr.groupValues[2].let {
+                                                if (it.contains("?")) "${it.substringBefore("?")}?${it.substringAfter("?")}" else it
+                                            }}?v=${System.currentTimeMillis() / 1000}"
+                                        }
+
+                                        val stream = extractStreamUrl(proxied) ?: extractStreamUrl(dec)
+                                        if (stream != null) {
+                                            if (addM3u8(stream, referer, "Multi Player")) return true
+                                        } else if (proxied.trim().startsWith("#EXTM3U")) {
+                                            if (addM3u8("$RPM/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online", referer, "Multi Player")) return true
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if (scanForStream(res, referer, "Multi Player")) return true
                 }
             } catch (e: Exception) { }
             return false
@@ -335,7 +367,7 @@ class ChikiAnimationProvider : MainAPI() {
         // 4) raw stream url anywhere in page
         if (!found) {
             extractStreamUrl(unescape(pageHtml))?.let { m3u8 ->
-                val referer = if (m3u8.contains("rumble.cloud") || m3u8.contains("rmbl.ws")) "https://videoplayerst.online/" else "$mainUrl/"
+                val referer = if (m3u8.contains("rumble.cloud") || m3u8.contains("rmbl.ws") || m3u8.contains("tiktokcdn")) "https://videoplayerst.online/" else "$mainUrl/"
                 if (addM3u8(m3u8, referer, "Direct")) found = true
             }
         }
