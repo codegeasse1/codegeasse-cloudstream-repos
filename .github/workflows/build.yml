@@ -38,7 +38,7 @@ jobs:
             "name": "Codegeasse Repo",
             "description": "Anime4i CloudStream extensions",
             "manifestVersion": 1,
-            "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]
+            "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/repo.json"]
           }
           EOF
 
