@@ -84,9 +84,9 @@ class LeakPornerProvider : MainAPI() {
                               document.select("article.loop-video, article.post").isNotEmpty())
 
         if (isActorProfile) {
-            val actorTitle = document.selectFirst("h1.entry-title, h1.page-title, h1, .actor-details h1")?.text()
-                ?: document.select("meta[property=og:title]").attr("content").substringBefore("-").trim()
-                ifBlank { "Actor Profile" }
+            // FIX: Added the missing dot before ifBlank
+            val actorTitle = document.selectFirst("h1.entry-title, h1.page-title, h1, .actor-details h1")?.text()?.ifBlank { null }
+                ?: document.select("meta[property=og:title]").attr("content").substringBefore("-").trim().ifBlank { "Actor Profile" }
 
             val actorPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
                 ?: document.selectFirst(".actor-image img, .post-thumbnail img")?.let {
