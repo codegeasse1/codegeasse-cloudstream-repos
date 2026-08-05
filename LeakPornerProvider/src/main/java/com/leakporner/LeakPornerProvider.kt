@@ -19,7 +19,6 @@ class LeakPornerProvider : MainAPI() {
         val document = app.get(url).document
         val items = document.select("article.loop-video, article.post").mapNotNull { el -> parseVideoItem(el) }
         
-        // FIX: The site uses <a>Next</a> instead of <a class="next">
         val hasNext = document.select(".pagination a").any { 
             it.text().trim().equals("Next", ignoreCase = true) 
         }
@@ -46,7 +45,6 @@ class LeakPornerProvider : MainAPI() {
             ?: document.select("meta[property=og:title]").attr("content")
             ?: "No title"
         
-        // FIX: Added itemprop=thumbnailUrl fallback for schema.org metadata
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
             ?: document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content")
             ?: document.selectFirst(".post-thumbnail img, .video-player img")?.let {
@@ -73,13 +71,13 @@ class LeakPornerProvider : MainAPI() {
         val document = app.get(data).document
         val iframeUrls = mutableSetOf<String>()
 
-        // 1. FIX: LeakPorner uses custom spans with data-embed for players instead of direct iframes
+        // 1. Scrape custom spans with data-embed
         document.select("span.change-video[data-embed], div.change-video[data-embed], a.change-video[data-embed]").forEach {
             val src = it.attr("data-embed")
             if (src.isNotBlank()) iframeUrls.add(fixUrl(src))
         }
 
-        // 2. Scrape standard iframes (as a fallback)
+        // 2. Scrape standard iframes
         document.select("iframe").forEach {
             val src = it.attr("src").ifBlank { it.attr("data-src") }
             if (src.isNotBlank()) iframeUrls.add(fixUrl(src))
@@ -96,14 +94,14 @@ class LeakPornerProvider : MainAPI() {
             }
         }
 
-        // 4. Process all gathered iframes
-        iframeUrls.forEach { iframeUrl ->
+        // 4. Process all gathered iframes (Replaced forEach with standard for-loop to allow suspend functions)
+        for (iframeUrl in iframeUrls) {
             runCatching {
-                // Pass to built-in CloudStream extractors first
+                // Pass to built-in CloudStream extractors first (loadExtractor is a suspend function)
                 if (loadExtractor(iframeUrl, data, subtitleCallback, callback)) {
                     found = true
                 } else {
-                    // Deep scrape: Fetch the 3rd-party iframe HTML
+                    // Deep scrape: Fetch the 3rd-party iframe HTML (app.get is a suspend function)
                     val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to data)).text
                     
                     // Dig for hidden file objects
@@ -112,14 +110,14 @@ class LeakPornerProvider : MainAPI() {
 
                     var iframeFound = false
                     
-                    streamRegex.findAll(iframeHtml).forEach { match ->
+                    for (match in streamRegex.findAll(iframeHtml)) {
                         val streamUrl = match.groupValues[1].replace("\\/", "/")
                         addStreamLink(streamUrl, iframeUrl, callback)
                         iframeFound = true
                     }
 
                     if (!iframeFound) {
-                        rawUrlRegex.findAll(iframeHtml).forEach { match ->
+                        for (match in rawUrlRegex.findAll(iframeHtml)) {
                             val streamUrl = match.groupValues[1].replace("\\/", "/")
                             addStreamLink(streamUrl, iframeUrl, callback)
                         }
@@ -130,7 +128,7 @@ class LeakPornerProvider : MainAPI() {
 
         // 5. Main Page Fallback Regex
         val directStreamRegex = Regex("""(?:file|src|url)["']?\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""")
-        directStreamRegex.findAll(docText).forEach { match ->
+        for (match in directStreamRegex.findAll(docText)) {
             val streamUrl = match.groupValues[1].replace("\\/", "/")
             addStreamLink(streamUrl, data, callback)
             found = true
@@ -140,8 +138,9 @@ class LeakPornerProvider : MainAPI() {
     }
 
     // ---------- Helpers ----------
-    private fun addStreamLink(rawUrl: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        // ExoPlayer refuses to play .txt or .tar HLS manifests unless explicitly labeled
+    
+    // FIX: Added 'suspend' modifier here because newExtractorLink is a suspend function
+    private suspend fun addStreamLink(rawUrl: String, referer: String, callback: (ExtractorLink) -> Unit) {
         val safeUrl = if (rawUrl.contains(".txt") && !rawUrl.contains(".m3u8")) "$rawUrl#.m3u8" else rawUrl
         val isM3u8 = safeUrl.contains(".m3u8")
 
@@ -162,7 +161,6 @@ class LeakPornerProvider : MainAPI() {
         val linkEl = element.selectFirst("a[href]") ?: return null
         val href = linkEl.attr("href")
         
-        // Advanced Lazy Load Image Scraper
         val posterEl = element.selectFirst("img")
         val poster = posterEl?.let {
             it.attr("data-src").ifBlank { null }
@@ -172,7 +170,6 @@ class LeakPornerProvider : MainAPI() {
                 ?: it.attr("src")
         } ?: ""
         
-        // FIX: Added linkEl title attribute as a fallback
         val title = element.selectFirst(".entry-header span, .post-title, .title, .entry-title")?.text() 
             ?: linkEl.attr("title")
             ?: "No title"
