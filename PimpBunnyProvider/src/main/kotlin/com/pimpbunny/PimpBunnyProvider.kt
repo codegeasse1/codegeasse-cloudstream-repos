@@ -32,7 +32,6 @@ class PimpBunnyProvider : MainAPI() {
         }
     }
 
-    // ----- Added actual category links here so they appear as lists in CloudStream -----
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
         "$mainUrl/categories/4k/" to "4K",
@@ -63,18 +62,31 @@ class PimpBunnyProvider : MainAPI() {
         // ----- Home / category video listing -----
         val docUrl = if (page == 1) request.data else "${request.data}${page}/"
         val document = app.get(docUrl, headers = headers).document
-        val items = document.select("div.b6m-video").mapNotNull { it.toSearchResult() }
         
-        return newHomePageResponse(request.name, items)
+        // Expanded selectors to catch both Home and Category page layouts
+        val items = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post").mapNotNull { it.toSearchResult() }
+        
+        // Dynamic pagination check
+        val hasNext = document.select(".pagination a.next, .page-next, a[rel=next]").isNotEmpty() || items.size >= 16
+        
+        return newHomePageResponse(
+            list = listOf(HomePageList(request.name, items)),
+            hasNext = hasNext
+        )
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val link = this.selectFirst("a[href*=/videos/]") ?: return null
+        // Fallback to standard <a> if specific video class is missing, but exclude category links
+        val link = this.selectFirst("a[href*=/video]") ?: this.selectFirst("a") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
+        if (href.contains("/categories/") || href.contains("/models/") || href.contains("/channels/")) return null
+        
         val img = this.selectFirst("img")
-        val title = img?.attr("alt")?.trim()
-            ?: this.selectFirst(".ui-card-title, .text-truncate")?.text()?.trim()
+        val title = img?.attr("alt")?.trim()?.ifBlank { null }
+            ?: link.attr("title")?.trim()?.ifBlank { null }
+            ?: this.selectFirst(".ui-card-title, .text-truncate, .title, .video-title")?.text()?.trim()
             ?: return null
+            
         val posterUrl = fixUrlNull(
             img?.attr("data-original")?.ifBlank { img.attr("data-src")?.ifBlank { img.attr("src") } }
         )
@@ -92,7 +104,9 @@ class PimpBunnyProvider : MainAPI() {
             val docUrl = if (page == 1) "$mainUrl/search/$encodedQuery/"
                          else "$mainUrl/search/$encodedQuery/$page/"
             val document = app.get(docUrl, headers = headers).document
-            val items = document.select("div.b6m-video").mapNotNull { it.toSearchResult() }
+            
+            // Expanded search selector as well
+            val items = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post").mapNotNull { it.toSearchResult() }
             if (items.isEmpty()) break
             results.addAll(items)
         }
@@ -130,7 +144,7 @@ class PimpBunnyProvider : MainAPI() {
         initSession()
         var found = false
         val mainHtml = app.get(data, headers = headers).text
-        val mappedUrls = mutableSetOf<String>()
+        val mappedUrls = mutableSetOf<String>() // Used to avoid duplicate qualities
 
         suspend fun searchForStream(html: String, referer: String) {
             // Direct M3U8
@@ -255,6 +269,7 @@ class PimpBunnyProvider : MainAPI() {
 
     // ---------- Quality Parsing Helpers ----------
     private fun extractQualityFromUrl(url: String): String {
+        // Matches typical quality tags like "_1080p.mp4", "/720/", "-480p", etc.
         val qualityMatch = Regex("""(?i)(?:_|-|/)(\d{3,4})p?(?:\.mp4|/)""").find(url) 
             ?: Regex("""(?i)(\d{3,4})p""").find(url)
         return qualityMatch?.groupValues?.get(1) ?: "Unknown"
