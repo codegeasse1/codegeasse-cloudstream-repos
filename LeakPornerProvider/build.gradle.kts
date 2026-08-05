@@ -1,26 +1,41 @@
-// build.gradle.kts
+@file:Suppress("LocalVariableName")
 
 plugins {
     id("com.android.library")
     kotlin("android")
 }
 
+val apkName = "LeakPornerProvider"
+
 android {
-    namespace = "com.leakporner"
-    compileSdk = 34
+    compileSdk = 34 // Or whatever version you were using
 
     defaultConfig {
         minSdk = 21
-        targetSdk = 34
+        // ❌ REMOVED: targetSdk (Fixes the deprecation warning)
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
-    kotlinOptions {
-        jvmTarget = "17"
+    
+    // ❌ REMOVED: kotlinOptions { jvmTarget = "17" } from inside here
+}
+
+// ✅ FIX 1: New Kotlin compilerOptions DSL (Place this OUTSIDE the android {} block)
+kotlin {
+    compilerOptions {
+        // Note: Cloudstream extensions usually require Java 8 (JVM_1_8). 
+        // If you specifically need 17, change JVM_1_8 to JVM_17 below.
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
     }
+}
+
+// ✅ FIX 2: Pass "NSFW" as a String instead of the unresolved Enum
+cloudstream {
+    // ... your other cloudstream configs ...
+    set("extNetworkType", "NSFW") 
 }
 
 dependencies {
