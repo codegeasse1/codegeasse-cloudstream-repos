@@ -18,14 +18,12 @@ class PimpBunnyProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
-    // Browser headers – the site may require them
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.5"
     )
 
-    // Initialize session cookies
     private var sessionInitialized = false
     private suspend fun initSession() {
         if (!sessionInitialized) {
@@ -111,7 +109,7 @@ class PimpBunnyProvider : MainAPI() {
 
         suspend fun searchForStream(html: String, referer: String) {
             // Direct M3U8
-            for (match in Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html)) {
+            Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
                 val url = match.value.replace("&amp;", "&")
                 callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
                     this.referer = referer
@@ -120,7 +118,7 @@ class PimpBunnyProvider : MainAPI() {
                 found = true
             }
             // Direct MP4
-            for (match in Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(html)) {
+            Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(html).forEach { match ->
                 val url = match.value.replace("&amp;", "&")
                 callback(newExtractorLink(name, "$name MP4", url, ExtractorLinkType.VIDEO) {
                     this.referer = referer
@@ -136,8 +134,10 @@ class PimpBunnyProvider : MainAPI() {
                 if (match != null) {
                     try {
                         val json = match.groupValues[1]
-                        val encrypt = Regex(""""encrypt"""\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        val urlEncoded = Regex(""""url"""\s*:\s*"([^"]+)""").find(json)?.groupValues?.get(1) ?: ""
+                        // fixed regex: match "encrypt": <number>
+                        val encrypt = Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                        // fixed regex: match "url": "<value>"
+                        val urlEncoded = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
                         val realUrl = when (encrypt) {
                             1 -> String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8)
                             2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
@@ -189,7 +189,8 @@ class PimpBunnyProvider : MainAPI() {
             for (api in apiUrls) {
                 try {
                     val json = app.get(api, headers = headers).text
-                    val urlMatch = Regex(""""url"""\s*:\s*"([^"]+)""").find(json)
+                    // fixed regex: match "url": "<value>"
+                    val urlMatch = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)
                     if (urlMatch != null) {
                         val streamUrl = urlMatch.groupValues[1]
                         if (streamUrl.contains(".m3u8")) {
