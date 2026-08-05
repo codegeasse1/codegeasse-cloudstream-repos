@@ -367,3 +367,4 @@ class ChikiAnimationProvider : MainAPI() {
 
         return found
     }
+}
