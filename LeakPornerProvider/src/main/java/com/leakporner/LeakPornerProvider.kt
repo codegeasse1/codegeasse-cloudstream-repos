@@ -12,13 +12,18 @@ class LeakPornerProvider : MainAPI() {
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.NSFW)
 
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.5"
+    )
+
     // ---------- Main Page ----------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) mainUrl else "$mainUrl/page/$page/"
-        val document = app.get(url).document
+        val document = app.get(url, headers = headers).document
         val items = document.select("article.loop-video").mapNotNull { el -> parseVideoItem(el) }
         val hasNext = document.select(".pagination a.next").isNotEmpty()
-        
         return newHomePageResponse(
             list = listOf(HomePageList(name, items)),
             hasNext = hasNext
@@ -28,25 +33,20 @@ class LeakPornerProvider : MainAPI() {
     // ---------- Search ----------
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/?s=$query"
-        val document = app.get(searchUrl).document
-        return document.select("article.loop-video").mapNotNull { el ->
-            parseVideoItem(el)
-        }
+        val document = app.get(searchUrl, headers = headers).document
+        return document.select("article.loop-video").mapNotNull { el -> parseVideoItem(el) }
     }
 
     // ---------- Load Details ----------
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
-        val title = document.selectFirst(".entry-title, .video-title")?.text()
+        val document = app.get(url, headers = headers).document
+        val title = document.selectFirst(".entry-title")?.text()
             ?: document.select("meta[property=og:title]").attr("content")
             ?: "No title"
-        
+
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: document.selectFirst(".post-thumbnail img, .video-player img")?.let {
-                it.attr("data-src")
-                    .ifBlank { it.attr("data-lazy-src") }
-                    .ifBlank { it.attr("data-original") }
-                    .ifBlank { it.attr("src") }
+            ?: document.selectFirst(".post-thumbnail img")?.let {
+                it.attr("data-src").ifBlank { it.attr("src") }
             }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
@@ -62,78 +62,38 @@ class LeakPornerProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val document = app.get(data).document
+        val document = app.get(data, headers = headers).document
 
-        // 1. Try direct video tags (skip blob: URLs as they cannot be played directly)
-        document.select("video source, video").forEach { src ->
-            val url = src.attr("src")
-            if (url.isNotBlank() && !url.startsWith("blob:")) {
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = "Direct",
-                        url = fixUrl(url),
-                        type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = data
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+        // 1. Direct video tags (rare)
+        document.select("video source[src]").forEach { src ->
+            val videoUrl = src.attr("src")
+            if (videoUrl.isNotBlank()) {
+                addLink(videoUrl, "Direct", data, callback)
                 found = true
             }
         }
 
-        // 2. Try iframe sources (HGCloud, AbyssPlayer, EmbedSeek, etc.)
+        // 2. Process each iframe
         document.select("iframe[src]").forEach { iframe ->
             val srcUrl = iframe.attr("src")
-            if (srcUrl.isNotBlank()) {
-                val fixedUrl = fixUrl(srcUrl)
-                runCatching {
-                    // Let CloudStream's built-in extractors handle known domains
-                    if (loadExtractor(fixedUrl, data, subtitleCallback, callback)) {
-                        found = true
-                    } else {
-                        // Manual fallback: Fetch iframe HTML and dig for hidden m3u8/mp4 URLs
-                        val iframeHtml = app.get(fixedUrl, headers = mapOf("Referer" to data)).text
-                        val streamMatch = Regex("""(https?://[^"']+\.(?:m3u8|mp4)[^"']*)""").find(iframeHtml)
-                        
-                        streamMatch?.groupValues?.get(1)?.let { streamUrl ->
-                            val cleanUrl = streamUrl.replace("\\/", "/")
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "Server",
-                                    url = cleanUrl,
-                                    type = if (cleanUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = fixedUrl
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            found = true
-                        }
-                    }
-                }
-            }
-        }
+            if (srcUrl.isBlank() || srcUrl.startsWith("blob:")) return@forEach
+            val absoluteSrc = fixUrl(srcUrl)
 
-        // 3. Fallback: Search the main page HTML for raw .m3u8 or .mp4 links
-        if (!found) {
-            val html = document.html()
-            val m3u8Match = Regex("""(https?://[^"']+\.m3u8[^"']*)""").find(html)
-            m3u8Match?.groupValues?.get(1)?.let { streamUrl ->
-                val cleanUrl = streamUrl.replace("\\/", "/")
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = "HLS",
-                        url = cleanUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = data
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+            val iframeHtml = runCatching {
+                app.get(absoluteSrc, headers = headers + ("Referer" to data)).text
+            }.getOrElse { return@forEach }
+
+            val videoUrls = Regex("""https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*""")
+                .findAll(iframeHtml).map { it.value }.toList()
+
+            val jsUrls = Regex("""(?:file|src)\s*:\s*["'](https?://[^"']+)["']""")
+                .findAll(iframeHtml).map { it.groupValues[1] }.toList()
+
+            val allUrls = (videoUrls + jsUrls).filter { it.contains(".m3u8") || it.contains(".mp4") }
+
+            for (streamUrl in allUrls) {
+                val cleanUrl = streamUrl.replace("&amp;", "&")
+                addLink(cleanUrl, "Iframe Server", absoluteSrc, callback)
                 found = true
             }
         }
@@ -145,15 +105,11 @@ class LeakPornerProvider : MainAPI() {
     private fun parseVideoItem(element: Element): SearchResponse? {
         val linkEl = element.selectFirst("a[href]") ?: return null
         val href = linkEl.attr("href")
-        
-        // Handle Lazy Loading Images
+
         val posterEl = element.selectFirst("img")
-        val poster = posterEl?.attr("data-src")
-            ?.ifBlank { posterEl.attr("data-lazy-src") }
-            ?.ifBlank { posterEl.attr("data-original") }
-            ?.ifBlank { posterEl.attr("src") } ?: ""
-        
-        val title = element.selectFirst(".entry-header span, .post-title, .title")?.text() ?: "No title"
+        val poster = posterEl?.attr("data-src")?.ifBlank { posterEl.attr("src") } ?: ""
+
+        val title = element.selectFirst(".entry-header span")?.text() ?: "No title"
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = fixUrl(poster)
@@ -167,5 +123,19 @@ class LeakPornerProvider : MainAPI() {
             url.startsWith("/") -> mainUrl.trimEnd('/') + url
             else -> url
         }
+    }
+
+    private suspend fun addLink(url: String, serverName: String, referer: String, callback: (ExtractorLink) -> Unit) {
+        callback(
+            newExtractorLink(
+                source = name,
+                name = serverName,
+                url = url,
+                type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = referer
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
