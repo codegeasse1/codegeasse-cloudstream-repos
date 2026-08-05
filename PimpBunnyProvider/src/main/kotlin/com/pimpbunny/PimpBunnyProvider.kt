@@ -32,38 +32,39 @@ class PimpBunnyProvider : MainAPI() {
         }
     }
 
+    // ----- Added actual category links here so they appear as lists in CloudStream -----
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
-        "$mainUrl/" to "Categories"   // we'll use the homepage to scrape categories
+        "$mainUrl/categories/4k/" to "4K",
+        "$mainUrl/categories/amateur/" to "Amateur",
+        "$mainUrl/categories/anal/" to "Anal",
+        "$mainUrl/categories/asian/" to "Asian",
+        "$mainUrl/categories/bbw/" to "BBW",
+        "$mainUrl/categories/big-ass/" to "Big Ass",
+        "$mainUrl/categories/big-tits/" to "Big Tits",
+        "$mainUrl/categories/blonde/" to "Blonde",
+        "$mainUrl/categories/blowjob/" to "Blowjob",
+        "$mainUrl/categories/brunette/" to "Brunette",
+        "$mainUrl/categories/creampie/" to "Creampie",
+        "$mainUrl/categories/cumshot/" to "Cumshot",
+        "$mainUrl/categories/ebony/" to "Ebony",
+        "$mainUrl/categories/hardcore/" to "Hardcore",
+        "$mainUrl/categories/latina/" to "Latina",
+        "$mainUrl/categories/lesbian/" to "Lesbian",
+        "$mainUrl/categories/milf/" to "MILF",
+        "$mainUrl/categories/pov/" to "POV",
+        "$mainUrl/categories/teen/" to "Teen",
+        "$mainUrl/categories/threesome/" to "Threesome"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         initSession()
 
-        // ----- Categories tab: scrape from homepage -----
-        if (request.name == "Categories") {
-            val homepage = app.get("$mainUrl/", headers = headers).document
-            val catElements = homepage.select("div.blocks-categories-list-wrapper a[href*=/categories/]")
-            val categories = catElements.mapNotNull { a ->
-                val href = fixUrlNull(a.attr("href")) ?: return@mapNotNull null
-                val name = a.selectFirst(".ui-card-title")?.text()?.trim()
-                    ?: a.text().trim().substringBefore(" videos").trim()
-                    ?: return@mapNotNull null
-                val img = a.selectFirst("img")
-                val poster = fixUrlNull(
-                    img?.attr("data-original")?.ifBlank { img.attr("src") }
-                )
-                newMovieSearchResponse(name, href, TvType.Movie) {
-                    this.posterUrl = poster
-                }
-            }.distinctBy { it.url }
-            return newHomePageResponse(request.name, categories, hasNext = false)
-        }
-
         // ----- Home / category video listing -----
         val docUrl = if (page == 1) request.data else "${request.data}${page}/"
         val document = app.get(docUrl, headers = headers).document
         val items = document.select("div.b6m-video").mapNotNull { it.toSearchResult() }
+        
         return newHomePageResponse(request.name, items)
     }
 
@@ -129,7 +130,7 @@ class PimpBunnyProvider : MainAPI() {
         initSession()
         var found = false
         val mainHtml = app.get(data, headers = headers).text
-        val mappedUrls = mutableSetOf<String>() // Used to avoid duplicate qualities
+        val mappedUrls = mutableSetOf<String>()
 
         suspend fun searchForStream(html: String, referer: String) {
             // Direct M3U8
@@ -254,7 +255,6 @@ class PimpBunnyProvider : MainAPI() {
 
     // ---------- Quality Parsing Helpers ----------
     private fun extractQualityFromUrl(url: String): String {
-        // Matches typical quality tags like "_1080p.mp4", "/720/", "-480p", etc.
         val qualityMatch = Regex("""(?i)(?:_|-|/)(\d{3,4})p?(?:\.mp4|/)""").find(url) 
             ?: Regex("""(?i)(\d{3,4})p""").find(url)
         return qualityMatch?.groupValues?.get(1) ?: "Unknown"
