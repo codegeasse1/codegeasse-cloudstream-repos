@@ -49,5 +49,6 @@ _ext["extNetworkType"] = "NSFW"
 
 
 dependencies {
-    implementation(project(":cloudstream3"))
+    // Don't reference a non-existent subproject. Use the published CloudStream artifact instead.
+    implementation("com.lagradost:cloudstream3:pre-release")
 }
