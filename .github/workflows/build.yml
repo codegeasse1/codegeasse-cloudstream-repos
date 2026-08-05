@@ -68,6 +68,12 @@ jobs:
           git init
           git checkout -b builds
           git add .
-          git -c user.name='github-actions' -c user.email='github-actions@github.com' commit -m "Build ${{ github.sha }}"
-          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-          git push origin builds --force
+          # Only commit and push when there are actual changes. This avoids failing the workflow
+          # when no artifacts were produced.
+          if git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "No changes to commit"
+          else
+            git -c user.name='github-actions' -c user.email='github-actions@github.com' commit -m "Build ${{ github.sha }}"
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+            git push origin builds --force
+          fi
