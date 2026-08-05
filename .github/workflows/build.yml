@@ -34,7 +34,7 @@ jobs:
 
       # 1. Clean the project so no old classes remain
       - name: Clean project
-        run: ./gradlew clean --no-daemon --stacktrace
+        run: gradle clean --no-daemon --stacktrace
 
       # 2. Clear Gradle cache directory
       - name: Clear Gradle cache
@@ -44,7 +44,7 @@ jobs:
 
       # 3. Build the plugins (use wrapper and enable stacktrace/info for diagnostics)
       - name: Build plugins
-        run: ./gradlew make makePluginsJson --no-daemon --stacktrace --info
+        run: gradle make makePluginsJson --no-daemon --stacktrace --info
 
       # 4. Collect the output files
       - name: Collect build output
