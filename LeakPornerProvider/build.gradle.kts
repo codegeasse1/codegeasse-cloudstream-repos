@@ -1,37 +1,27 @@
 plugins {
     id("com.android.library")
-    kotlin("android")
-    id("com.lagradost.cloudstream3.gradle") // ✅ Required to build .cs3 extensions
+    id("kotlin-android")
+    id("com.lagradost.cloudstream3.gradle")
 }
 
-// ✅ CloudStream's native DSL for extension metadata (Replaces the hacky _ext properties)
+version = 1
+
 cloudstream {
-    name = "LeakPorner"
-    description = "Watch Onlyfans leaks from leakporner.org"
-    version = 1
+    description = "LeakPorner Extension"
     authors = listOf("Codegeasse")
+    status = 1
     tvTypes = listOf("NSFW")
-    language = "en"
+    iconUrl = "https://www.google.com/s2/favicons?domain=leakporner.org&sz=%size%"
 }
 
 android {
     namespace = "com.leakporner"
-    compileSdk = 33 // CloudStream currently targets 33, but 34 is fine if your environment supports it
-    
+    compileSdk = 33
     defaultConfig {
         minSdk = 21
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
     }
 }
 
 dependencies {
-    // ✅ Matches your GitHub Actions workflow which fetches the jar locally
-    compileOnly(files("cloudstream.jar"))
-    
-    // (Optional but recommended) Include Jsoup if you are scraping HTML
-    implementation("org.jsoup:jsoup:1.15.3") 
+    compileOnly(files("../cloudstream.jar"))
 }
