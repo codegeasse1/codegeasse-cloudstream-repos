@@ -8,6 +8,7 @@ plugins {
 val apkName = "LeakPornerProvider"
 
 android {
+    namespace = "com.leakporner"
     compileSdk = 34 // Or whatever version you were using
 
     defaultConfig {
