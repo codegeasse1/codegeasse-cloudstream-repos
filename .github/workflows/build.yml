@@ -24,36 +24,27 @@ jobs:
         with:
           gradle-version: '8.4'
 
+   
+
+      # 3. Build the plugins
       - name: Build plugins
-        # Removed --info and --stacktrace to prevent log spam
         run: gradle make makePluginsJson
 
+      # 4. Collect the output files
       - name: Collect build output
         run: |
           mkdir -p release
           find . -name "*.cs3" -not -path "./release/*" -exec cp {} release/ \;
-          cp build/plugins.json release/plugins.json || true
-          cat > release/manifest.json <<EOF
-          {
-            "name": "Codegeasse Repo",
-            "description": "Anime4i CloudStream extensions",
-            "manifestVersion": 1,
-            "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/repo.json"]
-          }
-          EOF
+          cp build/plugins.json release/plugins.json
+          echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]}'> release/repo.json
 
+      # 5. Push to the `builds` branch
       - name: Push to builds branch
         run: |
           cd release
           git init
           git checkout -b builds
           git add .
-          
-          # Only commit and push when there are actual changes
-          if git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
-            echo "No changes to commit"
-          else
-            git -c user.name='github-actions' -c user.email='github-actions@github.com' commit -m "Build ${{ github.sha }}"
-            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-            git push origin builds --force
-          fi
+          git -c user.name='github-actions' -c user.email='github-actions@github.com' commit -m "Build ${{ github.sha }}"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push origin builds --force
