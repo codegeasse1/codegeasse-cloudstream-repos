@@ -21,7 +21,3 @@ android {
         minSdk = 21
     }
 }
-
-dependencies {
-    compileOnly(files("../cloudstream.jar"))
-}
