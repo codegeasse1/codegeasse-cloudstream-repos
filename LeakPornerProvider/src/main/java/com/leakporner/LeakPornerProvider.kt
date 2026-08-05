@@ -43,7 +43,6 @@ class LeakPornerProvider : MainAPI() {
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
             ?: document.selectFirst(".post-thumbnail img")?.attr("src")
 
-        // In modern CS3, load() returns metadata, loadLinks() handles the video streams.
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = fixUrl(poster)
         }
@@ -68,10 +67,11 @@ class LeakPornerProvider : MainAPI() {
                         source = name,
                         name = "Direct",
                         url = fixUrl(url),
-                        referer = data,
-                        quality = Qualities.P1080.value,
                         type = ExtractorLinkType.VIDEO
-                    )
+                    ) {
+                        this.referer = data
+                        this.quality = Qualities.P1080.value
+                    }
                 )
                 found = true
             }
@@ -91,10 +91,11 @@ class LeakPornerProvider : MainAPI() {
                                     source = name,
                                     name = "Iframe Server",
                                     url = fixUrl(videoUrl),
-                                    referer = fixUrl(srcUrl),
-                                    quality = Qualities.P720.value,
                                     type = ExtractorLinkType.VIDEO
-                                )
+                                ) {
+                                    this.referer = fixUrl(srcUrl)
+                                    this.quality = Qualities.P720.value
+                                }
                             )
                             found = true
                         }
