@@ -145,8 +145,6 @@ class ChikiAnimationProvider : MainAPI() {
                 ?: Regex("""https?://[^\s"'<>\\]*chunklist[^\s"'<>\\]*""").find(text)?.value
                 ?: Regex("""https?://[^\s"'<>\\]*(?:rumble\.cloud|rmbl\.ws)[^\s"'<>\\]*""").find(text)?.value
 
-        // Emits a playable link; if M3u8Helper can't parse the odd rumble .tar
-        // playlist, the raw URL is emitted anyway so the player can try it.
         suspend fun addM3u8(url: String, referer: String, label: String): Boolean {
             return try {
                 val links = M3u8Helper.generateM3u8(label, url, referer)
@@ -171,16 +169,21 @@ class ChikiAnimationProvider : MainAPI() {
             }
         }
 
-        // Scans any API/page response with every known strategy
+        val jsonUrlRegex = Regex("\"(?:url|source|sources|file|src|playlist|video|stream|playback)\"\\s*:\\s*\"([^\"]+)\"")
+
         suspend fun scanForStream(text: String, referer: String, label: String): Boolean {
             val t = unescape(text)
-            if (t.trim().startsWith("#EXTM3U")) return addM3u8(extractStreamUrl(t) ?: return false, referer, label)
+            if (t.trim().startsWith("#EXTM3U")) {
+                // master playlist with absolute lines
+                extractStreamUrl(t)?.let { if (addM3u8(it, referer, label)) return true }
+                return false
+            }
             extractStreamUrl(t)?.let { if (addM3u8(it, referer, label)) return true }
-            for (m in Regex(""""(?:url|source|sources|file|src|playlist|video|stream|playback)"\s*:\s*"([^"]+)"""").findAll(t)) {
+            for (m in jsonUrlRegex.findAll(t)) {
                 val u = unescape(m.groupValues[1])
                 if (u.startsWith("http")) { if (addM3u8(u, referer, label)) return true }
             }
-            for (m in Regex(""""([A-Za-z0-9+/=]{60,})"""").findAll(t)) {
+            for (m in Regex("\"([A-Za-z0-9+/=]{60,})\"").findAll(t)) {
                 val dec = try { String(Base64.decode(m.groupValues[1], Base64.DEFAULT)) } catch (e: Exception) { null } ?: continue
                 extractStreamUrl(unescape(dec))?.let { if (addM3u8(it, referer, label)) return true }
             }
@@ -190,54 +193,45 @@ class ChikiAnimationProvider : MainAPI() {
         // Multi Player: chiki.rpmstream.live/#<id>
         suspend fun handleRpmStream(embedUrl: String): Boolean {
             try {
-                var shortId = embedUrl.substringAfterLast("#").trim()
-                if (shortId.contains("?id=")) shortId = shortId.substringAfter("?id=")
-                shortId = shortId.substringBefore("&").trim()
-                if (shortId.isBlank()) return false
+                var id = embedUrl.substringAfterLast("#").trim()
+                if (id.contains("?id=")) id = id.substringAfter("?id=")
+                id = id.substringBefore("&").trim()
+                if (id.isBlank()) return false
 
-                // Confirmed via devtools: the iframe fragment holds a SHORT
-                // code (e.g. "mhl6wr"), but the actual playable video uses a
-                // full UUID (e.g. "b78eedac-ecff-4718-9020-847ea0e4630c")
-                // that is NOT the same string. Calling the video API
-                // directly with the short code silently returns nothing.
-                // We first hit an info/player-style endpoint with the short
-                // code to discover the real UUID hiding in that response,
-                // then use THAT for the actual video request.
-                val uuidRegex = Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
-                var realId = shortId
-                val resolveEndpoints = listOf(
-                    "https://chiki.rpmstream.live/api/v1/info?id=$shortId",
-                    "https://chiki.rpmstream.live/api/v1/player?id=$shortId",
-                    "https://chiki.rpmstream.live/$shortId",
-                    "https://chiki.rpmstream.live/e/$shortId"
+                val referer = "https://chiki.rpmstream.live/"
+                val hdr = mapOf(
+                    "User-Agent" to UA,
+                    "Referer" to referer,
+                    "X-Requested-With" to "XMLHttpRequest"
                 )
-                for (rep in resolveEndpoints) {
-                    val res = try {
-                        app.get(rep, headers = mapOf(
-                            "User-Agent" to UA,
-                            "Referer" to "https://chiki.rpmstream.live/",
-                            "X-Requested-With" to "XMLHttpRequest"
-                        )).text
-                    } catch (e: Exception) { continue }
-                    val match = uuidRegex.find(res)
-                    if (match != null) { realId = match.value; break }
-                }
 
                 val endpoints = listOf(
-                    "https://chiki.rpmstream.live/api/v1/video?id=$realId&w=1280&h=800&r=chikianimation.online",
-                    "https://chiki.rpmstream.live/api/v1/video?id=$realId",
-                    "https://chiki.rpmstream.live/api/v1/info?id=$realId",
-                    "https://chiki.rpmstream.live/api/v1/player?id=$realId"
+                    "https://chiki.rpmstream.live/api/v1/video?id=$id&w=1280&h=800&r=chikianimation.online",
+                    "https://chiki.rpmstream.live/api/v1/video?id=$id",
+                    "https://chiki.rpmstream.live/api/v1/info?id=$id"
                 )
+
+                val tokens = mutableListOf<String>()
+
                 for (ep in endpoints) {
-                    val res = try {
-                        app.get(ep, headers = mapOf(
-                            "User-Agent" to UA,
-                            "Referer" to "https://chiki.rpmstream.live/",
-                            "X-Requested-With" to "XMLHttpRequest"
-                        )).text
-                    } catch (e: Exception) { continue }
-                    if (scanForStream(res, "https://chiki.rpmstream.live/", "Multi Player")) return true
+                    val res = try { app.get(ep, headers = hdr).text } catch (e: Exception) { continue }
+                    // endpoint answered with the playlist itself -> play it directly
+                    if (res.trim().startsWith("#EXTM3U")) {
+                        if (addM3u8(ep, referer, "Multi Player")) return true
+                    }
+                    if (scanForStream(res, referer, "Multi Player")) return true
+                    // collect tokens for the player endpoint
+                    for (m in Regex("[a-f0-9]{96,}").findAll(res)) tokens.add(m.value)
+                    for (m in Regex("\"(?:t|token|key|sig|signature|auth)\"\\s*:\\s*\"([^\"]+)\"").findAll(res)) tokens.add(m.groupValues[1])
+                }
+
+                for (tok in tokens.distinct()) {
+                    val playerUrl = "https://chiki.rpmstream.live/api/v1/player?t=$tok"
+                    val res = try { app.get(playerUrl, headers = hdr).text } catch (e: Exception) { continue }
+                    if (res.trim().startsWith("#EXTM3U")) {
+                        if (addM3u8(playerUrl, referer, "Multi Player")) return true
+                    }
+                    if (scanForStream(res, referer, "Multi Player")) return true
                 }
             } catch (e: Exception) { }
             return false
@@ -265,8 +259,7 @@ class ChikiAnimationProvider : MainAPI() {
             return false
         }
 
-        // Dailymotion: pre-check metadata so DELETED videos are skipped
-        // immediately and the next server gets used instead.
+        // Dailymotion with deleted-video pre-check so we skip to next server
         suspend fun handleDailymotion(embedUrl: String): Boolean {
             val vid = Regex("""(?:video/|video=|embed/|player\.html\?video=)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
                 ?: return false
@@ -318,7 +311,7 @@ class ChikiAnimationProvider : MainAPI() {
             }
         }
 
-        // 3) direct dailymotion embed in page (with deleted-video skip)
+        // 3) direct dailymotion embed in page
         if (!found) {
             val dm = Regex("""geo\.dailymotion\.com/player\.html\?video=([a-zA-Z0-9_]+)""").find(pageHtml)
                 ?: Regex("""dailymotion\.com/(?:embed/)?video/([a-zA-Z0-9_]+)""").find(pageHtml)
