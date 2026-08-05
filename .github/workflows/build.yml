@@ -51,8 +51,15 @@ jobs:
         run: |
           mkdir -p release
           find . -name "*.cs3" -not -path "./release/*" -exec cp {} release/ \;
-          cp build/plugins.json release/plugins.json
-          echo '{"name": "Codegeasse Repo", "description": "Anime4i CloudStream extensions", "manifestVersion": 1, "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/build[...]'
+          cp build/plugins.json release/plugins.json || true
+          cat > release/manifest.json <<EOF
+          {
+            "name": "Codegeasse Repo",
+            "description": "Anime4i CloudStream extensions",
+            "manifestVersion": 1,
+            "pluginLists": ["https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"]
+          }
+          EOF
 
       # 5. Push to the `builds` branch
       - name: Push to builds branch
