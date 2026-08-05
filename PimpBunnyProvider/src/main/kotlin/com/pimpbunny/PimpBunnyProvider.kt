@@ -129,29 +129,42 @@ class PimpBunnyProvider : MainAPI() {
         initSession()
         var found = false
         val mainHtml = app.get(data, headers = headers).text
+        val mappedUrls = mutableSetOf<String>() // Used to avoid duplicate qualities
 
         suspend fun searchForStream(html: String, referer: String) {
             // Direct M3U8
-            Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html).forEach { match ->
+            for (match in Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(html)) {
                 val url = match.value.replace("&amp;", "&")
-                callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
+                if (mappedUrls.add(url)) {
+                    callback(newExtractorLink(name, "$name M3U8", url, ExtractorLinkType.M3U8) {
+                        this.referer = referer
+                        this.quality = Qualities.Unknown.value
+                    })
+                    found = true
+                }
             }
+
             // Direct MP4
-            Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(html).forEach { match ->
+            for (match in Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(html)) {
                 val url = match.value.replace("&amp;", "&")
-                callback(newExtractorLink(name, "$name MP4", url, ExtractorLinkType.VIDEO) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
+                if (mappedUrls.add(url)) {
+                    val qualityStr = extractQualityFromUrl(url)
+                    val qualityVal = getQualityFromString(qualityStr)
+                    val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else "$name MP4"
+
+                    callback(newExtractorLink(name, sourceName, url, ExtractorLinkType.VIDEO) {
+                        this.referer = referer
+                        this.quality = qualityVal
+                    })
+                    found = true
+                }
             }
+
             // Player JSON objects (common in KVS)
-            val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
-                "config", "playInfo", "playerConfig", "videoInfo")
+            val playerNames = listOf(
+                "player_aaaa", "player_data", "player_info", "player", "videoConfig",
+                "config", "playInfo", "playerConfig", "videoInfo"
+            )
             for (pName in playerNames) {
                 val match = Regex("""$pName\s*=\s*(\{.*?\});""", RegexOption.DOT_MATCHES_ALL).find(html)
                 if (match != null) {
@@ -159,17 +172,27 @@ class PimpBunnyProvider : MainAPI() {
                         val json = match.groupValues[1]
                         val encrypt = Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                         val urlEncoded = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
+                        
                         val realUrl = when (encrypt) {
                             1 -> String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8)
                             2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
                             else -> urlEncoded
                         }
-                        if (realUrl.contains(".m3u8") || realUrl.contains(".mp4")) {
-                            callback(newExtractorLink(name, "Player", realUrl,
-                                if (realUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        
+                        if ((realUrl.contains(".m3u8") || realUrl.contains(".mp4")) && mappedUrls.add(realUrl)) {
+                            val isM3u8 = realUrl.contains(".m3u8")
+                            val qualityStr = extractQualityFromUrl(realUrl)
+                            val qualityVal = getQualityFromString(qualityStr)
+                            val sourceName = if (qualityStr != "Unknown") "Player ${qualityStr}p" else if (isM3u8) "Player M3U8" else "Player MP4"
+
+                            callback(newExtractorLink(
+                                name, 
+                                sourceName, 
+                                realUrl,
+                                if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                             ) {
                                 this.referer = referer
-                                this.quality = Qualities.Unknown.value
+                                this.quality = qualityVal
                             })
                             found = true
                             break
@@ -213,7 +236,7 @@ class PimpBunnyProvider : MainAPI() {
                     val urlMatch = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)
                     if (urlMatch != null) {
                         val streamUrl = urlMatch.groupValues[1]
-                        if (streamUrl.contains(".m3u8")) {
+                        if (streamUrl.contains(".m3u8") && mappedUrls.add(streamUrl)) {
                             callback(newExtractorLink(name, "API", streamUrl, ExtractorLinkType.M3U8) {
                                 this.referer = data
                                 this.quality = Qualities.Unknown.value
@@ -227,5 +250,25 @@ class PimpBunnyProvider : MainAPI() {
         }
 
         return found
+    }
+
+    // ---------- Quality Parsing Helpers ----------
+    private fun extractQualityFromUrl(url: String): String {
+        // Matches typical quality tags like "_1080p.mp4", "/720/", "-480p", etc.
+        val qualityMatch = Regex("""(?i)(?:_|-|/)(\d{3,4})p?(?:\.mp4|/)""").find(url) 
+            ?: Regex("""(?i)(\d{3,4})p""").find(url)
+        return qualityMatch?.groupValues?.get(1) ?: "Unknown"
+    }
+
+    private fun getQualityFromString(qualityString: String): Int {
+        return when {
+            qualityString.contains("2160") -> Qualities.P2160.value
+            qualityString.contains("1080") -> Qualities.P1080.value
+            qualityString.contains("720") -> Qualities.P720.value
+            qualityString.contains("480") -> Qualities.P480.value
+            qualityString.contains("360") -> Qualities.P360.value
+            qualityString.contains("240") -> Qualities.P240.value
+            else -> Qualities.Unknown.value
+        }
     }
 }
