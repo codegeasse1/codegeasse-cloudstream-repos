@@ -34,18 +34,21 @@ class PimpBunnyProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
-        "$mainUrl/categories/" to "Categories"
+        "$mainUrl/" to "Categories"   // we'll use the homepage to scrape categories
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         initSession()
 
-        // ----- Categories page -----
-        if (request.data == "$mainUrl/categories/") {
-            val document = app.get(request.data, headers = headers).document
-            val categories = document.select("div.blocks-categories-list-wrapper a[href*=/categories/]").mapNotNull { a ->
+        // ----- Categories tab: scrape from homepage -----
+        if (request.name == "Categories") {
+            val homepage = app.get("$mainUrl/", headers = headers).document
+            val catElements = homepage.select("div.blocks-categories-list-wrapper a[href*=/categories/]")
+            val categories = catElements.mapNotNull { a ->
                 val href = fixUrlNull(a.attr("href")) ?: return@mapNotNull null
-                val name = a.selectFirst(".ui-card-title")?.text()?.trim() ?: a.text().trim()
+                val name = a.selectFirst(".ui-card-title")?.text()?.trim()
+                    ?: a.text().trim().substringBefore(" videos").trim()
+                    ?: return@mapNotNull null
                 val img = a.selectFirst("img")
                 val poster = fixUrlNull(
                     img?.attr("data-original")?.ifBlank { img.attr("src") }
