@@ -107,49 +107,51 @@ class PimpBunnyProvider : MainAPI() {
         var found = false
         val mainHtml = app.get(data, headers = headers).text
 
-        suspend fun processM3u8(url: String, referer: String) {
+        /**
+         * Fetches an M3U8 playlist and adds the correct ExtractorLink(s).
+         * - If it's a master playlist, each variant gets its own link with a quality label.
+         * - If it's a simple stream, tries to guess quality from the URL, then adds one link.
+         */
+        suspend fun addM3u8Links(m3u8Url: String, referer: String) {
             try {
-                val playlist = app.get(url, headers = mapOf("Referer" to referer)).text
+                val playlist = app.get(m3u8Url, headers = mapOf("Referer" to referer)).text
                 if (playlist.contains("#EXT-X-STREAM-INF")) {
-                    // Master playlist – extract each variant
+                    // Master playlist → extract every variant
                     val lines = playlist.lines()
                     var i = 0
                     while (i < lines.size) {
-                        val line = lines[i]
-                        if (line.startsWith("#EXT-X-STREAM-INF")) {
-                            // parse resolution: e.g., "RESOLUTION=1280x720"
-                            val resolution = Regex("RESOLUTION=(\\d+x\\d+)").find(line)?.groupValues?.get(1)
-                            val quality = when {
-                                resolution != null -> {
-                                    val height = resolution.substringAfter("x").toIntOrNull() ?: 0
-                                    when {
-                                        height >= 2160 -> Qualities.P2160.value
-                                        height >= 1440 -> Qualities.P1440.value
-                                        height >= 1080 -> Qualities.P1080.value
-                                        height >= 720  -> Qualities.P720.value
-                                        height >= 480  -> Qualities.P480.value
-                                        height >= 360  -> Qualities.P360.value
-                                        height >= 240  -> Qualities.P240.value
-                                        else -> Qualities.P144.value
-                                    }
+                        if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+                            val resolution =
+                                Regex("RESOLUTION=(\\d+x\\d+)").find(lines[i])?.groupValues?.get(1)
+                            val quality = resolution?.let {
+                                val height = it.substringAfter("x").toIntOrNull() ?: 0
+                                when {
+                                    height >= 2160 -> Qualities.P2160.value
+                                    height >= 1440 -> Qualities.P1440.value
+                                    height >= 1080 -> Qualities.P1080.value
+                                    height >= 720 -> Qualities.P720.value
+                                    height >= 480 -> Qualities.P480.value
+                                    height >= 360 -> Qualities.P360.value
+                                    height >= 240 -> Qualities.P240.value
+                                    else -> Qualities.P144.value
                                 }
-                                else -> Qualities.Unknown.value
-                            }
-                            // next line should be the URI
+                            } ?: Qualities.Unknown.value
+
                             if (i + 1 < lines.size) {
                                 val uri = lines[i + 1].trim()
                                 if (uri.isNotEmpty() && !uri.startsWith("#")) {
                                     val streamUrl = if (uri.startsWith("http")) uri
                                     else {
-                                        // resolve relative URL
-                                        val base = url.substringBeforeLast("/") + "/"
+                                        val base = m3u8Url.substringBeforeLast("/") + "/"
                                         base + uri
                                     }
-                                    val label = if (resolution != null) "$name - $resolution" else "$name - Variant"
-                                    callback(newExtractorLink(name, label, streamUrl, ExtractorLinkType.M3U8) {
-                                        this.referer = referer
-                                        this.quality = quality
-                                    })
+                                    val label = resolution ?: "Variant"
+                                    callback(
+                                        newExtractorLink(name, "$name - $label", streamUrl, ExtractorLinkType.M3U8) {
+                                            this.referer = referer
+                                            this.quality = quality
+                                        }
+                                    )
                                     found = true
                                 }
                             }
@@ -157,35 +159,47 @@ class PimpBunnyProvider : MainAPI() {
                         i++
                     }
                 } else {
-                    // Simple m3u8 (no variants)
-                    callback(newExtractorLink(name, "$name Stream", url, ExtractorLinkType.M3U8) {
-                        this.referer = referer
-                        this.quality = Qualities.Unknown.value
-                    })
+                    // Simple m3u8 (no variants) – guess quality from URL
+                    val guessedQuality = guessQualityFromUrl(m3u8Url)
+                    val label = guessedQuality.second
+                    callback(
+                        newExtractorLink(name, "$name - $label", m3u8Url, ExtractorLinkType.M3U8) {
+                            this.referer = referer
+                            this.quality = guessedQuality.first
+                        }
+                    )
                     found = true
                 }
             } catch (_: Exception) {}
         }
 
+        /**
+         * Tries to extract a resolution (e.g., "720p") from the URL.
+         * Returns a Pair<Int, String> (quality value, display label).
+         */
+        fun guessQualityFromUrl(url: String): Pair<Int, String> {
+            val patterns = listOf(
+                "2160" to Qualities.P2160.value,
+                "1440" to Qualities.P1440.value,
+                "1080" to Qualities.P1080.value,
+                "720" to Qualities.P720.value,
+                "480" to Qualities.P480.value,
+                "360" to Qualities.P360.value,
+                "240" to Qualities.P240.value
+            )
+            for ((res, qual) in patterns) {
+                if (url.contains(res)) return Pair(qual, "${res}p")
+            }
+            return Pair(Qualities.Unknown.value, "Stream")
+        }
+
         // 1. Direct M3U8 links
         Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""").findAll(mainHtml).forEach { match ->
             val url = match.value.replace("&amp;", "&")
-            processM3u8(url, data)
+            addM3u8Links(url, data)
         }
 
-        // 2. Direct MP4 links (only add if m3u8 not found? We'll add them anyway but they might not work)
-        if (!found) {
-            Regex("""https?://[^\s"'<>]+?\.mp4[^\s"'<>]*""").findAll(mainHtml).forEach { match ->
-                val url = match.value.replace("&amp;", "&")
-                callback(newExtractorLink(name, "$name MP4", url, ExtractorLinkType.VIDEO) {
-                    this.referer = data
-                    this.quality = Qualities.Unknown.value
-                })
-                found = true
-            }
-        }
-
-        // 3. Player JSON
+        // 2. Player JSON (common in KVS)
         val playerNames = listOf("player_aaaa", "player_data", "player_info", "player", "videoConfig",
             "config", "playInfo", "playerConfig", "videoInfo")
         for (pName in playerNames) {
@@ -193,27 +207,23 @@ class PimpBunnyProvider : MainAPI() {
             if (match != null) {
                 try {
                     val json = match.groupValues[1]
-                    val encrypt = Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    val encrypt =
+                        Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                     val urlEncoded = Regex("\"url\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: ""
                     val realUrl = when (encrypt) {
                         1 -> String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8)
-                        2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
+                        2 -> URLDecoder.decode(
+                            String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
                         else -> urlEncoded
                     }
                     if (realUrl.contains(".m3u8")) {
-                        processM3u8(realUrl, data)
-                    } else if (realUrl.contains(".mp4")) {
-                        callback(newExtractorLink(name, "$name MP4", realUrl, ExtractorLinkType.VIDEO) {
-                            this.referer = data
-                            this.quality = Qualities.Unknown.value
-                        })
-                        found = true
+                        addM3u8Links(realUrl, data)
                     }
                 } catch (_: Exception) {}
             }
         }
 
-        // 4. Iframes
+        // 3. Iframes
         if (!found) {
             val document = app.get(data, headers = headers).document
             val iframes = document.select("iframe")
@@ -222,14 +232,15 @@ class PimpBunnyProvider : MainAPI() {
                 if (src.isNotBlank() && src.startsWith("http")) {
                     try {
                         val iframeHtml = app.get(src, headers = headers + ("Referer" to data)).text
-                        // Re-run extraction on iframe content
-                        loadLinks(iframeHtml, isCasting, subtitleCallback, callback) // recursive
+                        // Recursively try to extract from the iframe
+                        loadLinks(src, isCasting, subtitleCallback, callback)
+                        if (found) break
                     } catch (_: Exception) {}
                 }
             }
         }
 
-        // 5. API fallback
+        // 4. API fallback
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             val apiUrls = listOf(
@@ -245,7 +256,7 @@ class PimpBunnyProvider : MainAPI() {
                     if (urlMatch != null) {
                         val streamUrl = urlMatch.groupValues[1]
                         if (streamUrl.contains(".m3u8")) {
-                            processM3u8(streamUrl, data)
+                            addM3u8Links(streamUrl, data)
                         }
                     }
                 } catch (_: Exception) {}
