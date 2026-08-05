@@ -2,8 +2,7 @@
 
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
-    id("com.lagradost.cloudstream3.extensions") version "1.0.0" // adjust if needed
+    kotlin("android")
 }
 
 android {
@@ -25,17 +24,16 @@ android {
 }
 
 dependencies {
-    implementation(project(":cloudstream3")) // main CloudStream API
-    // if you need OkHttp or other libs, add here
+    implementation(project(":cloudstream3"))
 }
 
-// Extension metadata – important for CloudStream to recognise it
+// Extension metadata – CloudStream uses this to identify the extension
 ext {
-    set("extName", "LeakPornerProvider")   // display name in the app
+    set("extName", "LeakPornerProvider")
     set("extVersionCode", 1)
     set("extVersionName", "1.0.0")
-    set("extDescription", "Watch Onlyfans leaks from LeakPorner.org")
+    set("extDescription", "Watch Onlyfans leaks from leakporner.org")
     set("extAuthor", "YourName")
     set("extLanguage", "en")
-    set("extNetworkType", ProviderType.SITE) // or ProviderType.NSFW for adult sites
+    set("extNetworkType", ProviderType.NSFW)  // NSFW provider
 }
