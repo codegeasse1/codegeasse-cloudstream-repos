@@ -24,29 +24,10 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      # Ensure a Gradle wrapper exists so CI and local runs are consistent
-      - name: Ensure Gradle wrapper
-        run: |
-          if [ ! -f ./gradlew ]; then
-            echo "Generating Gradle wrapper (Gradle 8.4)"
-            gradle wrapper --gradle-version 8.4
-          fi
-
-      # 1. Clean the project so no old classes remain
-      - name: Clean project
-        run: gradle clean --no-daemon --stacktrace
-
-      # 2. Clear Gradle cache directory
-      - name: Clear Gradle cache
-        run: |
-          rm -rf ~/.gradle/caches/* || true
-          rm -rf ~/.gradle/wrapper/* || true
-
-      # 3. Build the plugins (use wrapper and enable stacktrace/info for diagnostics)
       - name: Build plugins
-        run: gradle make makePluginsJson --no-daemon --stacktrace --info
+        # Removed --info and --stacktrace to prevent log spam
+        run: gradle make makePluginsJson
 
-      # 4. Collect the output files
       - name: Collect build output
         run: |
           mkdir -p release
@@ -61,15 +42,14 @@ jobs:
           }
           EOF
 
-      # 5. Push to the `builds` branch
       - name: Push to builds branch
         run: |
           cd release
           git init
           git checkout -b builds
           git add .
-          # Only commit and push when there are actual changes. This avoids failing the workflow
-          # when no artifacts were produced.
+          
+          # Only commit and push when there are actual changes
           if git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
             echo "No changes to commit"
           else
