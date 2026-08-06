@@ -403,4 +403,4 @@ class AnimeXProvider : MainAPI() {
 
         return found
     }
-} 
+} // <-- This closing brace was missing!
