@@ -263,87 +263,41 @@ class AnimeXProvider : MainAPI() {
         var found = false
         val cleanData = data.substringBefore("#")
 
-        val slug = cleanData.substringAfter("/watch/").substringBeforeLast("-episode-")
-            .let { if (it.isNotBlank()) it else cleanData.substringAfter("/anime/").substringBefore("?") }
-        val epNum = Regex("""-episode-(\d+)""").find(cleanData)?.groupValues?.get(1)
-            ?: Regex("""[?&]epNum=(\d+)""").find(cleanData)?.groupValues?.get(1)
-            ?: "1"
-
-        val apiHeaders = mapOf(
-            "Accept" to "application/json",
-            "Origin" to mainUrl,
-            "Referer" to "$mainUrl/"
-        )
-
+        // 1. PRIMARY METHOD: Scrape the embedded SvelteKit JSON data from the HTML
+        // The site uses SvelteKit which embeds episode data directly in the page.
+        // The API (pp.animex.one) is currently returning 404, so we must rely on the HTML.
         try {
-            val serversUrl = "https://pp.animex.one/rest/api/servers?id=$slug&epNum=$epNum"
-            val serversJson = JSONObject(app.get(serversUrl, headers = apiHeaders).text)
+            val html = app.get(cleanData).text
+            
+            // SvelteKit often serializes JSON keys without quotes (e.g., player_url:"...")
+            // This regex handles both quoted and unquoted keys/values.
+            val playerUrls = Regex("""["']?player_url["']?\s*:\s*["']([^"']+)["']""")
+                .findAll(html)
+                .map { it.groupValues[1].replace("\\/", "/") }
+                .distinct()
+                .toList()
 
-            suspend fun fetchSources(type: String, providerId: String) {
-                try {
-                    val sourcesUrl = "https://pp.animex.one/rest/api/sources?id=$slug&epNum=$epNum&type=$type&providerId=$providerId"
-                    val raw = app.get(sourcesUrl, headers = apiHeaders).text.replace("\\/", "/")
-                    val sourceObj = JSONObject(raw)
-
-                    val referer = sourceObj.optJSONObject("headers")?.optString("Referer", mainUrl) ?: mainUrl
-
-                    val sourcesArray = sourceObj.optJSONArray("sources")
-                    if (sourcesArray != null) {
-                        for (i in 0 until sourcesArray.length()) {
-                            val src = sourcesArray.getJSONObject(i)
-                            val streamUrl = src.optString("url", "")
-                            if (streamUrl.isBlank()) continue
-
-                            val isM3u8 = streamUrl.contains(".m3u8") || src.optString("type", "").contains("mpegurl", true)
-
-                            callback(
-                                newExtractorLink(
-                                    source = "AnimeX",
-                                    name = "$providerId ($type)",
-                                    url = streamUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = referer
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
+            for (playerUrl in playerUrls) {
+                if (playerUrl.isNotBlank()) {
+                    try {
+                        if (loadExtractor(playerUrl, cleanData, subtitleCallback, callback)) {
                             found = true
                         }
-                    }
-
-                    val tracksArray = sourceObj.optJSONArray("tracks")
-                    if (tracksArray != null) {
-                        for (i in 0 until tracksArray.length()) {
-                            val track = tracksArray.getJSONObject(i)
-                            val trackUrl = track.optString("url", track.optString("file", ""))
-                            val label = track.optString("label", track.optString("lang", "Subtitle"))
-                            if (trackUrl.isNotBlank()) {
-                                subtitleCallback(SubtitleFile(label, trackUrl))
+                    } catch (_: Exception) { }
+                }
+            }
+            
+            // Also check for any iframes that might be rendered in the HTML
+            if (!found) {
+                val document = Jsoup.parse(html)
+                document.select("iframe").forEach { iframe ->
+                    val src = iframe.attr("src")
+                    if (src.isNotBlank() && src.startsWith("http")) {
+                        try {
+                            if (loadExtractor(src, cleanData, subtitleCallback, callback)) {
+                                found = true
                             }
-                        }
-                    }
-                } catch (_: Exception) { }
-            }
-
-            val subProviders = serversJson.optJSONArray("subProviders")
-            if (subProviders != null) {
-                for (i in 0 until subProviders.length()) {
-                    val p = subProviders.getJSONObject(i)
-                    if (p.optBoolean("default", false)) {
-                        fetchSources("sub", p.optString("id"))
-                    }
-                }
-                if (!found && subProviders.length() > 0) {
-                    fetchSources("sub", subProviders.getJSONObject(0).optString("id"))
-                }
-            }
-
-            val dubProviders = serversJson.optJSONArray("dubProviders")
-            if (dubProviders != null) {
-                for (i in 0 until dubProviders.length()) {
-                    val p = dubProviders.getJSONObject(i)
-                    if (p.optBoolean("default", false)) {
-                        fetchSources("dub", p.optString("id"))
+                        } catch (_: Exception) { }
                     }
                 }
             }
@@ -351,35 +305,95 @@ class AnimeXProvider : MainAPI() {
             e.printStackTrace()
         }
 
+        // 2. FALLBACK METHOD: The old API (kept in case it comes back online)
         if (!found) {
-            try {
-                val html = app.get(cleanData).text
-                val playerUrls = Regex(""""player_url"\s*:\s*"([^"]+)"""")
-                    .findAll(html)
-                    .map { it.groupValues[1].replace("\\/", "/") }
-                    .distinct()
-                    .toList()
+            val slug = cleanData.substringAfter("/watch/").substringBeforeLast("-episode-")
+                .let { if (it.isNotBlank()) it else cleanData.substringAfter("/anime/").substringBefore("?") }
+            val epNum = Regex("""-episode-(\d+)""").find(cleanData)?.groupValues?.get(1)
+                ?: Regex("""[?&]epNum=(\d+)""").find(cleanData)?.groupValues?.get(1)
+                ?: "1"
 
-                for (playerUrl in playerUrls) {
-                    try {
-                        if (loadExtractor(playerUrl, cleanData, subtitleCallback, callback)) {
-                            found = true
+            val apiHeaders = mapOf(
+                "Accept" to "application/json",
+                "Origin" to mainUrl,
+                "Referer" to "$mainUrl/"
+            )
+
+            try {
+                val serversUrl = "https://pp.animex.one/rest/api/servers?id=$slug&epNum=$epNum"
+                val serversResponse = app.get(serversUrl, headers = apiHeaders)
+                
+                // Only proceed if the API is actually responding
+                if (serversResponse.code == 200) {
+                    val serversJson = JSONObject(serversResponse.text)
+
+                    suspend fun fetchSources(type: String, providerId: String) {
+                        try {
+                            val sourcesUrl = "https://pp.animex.one/rest/api/sources?id=$slug&epNum=$epNum&type=$type&providerId=$providerId"
+                            val raw = app.get(sourcesUrl, headers = apiHeaders).text.replace("\\/", "/")
+                            val sourceObj = JSONObject(raw)
+
+                            val referer = sourceObj.optJSONObject("headers")?.optString("Referer", mainUrl) ?: mainUrl
+
+                            val sourcesArray = sourceObj.optJSONArray("sources")
+                            if (sourcesArray != null) {
+                                for (i in 0 until sourcesArray.length()) {
+                                    val src = sourcesArray.getJSONObject(i)
+                                    val streamUrl = src.optString("url", "")
+                                    if (streamUrl.isBlank()) continue
+
+                                    val isM3u8 = streamUrl.contains(".m3u8") || src.optString("type", "").contains("mpegurl", true)
+
+                                    callback(
+                                        newExtractorLink(
+                                            source = "AnimeX",
+                                            name = "$providerId ($type)",
+                                            url = streamUrl,
+                                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        ) {
+                                            this.referer = referer
+                                            this.quality = Qualities.Unknown.value
+                                        }
+                                    )
+                                    found = true
+                                }
+                            }
+
+                            val tracksArray = sourceObj.optJSONArray("tracks")
+                            if (tracksArray != null) {
+                                for (i in 0 until tracksArray.length()) {
+                                    val track = tracksArray.getJSONObject(i)
+                                    val trackUrl = track.optString("url", track.optString("file", ""))
+                                    val label = track.optString("label", track.optString("lang", "Subtitle"))
+                                    if (trackUrl.isNotBlank()) {
+                                        subtitleCallback(SubtitleFile(label, trackUrl))
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) { }
+                    }
+
+                    val subProviders = serversJson.optJSONArray("subProviders")
+                    if (subProviders != null) {
+                        for (i in 0 until subProviders.length()) {
+                            val p = subProviders.getJSONObject(i)
+                            if (p.optBoolean("default", false)) {
+                                fetchSources("sub", p.optString("id"))
+                            }
                         }
-                    } catch (_: Exception) { }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
+                        if (!found && subProviders.length() > 0) {
+                            fetchSources("sub", subProviders.getJSONObject(0).optString("id"))
+                        }
+                    }
 
-        if (!found) {
-            try {
-                val html = app.get(cleanData).text
-                val document = Jsoup.parse(html)
-                document.select("iframe").forEach { iframe ->
-                    val src = iframe.attr("src")
-                    if (src.isNotBlank() && src.startsWith("http") && loadExtractor(src, cleanData, subtitleCallback, callback)) {
-                        found = true
+                    val dubProviders = serversJson.optJSONArray("dubProviders")
+                    if (dubProviders != null) {
+                        for (i in 0 until dubProviders.length()) {
+                            val p = dubProviders.getJSONObject(i)
+                            if (p.optBoolean("default", false)) {
+                                fetchSources("dub", p.optString("id"))
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -389,4 +403,3 @@ class AnimeXProvider : MainAPI() {
 
         return found
     }
-}
