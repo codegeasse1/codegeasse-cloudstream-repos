@@ -104,63 +104,97 @@ class CoomerVideoProvider : MainAPI() {
         val document = Jsoup.parse(html)
         val mappedUrls = mutableSetOf<String>()
 
-        fun addLink(streamUrl: String, referer: String) {
-            if (!mappedUrls.add(streamUrl)) return
+        val streamRegex = Regex("""https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*""")
 
-            val isM3u8 = streamUrl.contains(".m3u8")
-            val qualityStr = extractQualityFromUrl(streamUrl)
-            val qualityVal = getQualityFromString(qualityStr)
-            val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name HLS" else "$name MP4"
+        // 1. Process Main HTML for direct links
+        for (match in streamRegex.findAll(html)) {
+            val streamUrl = match.value.replace("&amp;", "&").replace("\\/", "/")
+            
+            if (mappedUrls.add(streamUrl)) {
+                val isM3u8 = streamUrl.contains(".m3u8")
+                val qualityStr = extractQualityFromUrl(streamUrl)
+                val qualityVal = getQualityFromString(qualityStr)
+                val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name HLS" else "$name MP4"
 
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = sourceName,
-                    url = streamUrl,
-                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = referer
-                    this.quality = qualityVal
-                }
-            )
-            found = true
-        }
+                callback.invoke(
+                    newExtractorLink(name, sourceName, streamUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                        this.referer = data
+                        this.quality = qualityVal
+                    }
+                )
+                found = true
 
-        fun extractFromHtml(sourceHtml: String, referer: String) {
-            val streamRegex = Regex("""https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*""")
-            for (match in streamRegex.findAll(sourceHtml)) {
-                val streamUrl = match.value.replace("&amp;", "&").replace("\\/", "/")
-                addLink(streamUrl, referer)
-
+                // Dynamically build 1080p, 720p, and 480p variants
                 if (streamUrl.contains(".mp4")) {
-                    val qualitiesToGenerate = listOf("1080p", "720p", "480p")
-                    for (q in qualitiesToGenerate) {
+                    listOf("1080p", "720p", "480p").forEach { q ->
                         val variantUrl = when {
                             streamUrl.contains(Regex("""_\d{3,4}p\.mp4""")) -> streamUrl.replace(Regex("""_\d{3,4}p\.mp4"""), "_${q}.mp4")
                             streamUrl.contains(".mp4") -> streamUrl.replace(".mp4", "_${q}.mp4")
                             else -> null
                         }
-                        if (variantUrl != null) {
-                            addLink(variantUrl, referer)
+                        if (variantUrl != null && mappedUrls.add(variantUrl)) {
+                            val vQualityVal = getQualityFromString(q)
+                            callback.invoke(
+                                newExtractorLink(name, "$name ${q}", variantUrl, ExtractorLinkType.VIDEO) {
+                                    this.referer = data
+                                    this.quality = vQualityVal
+                                }
+                            )
                         }
                     }
                 }
             }
         }
 
-        // 1. Check main page HTML
-        extractFromHtml(html, data)
-
-        // 2. Scan for embedded Iframes (using standard for-in loop to allow suspend calls)
-        for (iframe in document.select("iframe")) {
+        // 2. Process embedded Iframes
+        val iframes = document.select("iframe")
+        for (iframe in iframes) {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank() && src.startsWith("http")) {
                 try {
                     if (loadExtractor(src, data, subtitleCallback, callback)) {
                         found = true
                     } else {
+                        // Deep scrape the iframe
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
-                        extractFromHtml(iframeHtml, src)
+                        for (match in streamRegex.findAll(iframeHtml)) {
+                            val streamUrl = match.value.replace("&amp;", "&").replace("\\/", "/")
+                            
+                            if (mappedUrls.add(streamUrl)) {
+                                val isM3u8 = streamUrl.contains(".m3u8")
+                                val qualityStr = extractQualityFromUrl(streamUrl)
+                                val qualityVal = getQualityFromString(qualityStr)
+                                val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name HLS" else "$name MP4"
+
+                                callback.invoke(
+                                    newExtractorLink(name, sourceName, streamUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                                        this.referer = src
+                                        this.quality = qualityVal
+                                    }
+                                )
+                                found = true
+
+                                // Dynamically build 1080p, 720p, and 480p variants
+                                if (streamUrl.contains(".mp4")) {
+                                    listOf("1080p", "720p", "480p").forEach { q ->
+                                        val variantUrl = when {
+                                            streamUrl.contains(Regex("""_\d{3,4}p\.mp4""")) -> streamUrl.replace(Regex("""_\d{3,4}p\.mp4"""), "_${q}.mp4")
+                                            streamUrl.contains(".mp4") -> streamUrl.replace(".mp4", "_${q}.mp4")
+                                            else -> null
+                                        }
+                                        if (variantUrl != null && mappedUrls.add(variantUrl)) {
+                                            val vQualityVal = getQualityFromString(q)
+                                            callback.invoke(
+                                                newExtractorLink(name, "$name ${q}", variantUrl, ExtractorLinkType.VIDEO) {
+                                                    this.referer = src
+                                                    this.quality = vQualityVal
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
