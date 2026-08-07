@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import javax.crypto.Cipher
@@ -39,17 +40,15 @@ class Porna91Provider : MainAPI() {
     )
 
     // ---------------------------------------------------------------
-    // NATIVE AES IMAGE DECRYPTION (Cloned from MRDS)
+    // NATIVE AES IMAGE DECRYPTION (Working clone from MRDS)
     // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
         if (url.isBlank() || url.startsWith("data:")) return url
         
         return try {
             val response = app.get(url, headers = mapOf("Referer" to "$mainUrl/"))
-            // Using okhttpResponse.body?.bytes() is mandatory in CS3 to get raw bytes correctly
             val cipherBytes = response.okhttpResponse.body?.bytes() ?: return null
 
-            // Magic number check to see if the server stopped encrypting this specific image
             if (cipherBytes.size > 4 && 
                 ((cipherBytes[0].toInt() and 0xFF) == 0xFF && (cipherBytes[1].toInt() and 0xFF) == 0xD8) || 
                 ((cipherBytes[0].toInt() and 0xFF) == 0x89 && cipherBytes[1].toInt() == 0x50)
@@ -67,7 +66,7 @@ class Porna91Provider : MainAPI() {
             val ext = url.substringAfterLast(".", "jpeg").substringBefore("?")
             "data:image/$ext;base64," + Base64.encodeToString(decryptedBytes, Base64.NO_WRAP)
         } catch (e: Exception) {
-            url // Fallback to raw URL on failure
+            url 
         }
     }
 
@@ -81,9 +80,6 @@ class Porna91Provider : MainAPI() {
         return newHomePageResponse(request.name, items)
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH & HOMEPAGE ITEM PARSING (Cloned logic from MRDS)
-    // ---------------------------------------------------------------
     private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail], a[href*=/avdetail], a") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
@@ -95,7 +91,6 @@ class Porna91Provider : MainAPI() {
 
         val cardHtml = this.outerHtml()
         
-        // Scan all possible MRDS / 91Porna lazy-loading attributes
         val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
         val fallbackImg = imgEl?.let {
             it.attr("z-image-loader-url").ifBlank {
@@ -175,7 +170,22 @@ class Porna91Provider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Cloned from MRDS)
+    // AES VIDEO PAYLOAD DECRYPTION 
+    // ---------------------------------------------------------------
+    private fun decryptVideoPayload(encryptedB64: String): String {
+        return try {
+            val key = SecretKeySpec("f5d965df75336270".toByteArray(Charsets.UTF_8), "AES")
+            val iv = IvParameterSpec("97b60394abc2fbe1".toByteArray(Charsets.UTF_8))
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, key, iv)
+            String(cipher.doFinal(Base64.decode(encryptedB64, Base64.DEFAULT)), Charsets.UTF_8)
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -185,52 +195,63 @@ class Porna91Provider : MainAPI() {
     ): Boolean {
         var found = false
         val html = app.get(data, headers = headers).text
+        val mappedUrls = mutableSetOf<String>()
 
-        // The MRDS magic regex that bypasses the API completely
-        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
 
-        cdnRegex.findAll(html).forEach { match ->
-            val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-
-            if (cleanUrl.isNotBlank()) {
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name Server",
-                        url = cleanUrl,
-                        type = ExtractorLinkType.M3U8,
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                found = true
+        // Standard function (not suspend) to prevent Kotlin coroutine errors
+        fun extractAndAdd(text: String) {
+            val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
+            
+            cdnRegex.findAll(unescaped).forEach { match ->
+                var cleanUrl = match.groupValues[1].replace("&amp;", "&")
+                if (cleanUrl.isNotBlank() && mappedUrls.add(cleanUrl)) {
+                    val isM3u8 = cleanUrl.contains(".m3u8")
+                    callback.invoke(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name Server",
+                            url = cleanUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                        ) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    found = true
+                }
             }
         }
-        
-        // Backup API probe just in case 91Porna hides it deeper than MRDS does
+
+        // 1. Scan the main HTML first
+        extractAndAdd(html)
+
+        // 2. Scan APIs if it's hidden (with AES cracking built-in)
         if (!found) {
             val vidIdMatch = Regex("""video_key=([^&]+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
             val vidId = vidIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
             
             if (vidId.isNotBlank()) {
                 val apiEndpoints = listOf(
-                    "/api/video/detail?video_key=$vidId",
                     "/api/comic/video/detail?video_key=$vidId",
+                    "/api/video/detail?video_key=$vidId",
                     "/api/video/get_video?video_key=$vidId",
                     "/api/v1/video/detail?video_key=$vidId"
                 )
+                
                 for (api in apiEndpoints) {
                     try {
                         val apiHtml = app.get(fixUrl(api), headers = headers).text
-                        cdnRegex.findAll(apiHtml).forEach { match ->
-                            val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-                            callback(newExtractorLink(name, "$name API", cleanUrl, ExtractorLinkType.M3U8) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            })
-                            found = true
+                        extractAndAdd(apiHtml) // Try direct read first
+                        
+                        // Crack the AES Payload if it's returning the massive Base64 string
+                        if (!found && apiHtml.isNotBlank() && !apiHtml.trim().startsWith("{") && !apiHtml.trim().startsWith("<")) {
+                            val decrypted = decryptVideoPayload(apiHtml.trim())
+                            if (decrypted.isNotBlank()) {
+                                extractAndAdd(decrypted)
+                            }
                         }
+                        
                         if (found) break
                     } catch (e: Exception) {}
                 }
