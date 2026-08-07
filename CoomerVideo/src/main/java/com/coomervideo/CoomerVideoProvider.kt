@@ -103,18 +103,24 @@ class CoomerVideoProvider : MainAPI() {
         val html = app.get(data).text
         val document = Jsoup.parse(html)
         val mappedUrls = mutableSetOf<String>()
+        val foundQualities = mutableSetOf<Int>()
 
         suspend fun extractStreams(sourceHtml: String, referer: String) {
-            // Broad regex to grab ANY raw authenticated media link cleanly off the page's scripts/JSON
-            val urlRegex = Regex("""["'](https?://[^"']+(?:\.mp4|\.m3u8)[^"']*)["']""")
-            
-            for (match in urlRegex.findAll(sourceHtml)) {
-                val streamUrl = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
-                
-                // Skip preview files
+            // Regex 1: KVS Flashvars (video_url, video_alt_url, etc.)
+            val flashvarsRegex = Regex("""(?:video_url|video_alt_url\d*)\s*[:=]\s*['"](http[^'"]+)['"]""")
+            // Regex 2: Any explicit get_file or .mp4 links sitting directly in the scripts/HTML
+            val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4)[^'"]*)['"]""")
+
+            val allMatches = flashvarsRegex.findAll(sourceHtml).map { it.groupValues[1] } +
+                             generalRegex.findAll(sourceHtml).map { it.groupValues[1] }
+
+            for (rawUrl in allMatches) {
+                val streamUrl = rawUrl.replace("&amp;", "&").replace("\\/", "/")
+
+                // Skip non-video assets and preview thumbnails
+                if (!streamUrl.contains(".mp4") && !streamUrl.contains("get_file") && !streamUrl.contains(".m3u8")) continue
                 if (streamUrl.contains("preview", ignoreCase = true)) continue
                 
-                // Track to prevent dupes
                 if (mappedUrls.add(streamUrl)) {
                     val isM3u8 = streamUrl.contains(".m3u8")
                     
@@ -123,31 +129,34 @@ class CoomerVideoProvider : MainAPI() {
                         streamUrl.contains("1080p") -> Qualities.P1080.value
                         streamUrl.contains("720p") -> Qualities.P720.value
                         streamUrl.contains("480p") || streamUrl.contains("360p") -> Qualities.P480.value
-                        else -> if (isM3u8) Qualities.Unknown.value else Qualities.P480.value
+                        else -> if (isM3u8) Qualities.Unknown.value else Qualities.P480.value // Base mp4 is typically 480p
                     }
                     
-                    val qLabel = when(qualityVal) {
-                        Qualities.P2160.value -> "4K"
-                        Qualities.P1080.value -> "1080p"
-                        Qualities.P720.value -> "720p"
-                        Qualities.P480.value -> "480p"
-                        else -> "MP4"
-                    }
-                    
-                    val labelName = if (isM3u8) "CoomerVideo HLS" else "CoomerVideo $qLabel"
-
-                    callback.invoke(
-                        newExtractorLink(name, labelName, streamUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                            this.referer = referer
-                            this.quality = qualityVal
+                    // Prevent duplicate quality links from cluttering the UI menu
+                    if (foundQualities.add(qualityVal) || isM3u8) {
+                        val qLabel = when(qualityVal) {
+                            Qualities.P2160.value -> "4K"
+                            Qualities.P1080.value -> "1080p"
+                            Qualities.P720.value -> "720p"
+                            Qualities.P480.value -> "480p"
+                            else -> "MP4"
                         }
-                    )
-                    found = true
+                        
+                        val labelName = if (isM3u8) "CoomerVideo HLS" else "CoomerVideo $qLabel"
+
+                        callback.invoke(
+                            newExtractorLink(name, labelName, streamUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                                this.referer = referer
+                                this.quality = qualityVal
+                            }
+                        )
+                        found = true
+                    }
                 }
             }
         }
 
-        // 1. Process Main HTML for direct links
+        // 1. Process Main HTML for stream data
         extractStreams(html, data)
 
         // 2. Scan for embedded Iframes
