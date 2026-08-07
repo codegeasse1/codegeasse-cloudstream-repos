@@ -78,16 +78,37 @@ class MadouProvider : MainAPI() {
         val title = document.selectFirst("title")?.text()?.substringBefore("_")?.trim() ?: "Video"
         val plot = document.selectFirst(".desc, .vod-content")?.text()?.trim()
         
-        // Search multiple potential locations for a valid poster image
-        val poster = document.selectFirst("meta[property=og:image], meta[itemprop=image]")?.attr("content")
-            ?: document.selectFirst(".player img, .video-cover img, .detail-pic img")?.attr("src")
+        // Look for the image inside standard MacCMS detail elements
+        val poster = document.selectFirst(".lazy, .vod-pic img, .mac_v_pic img, .play-pic img, .video-cover img")?.let {
+            it.attr("data-original").ifBlank { it.attr("src") }
+        } ?: document.selectFirst("meta[property=og:image], meta[itemprop=image]")?.attr("content")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            if (!poster.isNullOrBlank()) {
+            // By only assigning this when it is definitely valid, CloudStream will 
+            // automatically fall back to the search page thumbnail instead of going blank.
+            if (!poster.isNullOrBlank() && poster.startsWith("http")) {
                 this.posterUrl = fixUrlNull(poster)
             }
             this.plot = plot
         }
+    }
+
+    // Custom unescape to handle MacCMS %uXXXX encoding which breaks standard URLDecoders
+    private fun unescape(text: String): String {
+        var result = text
+        try {
+            result = URLDecoder.decode(result.replace("+", "%2B"), "UTF-8")
+        } catch (e: Exception) {}
+        
+        val regex = Regex("%u([0-9A-Fa-f]{4})")
+        var match = regex.find(result)
+        while (match != null) {
+            val hex = match.groupValues[1]
+            val char = hex.toInt(16).toChar().toString()
+            result = result.replace(match.value, char)
+            match = regex.find(result)
+        }
+        return result
     }
 
     override suspend fun loadLinks(
@@ -102,15 +123,16 @@ class MadouProvider : MainAPI() {
         val mappedUrls = mutableSetOf<String>()
 
         suspend fun addStream(streamUrl: String, referer: String) {
-            if (streamUrl.isBlank() || !streamUrl.startsWith("http")) return
-            if (!mappedUrls.add(streamUrl)) return
+            val finalUrl = if (streamUrl.startsWith("//")) "https:$streamUrl" else streamUrl
+            if (finalUrl.isBlank() || !finalUrl.startsWith("http")) return
+            if (!mappedUrls.add(finalUrl)) return
 
-            val isM3u8 = streamUrl.contains(".m3u8")
+            val isM3u8 = finalUrl.contains(".m3u8")
             callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = name + if (isM3u8) " HLS" else " MP4",
-                    url = streamUrl,
+                    url = finalUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = referer
@@ -121,20 +143,29 @@ class MadouProvider : MainAPI() {
         }
 
         suspend fun scanHtmlForStreams(sourceHtml: String, sourceUrl: String) {
+            // 1. Scan for raw links
             val streamRegex = Regex("""(https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*)""")
             for (match in streamRegex.findAll(sourceHtml)) {
                 addStream(match.groupValues[1].replace("\\/", "/"), sourceUrl)
             }
-            val varRegex = Regex("""(?:url|source|src|link)\s*[:=]\s*['"](https?://[^\s"'<>]+?)['"]""")
-            for (match in varRegex.findAll(sourceHtml)) {
-                val link = match.groupValues[1].replace("\\/", "/")
-                if (link.contains(".m3u8") || link.contains(".mp4")) {
-                    addStream(link, sourceUrl)
+            
+            // 2. Deep Scan: MacCMS external players (like lbjx9.com) often hide the m3u8 in a Base64 string in JS
+            val base64Regex = Regex("""['"]([a-zA-Z0-9+/=]+)['"]""")
+            for (match in base64Regex.findAll(sourceHtml)) {
+                val str = match.groupValues[1]
+                // Base64 strings for http (aHR0c) usually start with this
+                if (str.length > 20 && str.startsWith("aHR0c")) { 
+                    try {
+                        val decoded = String(Base64.decode(str, Base64.DEFAULT), Charsets.UTF_8)
+                        if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                            addStream(decoded, sourceUrl)
+                        }
+                    } catch(e: Exception){}
                 }
             }
         }
 
-        // 1. Process MacCMS Built-in Player JSON
+        // 1. Process MacCMS Built-in Player Script (Crack the MacCMS encryption)
         val jsonMatch = Regex("""(?:player_a+?|player_data).*?=\s*(\{.*?\})""").find(html)
         if (jsonMatch != null) {
             val jsonStr = jsonMatch.groupValues[1]
@@ -146,19 +177,22 @@ class MadouProvider : MainAPI() {
                 
                 try {
                     if (encrypt == 1) {
-                        streamUrl = URLDecoder.decode(streamUrl, "UTF-8")
+                        streamUrl = unescape(streamUrl)
                     } else if (encrypt == 2) {
-                        streamUrl = String(Base64.decode(streamUrl, Base64.DEFAULT))
-                        streamUrl = URLDecoder.decode(streamUrl, "UTF-8")
+                        // Standard MacCMS V10 encrypt 2 rule
+                        streamUrl = unescape(streamUrl)
+                        val decodedBytes = Base64.decode(streamUrl, Base64.DEFAULT)
+                        streamUrl = unescape(String(decodedBytes, Charsets.UTF_8))
                     }
                 } catch (e: Exception) {}
 
                 var finalUrl = fixUrlNull(streamUrl)
                 
+                // If the link routes to an external player query parameter
                 if (finalUrl != null && finalUrl.contains("url=")) {
                     val queryUrlMatch = Regex("""url=([^&]+)""").find(finalUrl)
                     if (queryUrlMatch != null) {
-                        val potentialStream = URLDecoder.decode(queryUrlMatch.groupValues[1], "UTF-8")
+                        val potentialStream = unescape(queryUrlMatch.groupValues[1])
                         if (potentialStream.contains(".m3u8") || potentialStream.contains(".mp4")) {
                             finalUrl = potentialStream
                         }
@@ -166,9 +200,12 @@ class MadouProvider : MainAPI() {
                 }
 
                 if (finalUrl != null) {
+                    if (finalUrl.startsWith("//")) finalUrl = "https:$finalUrl"
+                    
                     if (Regex("""\.(m3u8|mp4)(?:\?.*)?$""").containsMatchIn(finalUrl)) {
                         addStream(finalUrl, data)
                     } else {
+                        // It is an external player (e.g. lbjx9.com). Open it and deep scan the HTML!
                         try {
                             val iframeHtml = app.get(finalUrl, headers = mapOf("Referer" to data)).text
                             scanHtmlForStreams(iframeHtml, finalUrl)
@@ -183,16 +220,19 @@ class MadouProvider : MainAPI() {
 
         // 3. Scan Embedded Iframes in the DOM
         for (iframe in document.select("iframe")) {
-            val src = fixUrlNull(iframe.attr("src").ifBlank { iframe.attr("data-src") })
-            if (src != null && src.startsWith("http")) {
-                try {
-                    if (loadExtractor(src, data, subtitleCallback, callback)) {
-                        found = true
-                    } else {
-                        val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
-                        scanHtmlForStreams(iframeHtml, src)
-                    }
-                } catch (e: Exception) {}
+            var src = fixUrlNull(iframe.attr("src").ifBlank { iframe.attr("data-src") })
+            if (src != null) {
+                if (src.startsWith("//")) src = "https:$src"
+                if (src.startsWith("http")) {
+                    try {
+                        if (loadExtractor(src, data, subtitleCallback, callback)) {
+                            found = true
+                        } else {
+                            val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
+                            scanHtmlForStreams(iframeHtml, src)
+                        }
+                    } catch (e: Exception) {}
+                }
             }
         }
 
