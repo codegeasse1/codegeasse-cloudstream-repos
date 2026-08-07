@@ -19,7 +19,7 @@ class MadouProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    // A strict mobile User-Agent is used to bypass desktop JS encryption
+    // Mobile headers strictly used for video extraction to bypass JS encryption
     private val mobileHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
@@ -38,7 +38,8 @@ class MadouProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) "${request.data}.html" else "${request.data}/page/$page.html"
-        val document = app.get(url, headers = mobileHeaders).document
+        // Use default Desktop headers for UI scraping
+        val document = app.get(url).document
 
         val items = document.select(".detail_right_div ul li").mapNotNull {
             it.toSearchResult()
@@ -67,12 +68,12 @@ class MadouProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/index.php/vod/search.html"
-        val document = app.post(searchUrl, headers = mobileHeaders, data = mapOf("wd" to query)).document
+        val document = app.post(searchUrl, data = mapOf("wd" to query)).document
         return document.select(".detail_right_div ul li").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url, headers = mobileHeaders).document
+        val document = app.get(url).document
 
         val title = document.selectFirst("title")?.text()?.substringBefore("_")?.trim() ?: "Video"
         val plot = document.selectFirst(".desc, .vod-content")?.text()?.trim()
@@ -112,7 +113,8 @@ class MadouProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val html = app.get(data, headers = mobileHeaders).text
+        // Fetch HTML using default headers so the MacCMS player_data JSON is present
+        val html = app.get(data).text
         val document = Jsoup.parse(html)
         document.setBaseUri(data)
         
@@ -161,13 +163,15 @@ class MadouProvider : MainAPI() {
                 } catch (e: Exception) {}
             }
             
-            // 4. Heuristic ID Synthesizer (Bypasses API Encryption)
-            // If the iframe/URL contains the specific CDN video ID (e.g. b1000428), we manually construct the m3u8 link.
-            val idMatch = Regex("""(b\d{6,9})""").find(sourceUrl) ?: Regex("""(b\d{6,9})""").find(sourceHtml)
-            if (idMatch != null) {
-                val vid = idMatch.groupValues[1]
-                addStream("https://t0.97img.com/$vid/a.m3u8", sourceUrl)
-                addStream("https://t0.97img.com/$vid/index.m3u8", sourceUrl) // Alternative common format
+            // 4. Heuristic ID Synthesizer (Bypasses API Encryption for lbjx9/0721gc type players)
+            val apiIdMatch = Regex("""/d/(\d{4,6})""").find(sourceHtml) ?: Regex("""[?&]v=([bB]\d+)""").find(sourceUrl)
+            if (apiIdMatch != null) {
+                // If we find their typical ID structure, reconstruct the CDN link manually
+                val vid = apiIdMatch.groupValues[1]
+                val formattedId = if (vid.startsWith("b", ignoreCase = true)) vid else "b1000$vid" // common offset
+                
+                addStream("https://t0.97img.com/$formattedId/a.m3u8", sourceUrl)
+                addStream("https://t0.97img.com/$formattedId/index.m3u8", sourceUrl)
             }
         }
 
@@ -208,9 +212,9 @@ class MadouProvider : MainAPI() {
                     if (finalUrl.contains(".m3u8") || finalUrl.contains(".mp4")) {
                         addStream(finalUrl, data)
                     } else if (finalUrl.startsWith("http")) {
-                        // Deep scrape the external player HTML with Mobile Headers
+                        // Deep scrape the external player HTML with Mobile Headers to trigger fallback player
                         try {
-                            scanHtmlForStreams(finalUrl, finalUrl) // Run synthesis heuristic on the URL itself
+                            scanHtmlForStreams(finalUrl, finalUrl) 
                             val iframeHtml = app.get(finalUrl, headers = mobileHeaders).text
                             scanHtmlForStreams(iframeHtml, finalUrl)
                         } catch (e: Exception) {}
@@ -228,7 +232,7 @@ class MadouProvider : MainAPI() {
             val src = fixUrlNull(srcRaw)
             
             if (src != null && src.startsWith("http")) {
-                scanHtmlForStreams(src, data) // Check URL for heuristic bypass
+                scanHtmlForStreams(src, data)
                 try {
                     if (!loadExtractor(src, data, subtitleCallback, callback)) {
                         val iframeHtml = app.get(src, headers = mobileHeaders).text
