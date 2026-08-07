@@ -126,14 +126,12 @@ class CoomerVideoProvider : MainAPI() {
             found = true
         }
 
-        suspend fun extractFromHtml(sourceHtml: String, referer: String) {
-            // Regex to find all .mp4 and .m3u8 URLs in page HTML/JS
+        fun extractFromHtml(sourceHtml: String, referer: String) {
             val streamRegex = Regex("""https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*""")
             for (match in streamRegex.findAll(sourceHtml)) {
                 val streamUrl = match.value.replace("&amp;", "&").replace("\\/", "/")
                 addLink(streamUrl, referer)
 
-                // Generate 1080p, 720p, and 480p quality variants if only a single quality link was embedded
                 if (streamUrl.contains(".mp4")) {
                     val qualitiesToGenerate = listOf("1080p", "720p", "480p")
                     for (q in qualitiesToGenerate) {
@@ -153,8 +151,8 @@ class CoomerVideoProvider : MainAPI() {
         // 1. Check main page HTML
         extractFromHtml(html, data)
 
-        // 2. Scan for embedded Iframes
-        document.select("iframe").forEach { iframe ->
+        // 2. Scan for embedded Iframes (using standard for-in loop to allow suspend calls)
+        for (iframe in document.select("iframe")) {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank() && src.startsWith("http")) {
                 try {
