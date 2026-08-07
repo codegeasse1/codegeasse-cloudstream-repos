@@ -212,8 +212,8 @@ class Porna91Provider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: suspend (SubtitleFile) -> Unit,
-        callback: suspend (ExtractorLink) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
         val html = app.get(data, headers = headers).text
@@ -221,8 +221,7 @@ class Porna91Provider : MainAPI() {
 
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
 
-        // Changed to suspend fun and replaced .forEach with a for-loop to fix coroutine errors
-        suspend fun extractAndAdd(text: String) {
+        fun extractAndAdd(text: String) {
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             
             for (match in cdnRegex.findAll(unescaped)) {
