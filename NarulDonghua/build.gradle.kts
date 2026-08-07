@@ -17,15 +17,12 @@ cloudstream {
 android {
     namespace = "com.naruldonghua"
     compileSdk = 33
-    
+
     defaultConfig {
         minSdk = 21
     }
 }
 
 dependencies {
-    val cloudstreamApi = "com.github.recloudstream:cloudstream:master-SNAPSHOT"
-    compileOnly(cloudstreamApi)
-    
     implementation("org.jsoup:jsoup:1.15.3")
 }
