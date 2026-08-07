@@ -106,7 +106,8 @@ class CoomerVideoProvider : MainAPI() {
         // This tracks IDs so we don't accidentally generate duplicate link blocks
         val baseVideoIds = mutableSetOf<String>()
 
-        fun extractStreams(sourceHtml: String, referer: String): Boolean {
+        // FIX: Added 'suspend' keyword here!
+        suspend fun extractStreams(sourceHtml: String, referer: String): Boolean {
             var localFound = false
             
             // Regex strictly captures the base video ID and prevents matching preview clips
