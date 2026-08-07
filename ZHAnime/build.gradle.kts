@@ -17,16 +17,13 @@ cloudstream {
 android {
     namespace = "com.zh.anime"
     compileSdk = 33
-    
+
     defaultConfig {
         minSdk = 21
     }
 }
 
 dependencies {
-    val cloudstreamApi = "com.github.recloudstream:cloudstream:master-SNAPSHOT"
-    compileOnly(cloudstreamApi)
-    
     implementation("org.jsoup:jsoup:1.15.3")
     // implementation("org.json:json:20230227") // Uncomment if you end up needing JSON parsing
 }
