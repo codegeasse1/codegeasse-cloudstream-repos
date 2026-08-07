@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import javax.crypto.Cipher
@@ -39,30 +38,84 @@ class Porna91Provider : MainAPI() {
         "$mainUrl/comic/index/av" to "Japan AV"
     )
 
+    // ---------------------------------------------------------------
+    // NATIVE AES IMAGE DECRYPTION (Cloned from MRDS)
+    // ---------------------------------------------------------------
+    private suspend fun decryptImageUrl(url: String): String? {
+        if (url.isBlank() || url.startsWith("data:")) return url
+        
+        return try {
+            val response = app.get(url, headers = mapOf("Referer" to "$mainUrl/"))
+            // Using okhttpResponse.body?.bytes() is mandatory in CS3 to get raw bytes correctly
+            val cipherBytes = response.okhttpResponse.body?.bytes() ?: return null
+
+            // Magic number check to see if the server stopped encrypting this specific image
+            if (cipherBytes.size > 4 && 
+                ((cipherBytes[0].toInt() and 0xFF) == 0xFF && (cipherBytes[1].toInt() and 0xFF) == 0xD8) || 
+                ((cipherBytes[0].toInt() and 0xFF) == 0x89 && cipherBytes[1].toInt() == 0x50)
+            ) {
+                return url
+            }
+
+            val key = SecretKeySpec("f5d965df75336270".toByteArray(), "AES")
+            val iv = IvParameterSpec("97b60394abc2fbe1".toByteArray())
+
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, key, iv)
+            val decryptedBytes = cipher.doFinal(cipherBytes)
+
+            val ext = url.substringAfterLast(".", "jpeg").substringBefore("?")
+            "data:image/$ext;base64," + Base64.encodeToString(decryptedBytes, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            url // Fallback to raw URL on failure
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val docUrl = if (page == 1) request.data else "${request.data}&page=$page"
         val document = app.get(docUrl, headers = headers).document
         
         val items = document.select(".video-items .video-item, ul.video-items > li.video-item").mapNotNull {
-            it.toSearchResult()
+            it.toSearchResultAsync()
         }
         return newHomePageResponse(request.name, items)
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
+    // ---------------------------------------------------------------
+    // SEARCH & HOMEPAGE ITEM PARSING (Cloned logic from MRDS)
+    // ---------------------------------------------------------------
+    private suspend fun Element.toSearchResultAsync(): SearchResponse? {
         val link = this.selectFirst("a[href*=/detail], a[href*=/avdetail], a") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
 
-        val img = this.selectFirst("img")
-        val title = img?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
+        val imgEl = this.selectFirst("img")
+        val title = imgEl?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: this.selectFirst(".title, .line-clamp-2, .post-item-title, h3, h4")?.text()?.trim()
-            ?: return null
+            ?: this.text().substringBefore(" • ").trim()
 
-        val rawPoster = img?.attr("data-src")?.ifBlank { img.attr("data-original") }?.ifBlank { img.attr("src") }
+        val cardHtml = this.outerHtml()
+        
+        // Scan all possible MRDS / 91Porna lazy-loading attributes
+        val scriptImgMatch = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(cardHtml)?.groupValues?.get(1)
+        val fallbackImg = imgEl?.let {
+            it.attr("z-image-loader-url").ifBlank {
+                it.attr("x-image-loader-url").ifBlank {
+                    it.attr("data-xkrkllgl").ifBlank { 
+                        it.attr("data-src").ifBlank { 
+                            it.attr("data-original").ifBlank { 
+                                it.attr("src") 
+                            } 
+                        } 
+                    }
+                }
+            }
+        }
+        
+        val rawPosterUrl = scriptImgMatch ?: fallbackImg
+        val finalPosterUrl = rawPosterUrl?.let { decryptImageUrl(it) } ?: rawPosterUrl
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
-            this.posterUrl = fixUrlNull(rawPoster)
-            this.posterHeaders = headers 
+            this.posterUrl = finalPosterUrl
         }
     }
 
@@ -75,7 +128,9 @@ class Porna91Provider : MainAPI() {
             else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
             
             val document = app.get(docUrl, headers = headers).document
-            val items = document.select(".video-items .video-item").mapNotNull { it.toSearchResult() }
+            val items = document.select(".video-items .video-item").mapNotNull { 
+                it.toSearchResultAsync() 
+            }
             if (items.isEmpty()) break
             results.addAll(items)
         }
@@ -86,37 +141,42 @@ class Porna91Provider : MainAPI() {
         val document = app.get(url, headers = headers).document
         
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
-            ?: document.selectFirst("h1, h2")?.text()?.trim() ?: "Video"
+            ?: document.selectFirst("h1, h2, .post-title")?.text()?.trim() ?: "Video"
 
-        var rawPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
-        if (rawPoster.isNullOrBlank()) {
-            val img = document.selectFirst(".poster img, .video-cover img, .video-item img")
-            rawPoster = img?.attr("data-src")?.ifBlank { img.attr("src") }
+        val pageHtml = document.outerHtml()
+        
+        val contentImg = document.selectFirst(".post-content img, article p img, .poster img, .video-cover img")
+        var poster = contentImg?.let {
+            it.attr("z-image-loader-url").ifBlank {
+                it.attr("x-image-loader-url").ifBlank {
+                    it.attr("data-xkrkllgl").ifBlank { 
+                        it.attr("data-src").ifBlank { it.attr("src") }
+                    }
+                }
+            }
         }
 
+        if (poster.isNullOrBlank() || poster.startsWith("data:")) {
+            poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
+        }
+        if (poster.isNullOrBlank() || poster.startsWith("data:")) {
+            poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        }
+
+        val finalPoster = poster?.let { decryptImageUrl(it) } ?: poster
         val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            this.posterUrl = fixUrlNull(rawPoster)
-            this.backgroundPosterUrl = fixUrlNull(rawPoster)
-            this.posterHeaders = headers
+            this.posterUrl = finalPoster
+            this.backgroundPosterUrl = finalPoster
             this.plot = title
             this.tags = tags
         }
     }
 
-    private fun decryptVideoPayload(encryptedB64: String): String {
-        return try {
-            val key = SecretKeySpec("f5d965df75336270".toByteArray(Charsets.UTF_8), "AES")
-            val iv = IvParameterSpec("97b60394abc2fbe1".toByteArray(Charsets.UTF_8))
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(Cipher.DECRYPT_MODE, key, iv)
-            String(cipher.doFinal(Base64.decode(encryptedB64, Base64.DEFAULT)), Charsets.UTF_8)
-        } catch (e: Exception) {
-            ""
-        }
-    }
-
+    // ---------------------------------------------------------------
+    // LOAD LINKS (Cloned from MRDS)
+    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -125,71 +185,55 @@ class Porna91Provider : MainAPI() {
     ): Boolean {
         var found = false
         val html = app.get(data, headers = headers).text
-        val mappedUrls = mutableSetOf<String>()
 
-        suspend fun addStream(streamUrl: String) {
-            val cleanUrl = streamUrl.replace("\\/", "/").trim()
-            if (!cleanUrl.startsWith("http")) return
-            if (!cleanUrl.contains(".m3u8") && !cleanUrl.contains(".mp4")) return
-            if (!mappedUrls.add(cleanUrl)) return
+        // The MRDS magic regex that bypasses the API completely
+        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
-            val isM3u8 = cleanUrl.contains(".m3u8")
-            callback.invoke(
-                newExtractorLink(name, name + if (isM3u8) " HLS" else " MP4", cleanUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            found = true
-        }
+        cdnRegex.findAll(html).forEach { match ->
+            val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
 
-        // Added the suspend keyword here to fix the compiler error
-        suspend fun extractAndAddM3u8(text: String) {
-            val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
-            Regex("""(https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*)""").findAll(unescaped).forEach {
-                addStream(it.groupValues[1])
-            }
-        }
-
-        // 1. Scan Main HTML for exposed links
-        extractAndAddM3u8(html)
-
-        // 2. Scan APIs (with integrated AES Decryption)
-        val vidIdMatch = Regex("""video_key=([^&]+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
-        val vidId = vidIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
-        
-        if (vidId.isNotBlank()) {
-            val apiEndpoints = listOf(
-                "/api/video/detail?video_key=$vidId",
-                "/api/comic/video/detail?video_key=$vidId",
-                "/api/video/get_video?video_key=$vidId",
-                "/api/v1/video/detail?video_key=$vidId"
-            )
-            
-            for (api in apiEndpoints) {
-                try {
-                    val apiRes = app.get(fixUrl(api), headers = headers).text
-                    extractAndAddM3u8(apiRes)
-
-                    if (!apiRes.trim().startsWith("{") && apiRes.length > 50 && apiRes.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
-                        val decryptedHtml = decryptVideoPayload(apiRes.trim())
-                        extractAndAddM3u8(decryptedHtml)
+            if (cleanUrl.isNotBlank()) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name Server",
+                        url = cleanUrl,
+                        type = ExtractorLinkType.M3U8,
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
                     }
-
-                    if (found) break
-                } catch (e: Exception) {}
+                )
+                found = true
             }
         }
-
-        // 3. Scan Embedded Iframes
-        val document = Jsoup.parse(html)
-        for (iframe in document.select("iframe")) {
-            val src = fixUrlNull(iframe.attr("src").ifBlank { iframe.attr("data-src") })
-            if (src != null && src.startsWith("http")) {
-                try {
-                    val iframeHtml = app.get(src, headers = headers).text
-                    extractAndAddM3u8(iframeHtml)
-                } catch (e: Exception) {}
+        
+        // Backup API probe just in case 91Porna hides it deeper than MRDS does
+        if (!found) {
+            val vidIdMatch = Regex("""video_key=([^&]+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
+            val vidId = vidIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
+            
+            if (vidId.isNotBlank()) {
+                val apiEndpoints = listOf(
+                    "/api/video/detail?video_key=$vidId",
+                    "/api/comic/video/detail?video_key=$vidId",
+                    "/api/video/get_video?video_key=$vidId",
+                    "/api/v1/video/detail?video_key=$vidId"
+                )
+                for (api in apiEndpoints) {
+                    try {
+                        val apiHtml = app.get(fixUrl(api), headers = headers).text
+                        cdnRegex.findAll(apiHtml).forEach { match ->
+                            val cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+                            callback(newExtractorLink(name, "$name API", cleanUrl, ExtractorLinkType.M3U8) {
+                                this.referer = "$mainUrl/"
+                                this.quality = Qualities.Unknown.value
+                            })
+                            found = true
+                        }
+                        if (found) break
+                    } catch (e: Exception) {}
+                }
             }
         }
 
