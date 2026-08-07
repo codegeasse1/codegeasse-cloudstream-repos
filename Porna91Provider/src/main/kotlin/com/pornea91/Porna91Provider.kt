@@ -40,7 +40,7 @@ class Porna91Provider : MainAPI() {
     )
 
     // ---------------------------------------------------------------
-    // NATIVE AES IMAGE DECRYPTION (Working clone from MRDS)
+    // NATIVE AES IMAGE DECRYPTION
     // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
         if (url.isBlank() || url.startsWith("data:")) return url
@@ -74,9 +74,17 @@ class Porna91Provider : MainAPI() {
         val docUrl = if (page == 1) request.data else "${request.data}&page=$page"
         val document = app.get(docUrl, headers = headers).document
         
-        val items = document.select(".video-items .video-item, ul.video-items > li.video-item").mapNotNull {
-            it.toSearchResultAsync()
+        val items = mutableListOf<SearchResponse>()
+        val elements = document.select(".video-items .video-item, ul.video-items > li.video-item")
+        
+        // Flattened loop to fix the Kotlin coroutine compilation error
+        for (el in elements) {
+            val res = el.toSearchResultAsync()
+            if (res != null) {
+                items.add(res)
+            }
         }
+        
         return newHomePageResponse(request.name, items)
     }
 
@@ -107,7 +115,11 @@ class Porna91Provider : MainAPI() {
         }
         
         val rawPosterUrl = scriptImgMatch ?: fallbackImg
-        val finalPosterUrl = rawPosterUrl?.let { decryptImageUrl(it) } ?: rawPosterUrl
+        
+        var finalPosterUrl = rawPosterUrl
+        if (rawPosterUrl != null) {
+            finalPosterUrl = decryptImageUrl(rawPosterUrl) ?: rawPosterUrl
+        }
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = finalPosterUrl
@@ -123,9 +135,16 @@ class Porna91Provider : MainAPI() {
             else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
             
             val document = app.get(docUrl, headers = headers).document
-            val items = document.select(".video-items .video-item").mapNotNull { 
-                it.toSearchResultAsync() 
+            val elements = document.select(".video-items .video-item")
+            
+            val items = mutableListOf<SearchResponse>()
+            for (el in elements) {
+                val res = el.toSearchResultAsync()
+                if (res != null) {
+                    items.add(res)
+                }
             }
+            
             if (items.isEmpty()) break
             results.addAll(items)
         }
@@ -158,7 +177,11 @@ class Porna91Provider : MainAPI() {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
 
-        val finalPoster = poster?.let { decryptImageUrl(it) } ?: poster
+        var finalPoster = poster
+        if (poster != null) {
+            finalPoster = decryptImageUrl(poster) ?: poster
+        }
+        
         val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
@@ -199,7 +222,6 @@ class Porna91Provider : MainAPI() {
 
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
 
-        // Standard function (not suspend) to prevent Kotlin coroutine errors
         fun extractAndAdd(text: String) {
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             
