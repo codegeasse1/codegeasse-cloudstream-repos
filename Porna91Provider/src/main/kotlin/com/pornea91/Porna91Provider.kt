@@ -40,7 +40,7 @@ class Porna91Provider : MainAPI() {
     )
 
     // ---------------------------------------------------------------
-    // NATIVE AES IMAGE DECRYPTION
+    // NATIVE AES IMAGE DECRYPTION 
     // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
         if (url.isBlank() || url.startsWith("data:")) return url
@@ -77,7 +77,6 @@ class Porna91Provider : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         val elements = document.select(".video-items .video-item, ul.video-items > li.video-item")
         
-        // Flattened loop to fix the Kotlin coroutine compilation error
         for (el in elements) {
             val res = el.toSearchResultAsync()
             if (res != null) {
@@ -213,8 +212,8 @@ class Porna91Provider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        subtitleCallback: suspend (SubtitleFile) -> Unit,
+        callback: suspend (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
         val html = app.get(data, headers = headers).text
@@ -222,11 +221,12 @@ class Porna91Provider : MainAPI() {
 
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
 
-        fun extractAndAdd(text: String) {
+        // Changed to suspend fun and replaced .forEach with a for-loop to fix coroutine errors
+        suspend fun extractAndAdd(text: String) {
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             
-            cdnRegex.findAll(unescaped).forEach { match ->
-                var cleanUrl = match.groupValues[1].replace("&amp;", "&")
+            for (match in cdnRegex.findAll(unescaped)) {
+                val cleanUrl = match.groupValues[1].replace("&amp;", "&")
                 if (cleanUrl.isNotBlank() && mappedUrls.add(cleanUrl)) {
                     val isM3u8 = cleanUrl.contains(".m3u8")
                     callback.invoke(
