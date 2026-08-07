@@ -102,72 +102,53 @@ class CoomerVideoProvider : MainAPI() {
         var found = false
         val html = app.get(data).text
         val document = Jsoup.parse(html)
-        
-        // This tracks IDs so we don't accidentally generate duplicate link blocks
-        val baseVideoIds = mutableSetOf<String>()
+        val mappedUrls = mutableSetOf<String>()
 
-        // FIX: Added 'suspend' keyword here!
-        suspend fun extractStreams(sourceHtml: String, referer: String): Boolean {
-            var localFound = false
+        suspend fun extractStreams(sourceHtml: String, referer: String) {
+            // Broad regex to grab ANY raw authenticated media link cleanly off the page's scripts/JSON
+            val urlRegex = Regex("""["'](https?://[^"']+(?:\.mp4|\.m3u8)[^"']*)["']""")
             
-            // Regex strictly captures the base video ID and prevents matching preview clips
-            val mp4Regex = Regex("""(https?://[^\s"'<>]+?/(\d+)(?:_\d{3,4}p)?\.mp4[^\s"'<>]*)""")
-            
-            for (match in mp4Regex.findAll(sourceHtml)) {
-                val fullUrl = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
-                val videoId = match.groupValues[2]
+            for (match in urlRegex.findAll(sourceHtml)) {
+                val streamUrl = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
                 
-                // Ignore preview files or previously processed IDs
-                if (fullUrl.contains("preview", ignoreCase = true)) continue
-                if (baseVideoIds.contains(videoId)) continue
-                baseVideoIds.add(videoId)
-
-                // Strip any existing _1080p / _720p tags to get the pure base URL (which is 480p)
-                val baseUrl = fullUrl.replace(Regex("""${videoId}_\d{3,4}p\.mp4"""), "$videoId.mp4")
-
-                // Generate exactly three variants using the base video ID
-                val url1080 = baseUrl.replace("$videoId.mp4", "${videoId}_1080p.mp4")
-                val url720 = baseUrl.replace("$videoId.mp4", "${videoId}_720p.mp4")
-                val url480 = baseUrl
-
-                callback.invoke(newExtractorLink(name, "CoomerVideo 1080p", url1080, ExtractorLinkType.VIDEO) {
-                    this.referer = referer
-                    this.quality = Qualities.P1080.value
-                })
+                // Skip preview files
+                if (streamUrl.contains("preview", ignoreCase = true)) continue
                 
-                callback.invoke(newExtractorLink(name, "CoomerVideo 720p", url720, ExtractorLinkType.VIDEO) {
-                    this.referer = referer
-                    this.quality = Qualities.P720.value
-                })
-                
-                callback.invoke(newExtractorLink(name, "CoomerVideo 480p", url480, ExtractorLinkType.VIDEO) {
-                    this.referer = referer
-                    this.quality = Qualities.P480.value
-                })
-                
-                localFound = true
-            }
+                // Track to prevent dupes
+                if (mappedUrls.add(streamUrl)) {
+                    val isM3u8 = streamUrl.contains(".m3u8")
+                    
+                    val qualityVal = when {
+                        streamUrl.contains("2160p") || streamUrl.contains("4k", ignoreCase = true) -> Qualities.P2160.value
+                        streamUrl.contains("1080p") -> Qualities.P1080.value
+                        streamUrl.contains("720p") -> Qualities.P720.value
+                        streamUrl.contains("480p") || streamUrl.contains("360p") -> Qualities.P480.value
+                        else -> if (isM3u8) Qualities.Unknown.value else Qualities.P480.value
+                    }
+                    
+                    val qLabel = when(qualityVal) {
+                        Qualities.P2160.value -> "4K"
+                        Qualities.P1080.value -> "1080p"
+                        Qualities.P720.value -> "720p"
+                        Qualities.P480.value -> "480p"
+                        else -> "MP4"
+                    }
+                    
+                    val labelName = if (isM3u8) "CoomerVideo HLS" else "CoomerVideo $qLabel"
 
-            // M3U8 Catch-all (Just in case the site provides HLS playlists)
-            val m3u8Regex = Regex("""(https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*)""")
-            for (match in m3u8Regex.findAll(sourceHtml)) {
-                val m3Url = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
-                if (baseVideoIds.add(m3Url)) {
-                    callback.invoke(newExtractorLink(name, "CoomerVideo HLS", m3Url, ExtractorLinkType.M3U8) {
-                        this.referer = referer
-                        this.quality = Qualities.Unknown.value
-                    })
-                    localFound = true
+                    callback.invoke(
+                        newExtractorLink(name, labelName, streamUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                            this.referer = referer
+                            this.quality = qualityVal
+                        }
+                    )
+                    found = true
                 }
             }
-            
-            return localFound
         }
 
-        // 1. Check main page HTML
-        if (extractStreams(html, data)) {
-            found = true
-        }
+        // 1. Process Main HTML for direct links
+        extractStreams(html, data)
 
         // 2. Scan for embedded Iframes
         for (iframe in document.select("iframe")) {
@@ -178,9 +159,7 @@ class CoomerVideoProvider : MainAPI() {
                         found = true
                     } else {
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
-                        if (extractStreams(iframeHtml, src)) {
-                            found = true
-                        }
+                        extractStreams(iframeHtml, src)
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
