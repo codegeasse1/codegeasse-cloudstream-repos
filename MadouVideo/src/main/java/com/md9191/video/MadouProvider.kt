@@ -4,9 +4,12 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import android.util.Base64
+import java.net.URLDecoder
 
 class MadouProvider : MainAPI() {
     override var mainUrl = "https://www.9191md.me"
@@ -15,6 +18,11 @@ class MadouProvider : MainAPI() {
     override var lang = "zh"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
+
+    private val mobileHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    )
 
     override val mainPage = mainPageOf(
         "$mainUrl/index.php/vod/type/id/1" to "麻豆视频",
@@ -82,7 +90,6 @@ class MadouProvider : MainAPI() {
         }
     }
 
-    // A crash-proof unescape function that mimics JavaScript behavior
     private fun jsUnescape(str: String): String {
         val sb = java.lang.StringBuilder()
         var i = 0
@@ -120,75 +127,103 @@ class MadouProvider : MainAPI() {
         val mappedUrls = mutableSetOf<String>()
 
         suspend fun addStream(streamUrl: String, referer: String) {
-            var cleanUrl = streamUrl.replace("\\/", "/")
-            cleanUrl = cleanUrl.substringBefore("\"").substringBefore("'").trim()
+            var cleanUrl = streamUrl.trim()
             
-            // Aggressive Unwrapper: Strips away lbjx9.com or other query parameter wrappers
-            while (cleanUrl.contains("url=http") || cleanUrl.contains("v=http")) {
-                val target = if (cleanUrl.contains("url=http")) "url=" else "v="
-                cleanUrl = cleanUrl.substringAfter(target).substringBefore("&")
-                cleanUrl = jsUnescape(cleanUrl)
+            // Aggressively unwrap the deeply nested MacCMS external player queries
+            if (cleanUrl.contains("url=")) {
+                val target = cleanUrl.substringAfter("url=").substringBefore("&")
+                try { 
+                    val decoded = URLDecoder.decode(target, "UTF-8") 
+                    if (decoded.startsWith("http")) cleanUrl = decoded
+                } catch(e:Exception){}
+            } else if (cleanUrl.contains("v=")) {
+                val target = cleanUrl.substringAfter("v=").substringBefore("&")
+                try { 
+                    val decoded = URLDecoder.decode(target, "UTF-8") 
+                    if (decoded.startsWith("http")) cleanUrl = decoded
+                } catch(e:Exception){}
             }
 
             if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-            
-            if (cleanUrl.isBlank() || !cleanUrl.startsWith("http")) return
+            if (!cleanUrl.startsWith("http")) return
             if (!cleanUrl.contains(".m3u8") && !cleanUrl.contains(".mp4")) return
             if (!mappedUrls.add(cleanUrl)) return
 
             val isM3u8 = cleanUrl.contains(".m3u8")
+            
             callback.invoke(
                 newExtractorLink(name, name + if (isM3u8) " HLS" else " MP4", cleanUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                    this.referer = referer
+                    this.referer = mainUrl // Spoofing the mainUrl to bypass CDN hotlink protection
                     this.quality = Qualities.Unknown.value
                 }
             )
             found = true
         }
 
-        // 1. Force decrypt the main MacCMS player script
-        val jsonMatch = Regex("""player_[a-z0-9_]+\s*=\s*(\{.*?\})""").find(html)
-        if (jsonMatch != null) {
-            val jsonStr = jsonMatch.groupValues[1]
-            val urlRaw = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonStr)?.groupValues?.get(1)
-            val encrypt = Regex(""""encrypt"\s*:\s*(\d+)""").find(jsonStr)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        suspend fun scrapeHtmlForStreams(sourceHtml: String, refererUrl: String) {
+            val stringsToTest = mutableSetOf<String>()
             
-            if (urlRaw != null) {
-                var streamUrl = urlRaw
-                try {
-                    if (encrypt == 1) {
-                        streamUrl = jsUnescape(streamUrl)
-                    } else if (encrypt == 2) {
-                        streamUrl = jsUnescape(streamUrl)
-                        streamUrl = String(Base64.decode(streamUrl, Base64.DEFAULT), Charsets.UTF_8)
-                        streamUrl = jsUnescape(streamUrl)
-                    }
-                } catch (e: Exception) {}
+            // 1. Yank all raw HTTP links
+            Regex("""(https?[\\/]+[^\s"'<>]+)""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
+            
+            // 2. Yank all Base64 strings starting with http (aHR0c)
+            Regex("""(aHR0c[a-zA-Z0-9+/=]+)""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
+            
+            // 3. Yank all URL Encoded links
+            Regex("""(https?%3A%2F%2F[^\s"'<>]+)""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
+            
+            // 4. Yank all values explicitly assigned to a "url" key
+            Regex("""['"]url['"]\s*:\s*['"]([^'"]+)['"]""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
+
+            // Violently decrypt and test every single string
+            for (str in stringsToTest) {
+                var decoded = str.replace("\\/", "/")
                 
-                addStream(streamUrl, data)
+                if (decoded.contains("%u")) decoded = jsUnescape(decoded)
+                
+                if (decoded.startsWith("aHR0c")) {
+                    try { decoded = String(Base64.decode(decoded, Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) {}
+                }
+                
+                if (decoded.contains("%3A", ignoreCase = true)) {
+                    try { decoded = URLDecoder.decode(decoded, "UTF-8") } catch (e: Exception) {}
+                }
+                
+                if (decoded.contains("%u")) decoded = jsUnescape(decoded) 
+                
+                if (decoded.startsWith("aHR0c")) {
+                    try { decoded = String(Base64.decode(decoded, Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) {}
+                }
+
+                addStream(decoded, refererUrl)
             }
         }
 
-        // 2. Scan explicitly for any m3u8/mp4 URLs left in the open
-        Regex("""(https?[\\/]+[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*)""").findAll(html).forEach {
-            addStream(it.groupValues[1], data)
-        }
-        
-        // 3. Scan for stray Base64 strings starting with http (aHR0c)
-        Regex("""(aHR0c[a-zA-Z0-9+/=]+)""").findAll(html).forEach {
-            try {
-                val decoded = String(Base64.decode(it.groupValues[1], Base64.DEFAULT), Charsets.UTF_8)
-                addStream(decoded, data)
-            } catch (e: Exception) {}
-        }
-        
-        // 4. Scan hardcoded iframes (like the lbjx9.com iframe)
+        // --- Execute Brute-Force Scanner on the Main Page ---
+        scrapeHtmlForStreams(html, data)
+
+        // --- Execute Deep Scanner on Embedded Iframes ---
         val document = Jsoup.parse(html)
         document.setBaseUri(data)
+        
         for (iframe in document.select("iframe")) {
-            val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
-            if (src.startsWith("http")) {
-                addStream(src, data)
+            val srcRaw = iframe.attr("abs:src").ifBlank { iframe.attr("src") }.ifBlank { iframe.attr("data-src") }
+            val src = fixUrlNull(srcRaw)
+            
+            if (src != null && src.startsWith("http")) {
+                addStream(src, data) // Attempt to unwrap the iframe URL itself first
+                
+                if (!src.contains(".m3u8") && !src.contains(".mp4")) {
+                    try {
+                        if (!loadExtractor(src, data, subtitleCallback, callback)) {
+                            // If the standard extractor fails, fetch the iframe HTML and run the brute-force scanner inside it
+                            val iframeHtml = app.get(src, headers = mobileHeaders).text
+                            scrapeHtmlForStreams(iframeHtml, src)
+                        } else {
+                            found = true
+                        }
+                    } catch (e: Exception) {}
+                }
             }
         }
 
