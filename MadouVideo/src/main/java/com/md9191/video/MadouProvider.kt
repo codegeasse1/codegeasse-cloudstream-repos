@@ -83,8 +83,6 @@ class MadouProvider : MainAPI() {
             ?: document.selectFirst(".player img, .video-cover img, .detail-pic img")?.attr("src")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            // Only set the poster if we actually found one, so we don't accidentally overwrite 
-            // the thumbnail from the search page with a blank string.
             if (!poster.isNullOrBlank()) {
                 this.posterUrl = fixUrlNull(poster)
             }
@@ -146,7 +144,6 @@ class MadouProvider : MainAPI() {
             if (urlRaw != null) {
                 var streamUrl = urlRaw.replace("\\/", "/")
                 
-                // Decrypt MacCMS tokens based on their native encoding rules
                 try {
                     if (encrypt == 1) {
                         streamUrl = URLDecoder.decode(streamUrl, "UTF-8")
@@ -158,7 +155,6 @@ class MadouProvider : MainAPI() {
 
                 var finalUrl = fixUrlNull(streamUrl)
                 
-                // Unpack if the stream URL is passed as a nested query parameter (e.g. ?url=https://...)
                 if (finalUrl != null && finalUrl.contains("url=")) {
                     val queryUrlMatch = Regex("""url=([^&]+)""").find(finalUrl)
                     if (queryUrlMatch != null) {
@@ -170,11 +166,9 @@ class MadouProvider : MainAPI() {
                 }
 
                 if (finalUrl != null) {
-                    // Check if the decrypted URL is a raw media file
                     if (Regex("""\.(m3u8|mp4)(?:\?.*)?$""").containsMatchIn(finalUrl)) {
                         addStream(finalUrl, data)
                     } else {
-                        // Otherwise, it is an embedded iframe player (like lbjx9.com) - Fetch it to get the raw stream!
                         try {
                             val iframeHtml = app.get(finalUrl, headers = mapOf("Referer" to data)).text
                             scanHtmlForStreams(iframeHtml, finalUrl)
@@ -205,4 +199,3 @@ class MadouProvider : MainAPI() {
         return found
     }
 }
-j
