@@ -62,7 +62,7 @@ class Porna91Provider : MainAPI() {
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = fixUrlNull(rawPoster)
-            this.posterHeaders = headers // Passes Referer to bypass CDN hotlink protection on images
+            this.posterHeaders = headers 
         }
     }
 
@@ -105,7 +105,6 @@ class Porna91Provider : MainAPI() {
         }
     }
 
-    // Repurposed your original AES keys to decrypt the API Video Payload!
     private fun decryptVideoPayload(encryptedB64: String): String {
         return try {
             val key = SecretKeySpec("f5d965df75336270".toByteArray(Charsets.UTF_8), "AES")
@@ -144,8 +143,8 @@ class Porna91Provider : MainAPI() {
             found = true
         }
 
-        fun extractAndAddM3u8(text: String) {
-            // Replaces escaped JSON slashes to perfectly match the raw URLs
+        // Added the suspend keyword here to fix the compiler error
+        suspend fun extractAndAddM3u8(text: String) {
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             Regex("""(https?://[^\s"'\\]+\.(?:m3u8|mp4)[^\s"'\\]*)""").findAll(unescaped).forEach {
                 addStream(it.groupValues[1])
@@ -172,7 +171,6 @@ class Porna91Provider : MainAPI() {
                     val apiRes = app.get(fixUrl(api), headers = headers).text
                     extractAndAddM3u8(apiRes)
 
-                    // Crack the payload: If it returns the massive Base64 string from your screenshot
                     if (!apiRes.trim().startsWith("{") && apiRes.length > 50 && apiRes.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
                         val decryptedHtml = decryptVideoPayload(apiRes.trim())
                         extractAndAddM3u8(decryptedHtml)
