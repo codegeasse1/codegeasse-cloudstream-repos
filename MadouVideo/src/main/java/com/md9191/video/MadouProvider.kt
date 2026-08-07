@@ -127,7 +127,7 @@ class MadouProvider : MainAPI() {
 
         suspend fun addStream(streamUrl: String, referer: String) {
             val finalUrl = if (streamUrl.startsWith("//")) "https:$streamUrl" else streamUrl
-            val cleanUrl = finalUrl.substringBefore("\"").substringBefore("'").substringBefore("\\").trim()
+            val cleanUrl = finalUrl.substringBefore("\"").substringBefore("'").trim()
             
             if (cleanUrl.isBlank() || !cleanUrl.startsWith("http")) return
             if (!cleanUrl.contains(".m3u8") && !cleanUrl.contains(".mp4")) return
@@ -150,7 +150,7 @@ class MadouProvider : MainAPI() {
 
         suspend fun scanHtmlForStreams(sourceHtml: String, sourceUrl: String) {
             // 1. Raw M3U8 / MP4 Links (handles escaped \/ slashes)
-            val streamRegex = Regex("""(https?[\\/]+[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*)""")
+            val streamRegex = Regex("""(https?[\\/]+[^\s"'<>]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>]*)?)""")
             for (match in streamRegex.findAll(sourceHtml)) {
                 addStream(match.groupValues[1].replace("\\/", "/"), sourceUrl)
             }
@@ -176,10 +176,29 @@ class MadouProvider : MainAPI() {
                     }
                 } catch (e: Exception) {}
             }
+            
+            // 4. Fallback DOM Element Attribute Scanner
+            val doc = Jsoup.parse(sourceHtml)
+            doc.select("*").forEach { el ->
+                for (attr in el.attributes()) {
+                    val value = attr.value
+                    if ((value.contains(".m3u8") || value.contains(".mp4")) && value.startsWith("http")) {
+                        addStream(value, sourceUrl)
+                    } else if (value.startsWith("aHR0c")) {
+                        try {
+                            val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8)
+                            if ((decoded.contains(".m3u8") || decoded.contains(".mp4")) && decoded.startsWith("http")) {
+                                addStream(decoded, sourceUrl)
+                            }
+                        } catch(e: Exception){}
+                    }
+                }
+            }
         }
 
         // --- STEP 1: Process MacCMS Built-in Player Script ---
-        val jsonMatch = Regex("""player_[a-z0-9_]+\s*=\s*(\{.*?\})""").find(html)
+        // (?s) allows the regex to match across multiple lines which MacCMS often uses
+        val jsonMatch = Regex("""(?s)player_[a-z0-9_]+\s*=\s*(\{.*?\})""").find(html)
         if (jsonMatch != null) {
             val jsonStr = jsonMatch.groupValues[1]
             val urlRaw = Regex(""""url"\s*:\s*"([^"]+)"""").find(jsonStr)?.groupValues?.get(1)
@@ -204,7 +223,11 @@ class MadouProvider : MainAPI() {
                 if (finalUrl != null && finalUrl.contains("url=")) {
                     val queryUrlMatch = Regex("""url=([^&]+)""").find(finalUrl)
                     if (queryUrlMatch != null) {
-                        val potentialStream = unescape(queryUrlMatch.groupValues[1])
+                        var potentialStream = unescape(queryUrlMatch.groupValues[1])
+                        // Decode again if the parameter itself is base64
+                        if (potentialStream.startsWith("aHR0c")) {
+                            try { potentialStream = String(Base64.decode(potentialStream, Base64.DEFAULT), Charsets.UTF_8) } catch(e: Exception){}
+                        }
                         scanHtmlForStreams(potentialStream, data) 
                     }
                 }
