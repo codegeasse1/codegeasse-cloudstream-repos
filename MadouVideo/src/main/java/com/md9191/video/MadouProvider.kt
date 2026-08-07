@@ -10,6 +10,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import android.util.Base64
 import java.net.URLDecoder
+import java.net.URI
 
 class MadouProvider : MainAPI() {
     override var mainUrl = "https://www.9191md.me"
@@ -128,20 +129,31 @@ class MadouProvider : MainAPI() {
 
         suspend fun addStream(streamUrl: String, referer: String) {
             var cleanUrl = streamUrl.trim()
+            var actualReferer = referer
             
-            // Aggressively unwrap the deeply nested MacCMS external player queries
-            if (cleanUrl.contains("url=")) {
+            // Unwrapper: Remember the wrapper URL (lbjx9.com) so we can use it as the required referer later
+            if (cleanUrl.contains("url=http")) {
+                actualReferer = cleanUrl.substringBefore("?url=")
                 val target = cleanUrl.substringAfter("url=").substringBefore("&")
                 try { 
                     val decoded = URLDecoder.decode(target, "UTF-8") 
                     if (decoded.startsWith("http")) cleanUrl = decoded
                 } catch(e:Exception){}
-            } else if (cleanUrl.contains("v=")) {
+            } else if (cleanUrl.contains("v=http")) {
+                actualReferer = cleanUrl.substringBefore("?v=")
                 val target = cleanUrl.substringAfter("v=").substringBefore("&")
                 try { 
                     val decoded = URLDecoder.decode(target, "UTF-8") 
                     if (decoded.startsWith("http")) cleanUrl = decoded
                 } catch(e:Exception){}
+            }
+
+            // Fallback: If it's a known protected CDN, force lbjx9.com headers to bypass 403 Forbidden errors
+            if (cleanUrl.contains("cdn2020.com") || cleanUrl.contains("97img.com")) {
+                actualReferer = "https://lbjx9.com/"
+            }
+            if (actualReferer.isBlank() || !actualReferer.startsWith("http")) {
+                actualReferer = mainUrl
             }
 
             if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
@@ -151,9 +163,22 @@ class MadouProvider : MainAPI() {
 
             val isM3u8 = cleanUrl.contains(".m3u8")
             
+            val origin = try {
+                val uri = URI(actualReferer)
+                "${uri.scheme}://${uri.authority}"
+            } catch (e: Exception) {
+                "https://lbjx9.com"
+            }
+            
             callback.invoke(
                 newExtractorLink(name, name + if (isM3u8) " HLS" else " MP4", cleanUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl // Spoofing the mainUrl to bypass CDN hotlink protection
+                    this.referer = actualReferer
+                    // Injecting headers directly into the player prevents ERROR_CODE_IO_BAD_HTTP_STATUS
+                    this.headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+                        "Origin" to origin,
+                        "Referer" to actualReferer
+                    )
                     this.quality = Qualities.Unknown.value
                 }
             )
@@ -163,19 +188,11 @@ class MadouProvider : MainAPI() {
         suspend fun scrapeHtmlForStreams(sourceHtml: String, refererUrl: String) {
             val stringsToTest = mutableSetOf<String>()
             
-            // 1. Yank all raw HTTP links
             Regex("""(https?[\\/]+[^\s"'<>]+)""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
-            
-            // 2. Yank all Base64 strings starting with http (aHR0c)
             Regex("""(aHR0c[a-zA-Z0-9+/=]+)""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
-            
-            // 3. Yank all URL Encoded links
             Regex("""(https?%3A%2F%2F[^\s"'<>]+)""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
-            
-            // 4. Yank all values explicitly assigned to a "url" key
             Regex("""['"]url['"]\s*:\s*['"]([^'"]+)['"]""").findAll(sourceHtml).forEach { stringsToTest.add(it.groupValues[1]) }
 
-            // Violently decrypt and test every single string
             for (str in stringsToTest) {
                 var decoded = str.replace("\\/", "/")
                 
@@ -199,10 +216,8 @@ class MadouProvider : MainAPI() {
             }
         }
 
-        // --- Execute Brute-Force Scanner on the Main Page ---
         scrapeHtmlForStreams(html, data)
 
-        // --- Execute Deep Scanner on Embedded Iframes ---
         val document = Jsoup.parse(html)
         document.setBaseUri(data)
         
@@ -211,12 +226,11 @@ class MadouProvider : MainAPI() {
             val src = fixUrlNull(srcRaw)
             
             if (src != null && src.startsWith("http")) {
-                addStream(src, data) // Attempt to unwrap the iframe URL itself first
+                addStream(src, data) 
                 
                 if (!src.contains(".m3u8") && !src.contains(".mp4")) {
                     try {
                         if (!loadExtractor(src, data, subtitleCallback, callback)) {
-                            // If the standard extractor fails, fetch the iframe HTML and run the brute-force scanner inside it
                             val iframeHtml = app.get(src, headers = mobileHeaders).text
                             scrapeHtmlForStreams(iframeHtml, src)
                         } else {
