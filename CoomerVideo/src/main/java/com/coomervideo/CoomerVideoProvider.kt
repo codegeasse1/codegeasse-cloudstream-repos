@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class CoomerVideoProvider : MainAPI() {
@@ -27,7 +28,6 @@ class CoomerVideoProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}$page/"
         val document = app.get(url).document
 
-        // Selects standard video cards and short video cards
         val items = document.select("div.vx-main-card, div.vx-card, a.vx-card-short").mapNotNull {
             it.toSearchResult()
         }
@@ -46,7 +46,6 @@ class CoomerVideoProvider : MainAPI() {
 
         val imgEl = this.selectFirst("img") ?: return null
         
-        // Prioritize webp/original attributes over placeholder src
         val posterUrl = fixUrlNull(
             imgEl.attr("data-webp").ifBlank {
                 imgEl.attr("data-original").ifBlank {
@@ -55,7 +54,6 @@ class CoomerVideoProvider : MainAPI() {
             }
         )
         
-        // Ignore base64 SVG placeholders
         val finalPoster = if (posterUrl?.startsWith("data:image") == true) null else posterUrl
 
         val title = imgEl.attr("alt").ifBlank {
@@ -103,33 +101,56 @@ class CoomerVideoProvider : MainAPI() {
     ): Boolean {
         var found = false
         val html = app.get(data).text
-        val document = org.jsoup.Jsoup.parse(html)
+        val document = Jsoup.parse(html)
         val mappedUrls = mutableSetOf<String>()
-        
+
+        fun addLink(streamUrl: String, referer: String) {
+            if (!mappedUrls.add(streamUrl)) return
+
+            val isM3u8 = streamUrl.contains(".m3u8")
+            val qualityStr = extractQualityFromUrl(streamUrl)
+            val qualityVal = getQualityFromString(qualityStr)
+            val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name HLS" else "$name MP4"
+
+            callback.invoke(
+                newExtractorLink(
+                    source = name,
+                    name = sourceName,
+                    url = streamUrl,
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = referer
+                    this.quality = qualityVal
+                }
+            )
+            found = true
+        }
+
         suspend fun extractFromHtml(sourceHtml: String, referer: String) {
-            // General Regex to grab .mp4 and .m3u8 files from embedded players/JSON
-            val streamRegex = Regex("""(?:file|src|url|source)["']?\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""")
+            // Regex to find all .mp4 and .m3u8 URLs in page HTML/JS
+            val streamRegex = Regex("""https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*""")
             for (match in streamRegex.findAll(sourceHtml)) {
-                val streamUrl = match.groupValues[1].replace("\\/", "/")
-                if (mappedUrls.add(streamUrl)) {
-                    val isM3u8 = streamUrl.contains(".m3u8")
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = if (isM3u8) "$name HLS" else "$name MP4",
-                            url = streamUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = referer
-                            this.quality = Qualities.Unknown.value
+                val streamUrl = match.value.replace("&amp;", "&").replace("\\/", "/")
+                addLink(streamUrl, referer)
+
+                // Generate 1080p, 720p, and 480p quality variants if only a single quality link was embedded
+                if (streamUrl.contains(".mp4")) {
+                    val qualitiesToGenerate = listOf("1080p", "720p", "480p")
+                    for (q in qualitiesToGenerate) {
+                        val variantUrl = when {
+                            streamUrl.contains(Regex("""_\d{3,4}p\.mp4""")) -> streamUrl.replace(Regex("""_\d{3,4}p\.mp4"""), "_${q}.mp4")
+                            streamUrl.contains(".mp4") -> streamUrl.replace(".mp4", "_${q}.mp4")
+                            else -> null
                         }
-                    )
-                    found = true
+                        if (variantUrl != null) {
+                            addLink(variantUrl, referer)
+                        }
+                    }
                 }
             }
         }
 
-        // 1. Check main page HTML for direct stream links
+        // 1. Check main page HTML
         extractFromHtml(html, data)
 
         // 2. Scan for embedded Iframes
@@ -137,11 +158,9 @@ class CoomerVideoProvider : MainAPI() {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank() && src.startsWith("http")) {
                 try {
-                    // Pass to CloudStream's default extractors first
                     if (loadExtractor(src, data, subtitleCallback, callback)) {
                         found = true
                     } else {
-                        // Deep scrape the iframe if it's a custom player
                         val iframeHtml = app.get(src, headers = mapOf("Referer" to data)).text
                         extractFromHtml(iframeHtml, src)
                     }
@@ -152,5 +171,24 @@ class CoomerVideoProvider : MainAPI() {
         }
 
         return found
+    }
+
+    // ---------- Quality Parsing Helpers ----------
+    private fun extractQualityFromUrl(url: String): String {
+        val qualityMatch = Regex("""(?i)(?:_|-|/)(\d{3,4})p?(?:\.mp4|/)""").find(url) 
+            ?: Regex("""(?i)(\d{3,4})p""").find(url)
+        return qualityMatch?.groupValues?.get(1) ?: "Unknown"
+    }
+
+    private fun getQualityFromString(qualityString: String): Int {
+        return when {
+            qualityString.contains("2160") -> Qualities.P2160.value
+            qualityString.contains("1080") -> Qualities.P1080.value
+            qualityString.contains("720") -> Qualities.P720.value
+            qualityString.contains("480") -> Qualities.P480.value
+            qualityString.contains("360") -> Qualities.P360.value
+            qualityString.contains("240") -> Qualities.P240.value
+            else -> Qualities.Unknown.value
+        }
     }
 }
