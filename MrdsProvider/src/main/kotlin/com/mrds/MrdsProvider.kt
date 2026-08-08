@@ -184,14 +184,14 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) - Uses exact C51CG Archive Button Logic
+    // LOAD (Detail Page) - Using the successful DPlayer logic
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-        val pageHtml = document.outerHtml()
 
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val title = translateToEnglish(rawTitle) ?: "Video"
+        val pageHtml = document.outerHtml()
 
         val contentImg = document.selectFirst(".post-content img, article p img")
         var poster = contentImg?.let {
@@ -217,21 +217,16 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
-        // Exact C51CG Logic
-        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/], .post-content a[href*=/archives/]")
-        
-        if (rankingLinks.isNotEmpty()) {
-            val episodes = mutableListOf<Episode>()
-            for ((index, a) in rankingLinks.withIndex()) {
-                val link = fixUrlNull(a.attr("href")) ?: continue
-                val rawEpTitle = a.parent()?.previousElementSibling()?.text()?.trim() ?: a.text().trim()
-                val epTitle = translateToEnglish(rawEpTitle) ?: rawEpTitle
-                episodes.add(
-                    newEpisode(link) {
-                        this.name = epTitle
-                        this.episode = index + 1
-                    }
-                )
+        // Find all in-page DPlayer embeds
+        val dplayers = document.select("div.dplayer")
+        if (dplayers.size > 1) {
+            val episodes = dplayers.mapIndexed { index, el ->
+                // Pass the post URL with a tag, so loadLinks knows exactly which player to extract
+                newEpisode("$url#part=$index") {
+                    val rawEpTitle = el.attr("data-video_title").ifBlank { "Part ${index + 1}" }
+                    this.name = translateToEnglish(rawEpTitle) ?: rawEpTitle
+                    this.episode = index + 1
+                }
             }
             return newAnimeLoadResponse(title, url, TvType.Anime) {
                 this.posterUrl = poster
@@ -248,7 +243,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Exact original logic provided by you)
+    // LOAD LINKS (Original Logic Maintained Perfectly)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -257,8 +252,44 @@ class MrdsProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val html = app.get(data).text
+        
+        // Strip out the #part index to fetch the fresh HTML page
+        val targetUrl = data.substringBefore("#")
+        val html = app.get(targetUrl).text
 
+        val partIndex = if (data.contains("#part=")) data.substringAfter("#part=").toIntOrNull() else null
+
+        // If it's a multi-part video, target the specific player to avoid loading Part 1 every time
+        if (partIndex != null) {
+            val dplayers = org.jsoup.Jsoup.parse(html).select("div.dplayer")
+            val targetPlayer = dplayers.getOrNull(partIndex)
+            
+            if (targetPlayer != null) {
+                val config = targetPlayer.attr("data-config")
+                // Only extract the reliable "video" link (ignores "video_h265")
+                val urlMatch = Regex(""""video"\s*:\s*\{"url"\s*:\s*"([^"]+m3u8[^"]*)"""").find(config)
+                
+                if (urlMatch != null) {
+                    val cleanUrl = urlMatch.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
+                    callback(
+                        newExtractorLink(
+                            source = "MRDS Server",
+                            name = "MRDS Server",
+                            url = cleanUrl,
+                            type = ExtractorLinkType.M3U8,
+                        ) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return true
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // EXACT ORIGINAL SINGLE-VIDEO LOGIC
+        // ---------------------------------------------------------------
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
         cdnRegex.findAll(html).forEach { match ->
