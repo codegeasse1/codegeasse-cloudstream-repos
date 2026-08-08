@@ -12,6 +12,7 @@ import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.math.pow
 
 class Porna91Provider : MainAPI() {
     override var mainUrl = "https://91porna.com"
@@ -192,6 +193,36 @@ class Porna91Provider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
+    // JS UNPACKER (For eval(function(p,a,c,k,e,d)... scripts)
+    // ---------------------------------------------------------------
+    private fun getUnpacked(packed: String): String {
+        return try {
+            val pRegex = Regex("""\}?\s*\('(.*)',\s*(\d+),\s*(\d+),\s*'(.*?)'\.split\('\|'\)""").find(packed) ?: return packed
+            var p = pRegex.groupValues[1]
+            val a = pRegex.groupValues[2].toIntOrNull() ?: 10
+            val c = pRegex.groupValues[3].toIntOrNull() ?: 10
+            val k = pRegex.groupValues[4].split("|")
+
+            fun e(c: Int): String {
+                val first = if (c < a) "" else e(c / a)
+                val m = c % a
+                val second = if (m > 35) (m + 29).toChar().toString() else m.toString(36)
+                return first + second
+            }
+
+            for (i in c - 1 downTo 0) {
+                if (k.getOrNull(i)?.isNotBlank() == true) {
+                    val searchRegex = Regex("\\b${e(i)}\\b")
+                    p = p.replace(searchRegex, k[i])
+                }
+            }
+            p
+        } catch (e: Exception) {
+            packed
+        }
+    }
+
+    // ---------------------------------------------------------------
     // AES VIDEO PAYLOAD DECRYPTION 
     // ---------------------------------------------------------------
     private fun decryptVideoPayload(encryptedB64: String): String {
@@ -213,8 +244,8 @@ class Porna91Provider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        subtitleCallback: suspend (SubtitleFile) -> Unit,
+        callback: suspend (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
         val html = app.get(data, headers = headers).text
@@ -249,7 +280,6 @@ class Porna91Provider : MainAPI() {
             extractAndAdd(text)
             if (found) return
 
-            // Scan for candidate encrypted Base64 strings embedded in JSON or HTML
             val b64Regex = Regex("""[A-Za-z0-9+/=]{30,}""")
             for (match in b64Regex.findAll(text)) {
                 val candidate = match.value.trim()
@@ -264,7 +294,29 @@ class Porna91Provider : MainAPI() {
         // 1. Scan the main HTML
         tryDecryptAndExtract(html)
 
-        // 2. Fetch and decrypt external .txt payload files (e.g., https://g.lp-is.com/.../*.txt)
+        // 2. Unpack Javascript Eval
+        if (!found) {
+            val evalRegex = Regex("""eval\s*\(\s*function\s*\(p,a,c,k,e,d\).*?\.split\('\|'\)\)\)""")
+            for (match in evalRegex.findAll(html)) {
+                val unpackedScript = getUnpacked(match.value)
+                
+                // If the unpacked script contains an iframe pointing to a player endpoint
+                val playerSrc = Regex("""src=['"]([^'"]+)['"]""").find(unpackedScript)?.groupValues?.get(1)
+                    ?: Regex("""<iframe[^>]+src=['"]([^'"]+)['"]""").find(unpackedScript)?.groupValues?.get(1)
+                
+                if (playerSrc != null) {
+                    var playerUrl = fixUrlNull(playerSrc.replace("\\/", "/"))
+                    if (playerUrl != null) {
+                        try {
+                            val playerHtml = app.get(playerUrl, headers = headers).text
+                            tryDecryptAndExtract(playerHtml)
+                        } catch (e: Exception) {}
+                    }
+                }
+            }
+        }
+
+        // 3. Fetch and decrypt external .txt payload files
         if (!found) {
             val txtRegex = Regex("""(https?://[^\s"'<>]+\.txt[^\s"'<>]*)""")
             for (match in txtRegex.findAll(html)) {
@@ -282,7 +334,7 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 3. Scan API endpoints as fallback
+        // 4. Scan API endpoints as fallback
         if (!found) {
             val vidIdMatch = Regex("""video_key=([^&"']+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
             val vidId = vidIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
