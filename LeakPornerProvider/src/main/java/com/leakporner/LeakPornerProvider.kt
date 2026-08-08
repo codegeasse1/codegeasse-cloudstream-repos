@@ -18,136 +18,51 @@ class LeakPornerProvider : MainAPI() {
         private const val IMG_REFERER = "https://leakporner.org/"
     }
 
-    // ---------- Main Page Tabs ----------
-    override val mainPage = mainPageOf(
-        "$mainUrl/" to "Recent Leaks",
-        "$mainUrl/actors/" to "Actors Directory"
-    )
-
+    // ---------- Main Page ----------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val isActorsDirectory = request.data.contains("/actors")
-
-        val url = if (page == 1) {
-            request.data
-        } else {
-            if (request.data.endsWith("/")) "${request.data}page/$page/" else "${request.data}/page/$page/"
-        }
-
+        val url = if (page == 1) mainUrl else "$mainUrl/page/$page/"
         val document = app.get(url).document
-
-        if (isActorsDirectory) {
-            // Parse actors grid from /actors/
-            val actorElements = document.select("article, div.actor-card, div.loop-actor, div.item, div.post, li.actor, div.taxonomy-actor")
-            val items = actorElements.mapNotNull { parseActorItem(it) }.distinctBy { it.url }
-            
-            val hasNext = document.select(".pagination a, .nav-links a").any { 
-                it.text().trim().equals("Next", ignoreCase = true) || it.hasClass("next") 
-            }
-            
-            return newHomePageResponse(
-                list = listOf(HomePageList(request.name, items)),
-                hasNext = hasNext
-            )
-        } else {
-            // Normal video feed
-            val items = document.select("article.loop-video, article.post").mapNotNull { parseVideoItem(it) }
-            
-            val hasNext = document.select(".pagination a, .nav-links a").any { 
-                it.text().trim().equals("Next", ignoreCase = true) || it.hasClass("next") 
-            }
-            
-            return newHomePageResponse(
-                list = listOf(HomePageList(request.name, items)),
-                hasNext = hasNext
-            )
+        val items = document.select("article.loop-video, article.post").mapNotNull { el -> parseVideoItem(el) }
+        
+        val hasNext = document.select(".pagination a").any { 
+            it.text().trim().equals("Next", ignoreCase = true) 
         }
+        
+        return newHomePageResponse(
+            list = listOf(HomePageList(name, items)),
+            hasNext = hasNext
+        )
     }
 
     // ---------- Search ----------
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/?s=$query"
         val document = app.get(searchUrl).document
-        
-        val videoItems = document.select("article.loop-video, article.post").mapNotNull { parseVideoItem(it) }
-        val actorItems = document.select("div.actor-card, div.loop-actor, article.actor").mapNotNull { parseActorItem(it) }
-        
-        return (videoItems + actorItems).distinctBy { it.url }
+        return document.select("article.loop-video, article.post").mapNotNull { el ->
+            parseVideoItem(el)
+        }
     }
 
-    // ---------- Load Details / Actor Page ----------
+    // ---------- Load Details ----------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-
-        // Check if the URL is an Actor profile page (/actor/name/)
-        val isActorProfile = url.contains("/actor/") || 
-                             (document.select("iframe, span.change-video[data-embed], video").isEmpty() && 
-                              document.select("article.loop-video, article.post").isNotEmpty())
-
-        if (isActorProfile) {
-            // FIX: Added the missing dot before ifBlank
-            val actorTitle = document.selectFirst("h1.entry-title, h1.page-title, h1, .actor-details h1")?.text()?.ifBlank { null }
-                ?: document.select("meta[property=og:title]").attr("content").substringBefore("-").trim().ifBlank { "Actor Profile" }
-
-            val actorPoster = document.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: document.selectFirst(".actor-image img, .post-thumbnail img")?.let {
-                    it.attr("data-src").ifBlank { null }
-                        ?: it.attr("data-lazy-src").ifBlank { null }
-                        ?: it.attr("src")
-                }
-
-            val episodes = mutableListOf<Episode>()
-            val videoElements = document.select("article.loop-video, article.post")
-
-            videoElements.forEachIndexed { index, el ->
-                val linkEl = el.selectFirst("a[href]") ?: return@forEachIndexed
-                val videoHref = fixUrl(linkEl.attr("href"))
-                if (videoHref.isBlank() || videoHref == url) return@forEachIndexed
-
-                val videoTitle = el.selectFirst(".entry-header span, .post-title, .title, .entry-title")?.text()
-                    ?: linkEl.attr("title")
-                    ?: "Video ${index + 1}"
-
-                val videoPoster = el.selectFirst("img")?.let {
-                    it.attr("data-src").ifBlank { null }
-                        ?: it.attr("data-lazy-src").ifBlank { null }
-                        ?: it.attr("data-original").ifBlank { null }
-                        ?: it.attr("src")
-                }
-
-                episodes.add(
-                    newEpisode(videoHref) {
-                        this.name = videoTitle
-                        this.episode = index + 1
-                        this.posterUrl = fixUrl(videoPoster)
-                    }
-                )
+        val title = document.selectFirst(".entry-title, .video-title, h1")?.text()
+            ?: document.select("meta[property=og:title]").attr("content")
+            ?: "No title"
+        
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content")
+            ?: document.selectFirst(".post-thumbnail img, .video-player img")?.let {
+                it.attr("data-src").ifBlank { null }
+                    ?: it.attr("data-lazy-src").ifBlank { null }
+                    ?: it.attr("data-original").ifBlank { null }
+                    ?: it.attr("srcset").substringBefore(" ").ifBlank { null }
+                    ?: it.attr("src")
             }
 
-            return newTvSeriesLoadResponse(actorTitle, url, TvType.NSFW, episodes.distinctBy { it.data }) {
-                this.posterUrl = fixUrl(actorPoster)
-                this.posterHeaders = mapOf("Referer" to IMG_REFERER)
-                this.plot = "All leaked videos for $actorTitle"
-            }
-        } else {
-            // Single Video Page
-            val title = document.selectFirst(".entry-title, .video-title, h1")?.text()
-                ?: document.select("meta[property=og:title]").attr("content")
-                ?: "No title"
-
-            val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content")
-                ?: document.selectFirst(".post-thumbnail img, .video-player img")?.let {
-                    it.attr("data-src").ifBlank { null }
-                        ?: it.attr("data-lazy-src").ifBlank { null }
-                        ?: it.attr("data-original").ifBlank { null }
-                        ?: it.attr("srcset").substringBefore(" ").ifBlank { null }
-                        ?: it.attr("src")
-                }
-
-            return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-                this.posterUrl = fixUrl(poster)
-                this.posterHeaders = mapOf("Referer" to IMG_REFERER)
-            }
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+            this.posterUrl = fixUrl(poster)
+            this.posterHeaders = mapOf("Referer" to IMG_REFERER) // Fixes Details page image
         }
     }
 
@@ -187,14 +102,18 @@ class LeakPornerProvider : MainAPI() {
             }
         }
 
-        // 4. Process all gathered iframes
+        // 4. Process all gathered iframes 
+        // MUST use standard for-loop here to properly await suspend functions!
         for (iframeUrl in iframeUrls) {
             runCatching {
+                // Pass to built-in CloudStream extractors first
                 if (loadExtractor(iframeUrl, data, subtitleCallback, callback)) {
                     found = true
                 } else {
+                    // Deep scrape: Fetch the 3rd-party iframe HTML
                     val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to data)).text
                     
+                    // Dig for hidden file objects
                     val streamRegex = Regex("""(?:file|src|url|source)["']?\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""")
                     val rawUrlRegex = Regex("""(https?://[^"'\s>]+\.(?:m3u8|mp4)[^"'\s>]*)""")
 
@@ -228,6 +147,7 @@ class LeakPornerProvider : MainAPI() {
     }
 
     // ---------- Helpers ----------
+    
     private suspend fun addStreamLink(rawUrl: String, referer: String, callback: (ExtractorLink) -> Unit) {
         val safeUrl = if (rawUrl.contains(".txt") && !rawUrl.contains(".m3u8")) "$rawUrl#.m3u8" else rawUrl
         val isM3u8 = safeUrl.contains(".m3u8")
@@ -264,32 +184,7 @@ class LeakPornerProvider : MainAPI() {
 
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = fixUrl(poster)
-            this.posterHeaders = mapOf("Referer" to IMG_REFERER)
-        }
-    }
-
-    private fun parseActorItem(element: Element): SearchResponse? {
-        val linkEl = element.selectFirst("a[href*=/actor/]") ?: element.selectFirst("a[href]") ?: return null
-        val href = fixUrl(linkEl.attr("href"))
-        if (href.isBlank() || href == "$mainUrl/actors/") return null
-
-        val posterEl = element.selectFirst("img")
-        val poster = posterEl?.let {
-            it.attr("data-src").ifBlank { null }
-                ?: it.attr("data-lazy-src").ifBlank { null }
-                ?: it.attr("data-original").ifBlank { null }
-                ?: it.attr("srcset").substringBefore(" ").ifBlank { null }
-                ?: it.attr("src")
-        } ?: ""
-
-        val title = element.selectFirst(".actor-name, .title, .entry-title, h2, h3, span")?.text()
-            ?: linkEl.attr("title")
-            ?: linkEl.text()
-            .ifBlank { "Actor" }
-
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
-            this.posterUrl = fixUrl(poster)
-            this.posterHeaders = mapOf("Referer" to IMG_REFERER)
+            this.posterHeaders = mapOf("Referer" to IMG_REFERER) // Fixes Main Page / Search image
         }
     }
 
