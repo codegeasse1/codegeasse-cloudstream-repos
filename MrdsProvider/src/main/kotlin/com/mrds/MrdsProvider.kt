@@ -184,17 +184,52 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) - Multi-Part Archive Button Support
+    // LOAD (Detail Page) - Exact C51CG Multi-Video Collection Logic
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-
-        val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
-        val title = translateToEnglish(rawTitle) ?: "Video"
         val pageHtml = document.outerHtml()
 
-        val contentImg = document.selectFirst(".post-content img, article p img")
-        var poster = contentImg?.let {
+        // Check if this post contains specific internal ranking buttons like C51CG
+        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
+
+        if (rankingLinks.isNotEmpty()) {
+            val rawTitle = document.selectFirst("h1.post-title")?.text()?.trim()
+                ?: document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
+                ?: "Ranking List"
+            val title = translateToEnglish(rawTitle) ?: "Ranking List"
+
+            val poster = document.selectFirst(".post-content img[data-xkrkllgl]")?.attr("data-xkrkllgl")
+                ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+
+            val episodes = mutableListOf<Episode>()
+            for ((index, a) in rankingLinks.withIndex()) {
+                val link = fixUrlNull(a.attr("href")) ?: continue
+                val rawEpTitle = a.parent()?.previousElementSibling()?.text()?.trim()
+                    ?: a.text().trim()
+                val epTitle = translateToEnglish(rawEpTitle) ?: rawEpTitle
+                episodes.add(
+                    newEpisode(link) {
+                        this.name = epTitle
+                        this.episode = index + 1
+                    }
+                )
+            }
+
+            return newAnimeLoadResponse(title, url, TvType.Anime) {
+                this.posterUrl = poster
+                this.plot = "Top ${episodes.size} entries"
+                addEpisodes(DubStatus.Subbed, episodes)
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // NORMAL SINGLE-VIDEO PAGE
+        // ---------------------------------------------------------------
+        val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
+        val title = translateToEnglish(rawTitle) ?: "Video"
+
+        var poster = document.selectFirst(".post-content img, article p img")?.let {
             it.attr("z-image-loader-url").ifBlank {
                 it.attr("x-image-loader-url").ifBlank {
                     it.attr("data-xkrkllgl").ifBlank { it.attr("src") }
@@ -217,40 +252,6 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
-        // Check for archive / multi-part buttons pointing to sub-pages
-        val archiveLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/], .post-content a[href*=/archives/]")
-        if (archiveLinks.isNotEmpty()) {
-            val episodes = mutableListOf<Episode>()
-            
-            // Include the main page as Part 1 if it has a video, or list the archive links cleanly
-            episodes.add(
-                newEpisode(url) {
-                    this.name = "Part 1"
-                    this.episode = 1
-                }
-            )
-
-            archiveLinks.forEachIndexed { index, a ->
-                val link = fixUrlNull(a.attr("href")) ?: return@forEachIndexed
-                if (link != url) {
-                    episodes.add(
-                        newEpisode(link) {
-                            this.name = "Part ${index + 2}"
-                            this.episode = index + 2
-                        }
-                    )
-                }
-            }
-
-            if (episodes.size > 1) {
-                return newAnimeLoadResponse(title, url, TvType.Anime) {
-                    this.posterUrl = poster
-                    this.plot = synopsis ?: "Collection of ${episodes.size} videos"
-                    addEpisodes(DubStatus.Subbed, episodes)
-                }
-            }
-        }
-
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = synopsis
@@ -258,7 +259,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (100% Original Single-Video Logic Preserved)
+    // LOAD LINKS (Exact original single-video M3U8 scraper)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
