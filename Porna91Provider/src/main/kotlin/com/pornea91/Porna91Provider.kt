@@ -168,7 +168,7 @@ class Porna91Provider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // DEAN EDWARDS UNPACKER (handles \' escapes inside the payload)
+    // DEAN EDWARDS UNPACKER
     // ---------------------------------------------------------------
     private fun unpackTuple(p: String, a: Int, c: Int, kRaw: String): String {
         return try {
@@ -241,7 +241,7 @@ class Porna91Provider : MainAPI() {
             "X-Requested-With" to "XMLHttpRequest"
         )
 
-        fun emit(url: String, tag: String): Boolean {
+        suspend fun emit(url: String, tag: String): Boolean {
             val u = url.replace("\\/", "/").replace("&amp;", "&").trim()
             if (u.isBlank() || !mappedUrls.add(u)) return false
             val isM3u8 = u.contains(".m3u8") || u.contains("m3u8?")
@@ -260,7 +260,7 @@ class Porna91Provider : MainAPI() {
             return true
         }
 
-        fun scanText(text: String): Boolean {
+        suspend fun scanText(text: String): Boolean {
             var ok = false
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             for (m in Regex("""https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(unescaped)) {
@@ -285,13 +285,11 @@ class Porna91Provider : MainAPI() {
             return ok
         }
 
-        // If a request ends up on the media itself (redirect), emit final URL
-        fun emitIfMedia(res: Response): Boolean {
-            val finalUrl = res.url ?: return false
+        suspend fun emitIfMedia(res: com.lagradost.nicehttp.NiceResponse): Boolean {
+            val finalUrl = res.okhttpResponse.request.url.toString()
             return if (finalUrl.contains(".m3u8") || finalUrl.contains(".mp4")) emit(finalUrl, "Direct") else false
         }
 
-        // Gather every script body: inline + external + iframes
         val scriptBodies = mutableListOf(html)
         for (el in document.select("script[src]")) {
             val src = fixUrlNull(el.attr("src")) ?: continue
@@ -314,12 +312,12 @@ class Porna91Provider : MainAPI() {
         val detailPlayCandidates = linkedSetOf<String>()
 
         for (body in scriptBodies) {
-            // a) plain scan of every script / iframe body
             if (scanText(body)) return true
 
-            // b) unpack packed scripts found in ANY body
             for (tm in tupleRegex.findAll(body)) {
-                val unpacked = unpackTuple(tm.groupValues[1], tm.groupValues[2].toIntOrNull() ?: 62, tm.groupValues[3].toIntOrNull() ?: 0, tm.groupGroupsFix(tm.groupValues[4]))
+                val kParam = tm.groupValues[4].replace("\\'", "'").replace("\\\\", "\\")
+                val unpacked = unpackTuple(tm.groupValues[1], tm.groupValues[2].toIntOrNull() ?: 62, tm.groupValues[3].toIntOrNull() ?: 0, kParam)
+                
                 if (scanText(unpacked)) return true
 
                 val hex = hexRegex.find(unpacked)?.groupValues?.get(1) ?: hexLooseRegex.find(unpacked)?.groupValues?.get(1)
@@ -330,7 +328,7 @@ class Porna91Provider : MainAPI() {
                 }
 
                 for (dp in detailPlayRegex.findAll(unpacked)) {
-                    var u = dp.groupValues[1].replace("\\/", "/")
+                    val u = dp.groupValues[1].replace("\\/", "/")
                     detailPlayCandidates.add(u)
                     detailPlayCandidates.add(u.replace(Regex("t=\\d+"), "t=$t"))
                     if (hex != null) {
@@ -339,7 +337,6 @@ class Porna91Provider : MainAPI() {
                 }
             }
 
-            // c) verbatim detail_play urls inside raw bodies
             for (dp in detailPlayRegex.findAll(body)) {
                 val u = dp.groupValues[1].replace("\\/", "/")
                 detailPlayCandidates.add(u)
@@ -347,13 +344,11 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // d) build candidates from video_key when nothing was found in scripts
         if (vidKey != null) {
             detailPlayCandidates.add("/comic/index/detail_play?video_key=$vidKey&t=$t")
             detailPlayCandidates.add("/comic/index/detail_play?video_key=$vidKey")
         }
 
-        // e) hit every detail_play candidate; response may be JSON, encrypted, or a redirect to the m3u8
         for (cand in detailPlayCandidates) {
             val full = if (cand.startsWith("http")) cand else mainUrl + cand
             try {
@@ -363,7 +358,6 @@ class Porna91Provider : MainAPI() {
             } catch (e: Exception) {}
         }
 
-        // f) last resort: mobile UA page scan
         try {
             val mobileUa = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
             val mobileHtml = app.get(data, headers = mapOf("User-Agent" to mobileUa, "Referer" to "$mainUrl/")).text
@@ -372,7 +366,4 @@ class Porna91Provider : MainAPI() {
 
         return found
     }
-
-    // small helper to unescape \' inside the packed keyword list
-    private fun String.groupGroupsFix(s: String): String = s.replace("\\'", "'").replace("\\\\", "\\")
 }
