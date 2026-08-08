@@ -13,12 +13,12 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 class MrdsProvider : MainAPI() {
-    override var mainUrl = "https://mrds.com"
+    override var mainUrl = "https://mrds.com"   // Change to the actual domain you use
     override var name = "MRDS"
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.Anime, TvType.Others)
+    override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
@@ -88,7 +88,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // MAIN PAGE – all categories from the website
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -119,13 +119,8 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Compiler safety fix: Replaced mapNotNull with standard loop
-        val homeItems = mutableListOf<SearchResponse>()
-        for (element in document.select("article:not(.ad-item):has(.post-card) a")) {
-            val res = element.toSearchResultAsync()
-            if (res != null) {
-                homeItems.add(res)
-            }
+        val homeItems = document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
+            element.toSearchResultAsync()
         }
 
         return newHomePageResponse(request.name, homeItems)
@@ -162,7 +157,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (path-based pagination: /search/<term>/ / /page/N/)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -174,15 +169,9 @@ class MrdsProvider : MainAPI() {
             else
                 "$mainUrl/search/$encodedQuery/$page/"
             val document = app.get(url).document
-            
-            val pageItems = mutableListOf<SearchResponse>()
-            for (element in document.select("article:not(.ad-item):has(.post-card) a")) {
-                val res = element.toSearchResultAsync()
-                if (res != null) {
-                    pageItems.add(res)
-                }
+            return document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
+                element.toSearchResultAsync()
             }
-            return pageItems
         }
 
         val results = mutableListOf<SearchResponse>()
@@ -195,14 +184,14 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) - YOUR EXACT VIDEOMAP LOGIC MOVED HERE
+    // LOAD (Detail Page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
-        val pageHtml = document.outerHtml()
 
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val title = translateToEnglish(rawTitle) ?: "Video"
+        val pageHtml = document.outerHtml()
 
         val contentImg = document.selectFirst(".post-content img, article p img")
         var poster = contentImg?.let {
@@ -228,73 +217,14 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
-        // ===============================================================
-        // YOUR EXACT VIDEO EXTRACTION LOGIC MOVED HERE TO CREATE EPISODES
-        // ===============================================================
-        val videoMap = mutableMapOf<String, String>()
-
-        val dplayerRegex = Regex("""<div[^>]*data-video_title="([^"]*)"[^>]*data-config='([^']*)'""")
-        for (match in dplayerRegex.findAll(pageHtml)) {
-            val epTitle = match.groupValues[1].takeIf { it.isNotBlank() } ?: "Video"
-            val config = match.groupValues[2]
-            val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(config)
-            if (urlMatch != null) {
-                val cleanUrl = urlMatch.groupValues[1].replace("\\/", "/")
-                videoMap[cleanUrl] = epTitle
-            }
-        }
-
-        var index = 1
-        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-        for (match in cdnRegex.findAll(pageHtml)) {
-            val epUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
-            if (epUrl.isNotBlank() && !videoMap.containsKey(epUrl)) {
-                videoMap[epUrl] = "Video ${index++}"
-            }
-        }
-
-        if (videoMap.isEmpty()) {
-            val simpleRegex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            for (match in simpleRegex.findAll(pageHtml)) {
-                val epUrl = match.value
-                if (epUrl.isNotBlank() && !videoMap.containsKey(epUrl)) {
-                    videoMap[epUrl] = "Video ${index++}"
-                }
-            }
-        }
-
-        // Create the Episode List for CloudStream
-        if (videoMap.size > 1) {
-            val episodes = mutableListOf<Episode>()
-            var epNum = 1
-            // Flat for-loop used here to prevent Kotlin compiler crashes
-            for ((epUrl, epTitle) in videoMap) {
-                val translatedTitle = translateToEnglish(epTitle) ?: epTitle
-                episodes.add(
-                    newEpisode(epUrl) {
-                        this.name = translatedTitle
-                        this.episode = epNum++
-                    }
-                )
-            }
-
-            return newAnimeLoadResponse(title, url, TvType.Anime) {
-                this.posterUrl = poster
-                this.plot = synopsis
-                addEpisodes(DubStatus.Subbed, episodes)
-            }
-        }
-
-        // Standard Single Video Post fallback
-        val singleData = if (videoMap.isNotEmpty()) videoMap.keys.first() else url
-        return newMovieLoadResponse(title, url, TvType.Movie, singleData) {
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = synopsis
         }
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS – EXTRACTS ALL .m3u8 URLs FROM RAW HTML
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -302,46 +232,63 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Because load() passed the direct .m3u8 link as the episode data, we can instantly play it!
-        if (data.contains(".m3u8")) {
+        // Fetch raw HTML text (like 51CG does)
+        val html = app.get(data).text
+
+        // Regex to find all .m3u8 URLs (handles escaped slashes)
+        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+
+        // Map to store unique URLs and their titles (if we can find them)
+        val videoMap = mutableMapOf<String, String>()  // url -> title
+
+        // First, try to extract titles from DPlayer data-video_title
+        val dplayerRegex = Regex("""<div[^>]*data-video_title="([^"]*)"[^>]*data-config='([^']*)'""")
+        dplayerRegex.findAll(html).forEach { match ->
+            val title = match.groupValues[1].takeIf { it.isNotBlank() } ?: "Video"
+            val config = match.groupValues[2]
+            // Try to find the first .m3u8 URL in the config
+            val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(config)
+            urlMatch?.groupValues?.get(1)?.let { url ->
+                val cleanUrl = url.replace("\\/", "/")
+                videoMap[cleanUrl] = title
+            }
+        }
+
+        // Now find all M3U8 URLs in the entire HTML and add any missing ones
+        var index = 1
+        cdnRegex.findAll(html).forEach { match ->
+            var url = match.value.replace("\\/", "/").replace("&amp;", "&")
+            if (url.isNotBlank() && !videoMap.containsKey(url)) {
+                videoMap[url] = "Video ${index++}"
+            }
+        }
+
+        // If still no URLs, try alternative regex without escaped slashes (just in case)
+        if (videoMap.isEmpty()) {
+            val simpleRegex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+            simpleRegex.findAll(html).forEach { match ->
+                val url = match.value
+                if (url.isNotBlank() && !videoMap.containsKey(url)) {
+                    videoMap[url] = "Video ${index++}"
+                }
+            }
+        }
+
+        // Add each unique video as a separate source
+        var found = false
+        videoMap.forEach { (url, title) ->
             callback(
                 newExtractorLink(
-                    source = "MRDS Server",
-                    name = "MRDS Server",
-                    url = data,
+                    source = "MRDS",
+                    name = title,
+                    url = url,
                     type = ExtractorLinkType.M3U8,
                 ) {
                     this.referer = "$mainUrl/"
                     this.quality = Qualities.Unknown.value
                 }
             )
-            return true
-        }
-
-        // Your exact original fallback logic
-        var found = false
-        val html = app.get(data).text
-
-        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-
-        for (match in cdnRegex.findAll(html)) {
-            var cleanUrl = match.value.replace("\\/", "/")
-            cleanUrl = cleanUrl.replace("&amp;", "&")
-
-            if (cleanUrl.isNotBlank()) {
-                callback(
-                    newExtractorLink(
-                        source = "MRDS Server",
-                        name = "MRDS Server",
-                        url = cleanUrl,
-                        type = ExtractorLinkType.M3U8,
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                found = true
-            }
+            found = true
         }
 
         return found
