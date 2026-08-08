@@ -18,7 +18,7 @@ class MrdsProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.Others)
+    override val supportedTypes = setOf(TvType.Movie, TvType.Anime, TvType.Others)
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
@@ -88,7 +88,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE – all categories from the website
+    // MAIN PAGE
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -119,7 +119,6 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Skip ad-articles (class "ad-item") to avoid polluting the list
         val homeItems = document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
@@ -158,7 +157,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (path-based pagination: /search/<term>/ / /page/N/)
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -185,7 +184,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page) - Detects Single vs Multi-part videos
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -218,6 +217,47 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
+        // LOGIC 1: Posts with external links (Melon List style archive buttons)
+        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
+        if (rankingLinks.isNotEmpty()) {
+            val episodes = mutableListOf<Episode>()
+            for ((index, a) in rankingLinks.withIndex()) {
+                val link = fixUrlNull(a.attr("href")) ?: continue
+                val rawEpTitle = a.parent()?.previousElementSibling()?.text()?.trim() ?: a.text().trim()
+                val epTitle = translateToEnglish(rawEpTitle) ?: rawEpTitle
+                episodes.add(
+                    newEpisode(link) {
+                        this.name = epTitle
+                        this.episode = index + 1
+                    }
+                )
+            }
+            return newAnimeLoadResponse(title, url, TvType.Anime) {
+                this.posterUrl = poster
+                this.plot = synopsis ?: "Top ${episodes.size} entries"
+                addEpisodes(DubStatus.Subbed, episodes)
+            }
+        }
+
+        // LOGIC 2: Posts with multiple embedded .m3u8 videos directly on the page
+        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        val m3u8Links = cdnRegex.findAll(pageHtml).map { it.value.replace("\\/", "/").replace("&amp;", "&") }.distinct().toList()
+
+        if (m3u8Links.size > 1) {
+            val episodes = m3u8Links.mapIndexed { index, m3u8Url ->
+                newEpisode(m3u8Url) {
+                    this.name = "Part ${index + 1}"
+                    this.episode = index + 1
+                }
+            }
+            return newAnimeLoadResponse(title, url, TvType.Anime) {
+                this.posterUrl = poster
+                this.plot = synopsis
+                addEpisodes(DubStatus.Subbed, episodes)
+            }
+        }
+
+        // 3. Normal Single Video
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = synopsis
@@ -233,6 +273,23 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // If data is already a direct m3u8 link (passed from the Episode multi-m3u8 logic)
+        if (data.contains(".m3u8")) {
+            callback(
+                newExtractorLink(
+                    source = "MRDS Server",
+                    name = "MRDS Server",
+                    url = data,
+                    type = ExtractorLinkType.M3U8,
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return true
+        }
+
+        // Standard link extraction
         var found = false
         val html = app.get(data).text
 
