@@ -1,5 +1,6 @@
 package com.coomervideo
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -15,7 +16,7 @@ class CoomerVideoProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.NSFW, TvType.TvSeries)   // Added TvSeries
+    override val supportedTypes = setOf(TvType.NSFW, TvType.TvSeries)
 
     // Main page tabs: added "Models"
     override val mainPage = mainPageOf(
@@ -23,7 +24,7 @@ class CoomerVideoProvider : MainAPI() {
         "$mainUrl/top-rated/" to "Top Rated",
         "$mainUrl/most-popular/" to "Most Viewed",
         "$mainUrl/shorts/" to "Shorts",
-        "$mainUrl/models/" to "Models"   // NEW
+        "$mainUrl/models/" to "Models"
     )
 
     // ---------------------------------------------------------------
@@ -33,8 +34,8 @@ class CoomerVideoProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Determine if we are on the Models page
-        val isModelsPage = request.data.contains("/models/") && !request.data.contains("/models/") { it.contains("/model/") }
+        // Fixed compiler error: simplified the check
+        val isModelsPage = request.data.contains("/models/")
 
         val items = if (isModelsPage) {
             // Parse model cards
@@ -78,7 +79,6 @@ class CoomerVideoProvider : MainAPI() {
         }
     }
 
-    // NEW: Parse model cards (similar to LeakPorner's parseActorItem)
     private fun parseModelItem(element: Element): SearchResponse? {
         // Try to find a direct link to the model page
         val linkEl = element.selectFirst("a[href*=/models/]") ?: return null
@@ -196,7 +196,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (unchanged, keeps original extraction logic)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
