@@ -114,9 +114,6 @@ class PimpBunnyProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // MODEL CARD PARSER (With Strict Blacklist)
-    // ---------------------------------------------------------------
     private fun parseModelItem(element: Element): SearchResponse? {
         val linkEl = element.selectFirst("a[href*=/models/], a[href*=/onlyfans-creators/], a[href*=/channels/]") 
             ?: element.takeIf { it.tagName() == "a" && (it.attr("href").contains("onlyfans-creators") || it.attr("href").contains("model")) } 
@@ -184,9 +181,6 @@ class PimpBunnyProvider : MainAPI() {
 
         val isModelPage = url.contains("/models/") || url.contains("/onlyfans-creators/") || url.contains("/channels/") || url.contains("/channel/")
 
-        // ---------------------------------------------------------------
-        // MODEL PAGE WITH FOOLPROOF BLIND-FETCH PAGINATION LOOP
-        // ---------------------------------------------------------------
         if (isModelPage) {
             val modelTitle = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
                 ?: document.selectFirst("h1, h2, .page-title, .title, .model-name")?.text()?.trim()
@@ -205,7 +199,6 @@ class PimpBunnyProvider : MainAPI() {
             val cleanUrl = url.substringBefore("?").trimEnd('/')
             var pageCount = 1
 
-            // Scrape up to 50 pages automatically (guarantees over 1600 videos per model)
             while (pageCount <= 50) {
                 val videoElements = currentDoc.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post")
                 var addedAnyNewVideo = false
@@ -216,7 +209,6 @@ class PimpBunnyProvider : MainAPI() {
                     
                     if (videoHref == url || videoHref.contains("/models/") || videoHref.contains("/onlyfans-creators/") || videoHref.contains("/categories/")) continue
 
-                    // Only add if it's a completely new video not seen on previous pages
                     if (addedHrefs.add(videoHref)) {
                         val imgEl = el.selectFirst("img") ?: linkEl.selectFirst("img")
                         val videoTitle = imgEl?.attr("alt")?.trim()?.ifBlank { null }
@@ -242,7 +234,6 @@ class PimpBunnyProvider : MainAPI() {
                     }
                 }
 
-                // If no NEW videos were found on this page (e.g. it redirected to page 1 or is empty), break the loop
                 if (!addedAnyNewVideo) break
 
                 pageCount++
@@ -264,9 +255,6 @@ class PimpBunnyProvider : MainAPI() {
             }
         }
 
-        // ---------------------------------------------------------------
-        // NORMAL SINGLE VIDEO PAGE
-        // ---------------------------------------------------------------
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: document.selectFirst("h1, h2")?.text()?.trim() ?: "Video"
         var posterUrl = document.selectFirst("meta[property=og:image]")?.attr("content")
@@ -287,12 +275,13 @@ class PimpBunnyProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // 302 REDIRECT RESOLVER (Fixes ExoPlayer Buffering Bug)
+    // 302 REDIRECT RESOLVER (Injected kt_tcookie=1 to fix 2004 Error)
     // ---------------------------------------------------------------
     private suspend fun resolveIfRedirect(url: String, referer: String): String {
         if (!url.contains("/get_file/")) return url
         return try {
-            val response = app.get(url, headers = headers + mapOf("Referer" to referer), allowRedirects = false)
+            val reqHeaders = videoHeaders + mapOf("Referer" to referer)
+            val response = app.get(url, headers = reqHeaders, allowRedirects = false)
             val location = response.headers["location"] ?: response.headers["Location"]
             if (!location.isNullOrBlank()) {
                 if (location.startsWith("http")) location else mainUrl.trimEnd('/') + location
@@ -319,58 +308,43 @@ class PimpBunnyProvider : MainAPI() {
         val reqHeaders = headers + mapOf("Referer" to "$mainUrl/")
         val mainHtml = app.get(data, headers = reqHeaders).text
         val mappedUrls = mutableSetOf<String>()
+        val mappedQualities = mutableSetOf<Int>()
+
+        suspend fun processUrl(rawUrl: String, referer: String) {
+            val cleanUrl = rawUrl.replace("\\/", "/").replace("&amp;", "&")
+            
+            // Block GIFs and Images
+            if (cleanUrl.endsWith(".gif", true) || cleanUrl.contains(".gif?")) return
+            if (cleanUrl.contains(".jpg") || cleanUrl.contains(".png")) return
+            if (!cleanUrl.contains(".m3u8") && !cleanUrl.contains(".mp4") && !cleanUrl.contains("get_file")) return
+
+            // Deduplicate exact URL strings
+            if (!mappedUrls.add(cleanUrl)) return
+
+            val isM3u8 = cleanUrl.contains(".m3u8")
+            val qualityStr = extractQualityFromUrl(cleanUrl)
+            val qualityVal = getQualityFromString(qualityStr)
+
+            // Deduplicate exact qualities (keeps only 1 link per quality like 1080p, 720p)
+            if (qualityVal != Qualities.Unknown.value && !mappedQualities.add(qualityVal)) return
+
+            // UI Name formatting: just use the site 'name'. CS auto-appends "1440p" in the UI.
+            val sourceName = if (qualityStr != "Unknown") name else if (isM3u8) "$name M3U8" else "$name MP4"
+
+            // Follow redirect with kt_tcookie header to prevent 2004 errors
+            val finalUrl = resolveIfRedirect(cleanUrl, referer)
+            if (finalUrl.isBlank()) return
+
+            callback(newExtractorLink(name, sourceName, finalUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                this.referer = referer
+                this.quality = qualityVal
+                this.headers = videoHeaders
+            })
+            found = true
+        }
 
         suspend fun searchForStream(html: String, referer: String) {
-            val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4|\.m3u8)[^'"]*)['"]""")
-            for (match in generalRegex.findAll(html)) {
-                val url = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
-                
-                // Block GIF and image previews
-                if (url.endsWith(".gif", true) || url.contains(".gif?")) continue
-                if (url.contains(".jpg") || url.contains(".png")) continue
-
-                if (mappedUrls.add(url)) {
-                    val isM3u8 = url.contains(".m3u8")
-                    val qualityStr = extractQualityFromUrl(url)
-                    val qualityVal = getQualityFromString(qualityStr)
-                    val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name M3U8" else "$name MP4"
-
-                    // Resolve redirect so ExoPlayer doesn't buffer
-                    val finalUrl = resolveIfRedirect(url, referer)
-
-                    callback(newExtractorLink(name, sourceName, finalUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                        this.referer = referer
-                        this.quality = qualityVal
-                        this.headers = videoHeaders // Inject the kt_tcookie=1
-                    })
-                    found = true
-                }
-            }
-
-            val flashvarsRegex = Regex("""(?:video_url|video_alt_url\d*)\s*[:=]\s*['"](http[^'"]+)['"]""")
-            for (match in flashvarsRegex.findAll(html)) {
-                val rawUrl = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
-                
-                if (rawUrl.endsWith(".gif", true) || rawUrl.contains(".gif?")) continue
-                if (rawUrl.contains(".jpg") || rawUrl.contains(".png")) continue
-
-                if (mappedUrls.add(rawUrl)) {
-                    val isM3u8 = rawUrl.contains(".m3u8")
-                    val qualityStr = extractQualityFromUrl(rawUrl)
-                    val qualityVal = getQualityFromString(qualityStr)
-                    val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name M3U8" else "$name MP4"
-
-                    val finalUrl = resolveIfRedirect(rawUrl, referer)
-
-                    callback(newExtractorLink(name, sourceName, finalUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                        this.referer = referer
-                        this.quality = qualityVal
-                        this.headers = videoHeaders
-                    })
-                    found = true
-                }
-            }
-
+            // 1. JSON Extraction (Highest Priority & Reliability)
             val playerNames = listOf(
                 "player_aaaa", "player_data", "player_info", "player", "videoConfig",
                 "config", "playInfo", "playerConfig", "videoInfo"
@@ -390,35 +364,22 @@ class PimpBunnyProvider : MainAPI() {
                                 2 -> URLDecoder.decode(String(Base64.decode(urlEncoded, Base64.DEFAULT), Charsets.UTF_8), "UTF-8")
                                 else -> urlEncoded
                             }
-                            
-                            val cleanUrl = realUrl.replace("\\/", "/").replace("&amp;", "&")
-                            
-                            if (cleanUrl.endsWith(".gif", true) || cleanUrl.contains(".gif?")) continue
-                            if (cleanUrl.contains(".jpg") || cleanUrl.contains(".png")) continue
-                            
-                            if ((cleanUrl.contains(".m3u8") || cleanUrl.contains(".mp4") || cleanUrl.contains("get_file")) && mappedUrls.add(cleanUrl)) {
-                                val isM3u8 = cleanUrl.contains(".m3u8")
-                                val qualityStr = extractQualityFromUrl(cleanUrl)
-                                val qualityVal = getQualityFromString(qualityStr)
-                                val sourceName = if (qualityStr != "Unknown") "Player ${qualityStr}p" else if (isM3u8) "Player M3U8" else "Player MP4"
-
-                                val finalUrl = resolveIfRedirect(cleanUrl, referer)
-
-                                callback(newExtractorLink(
-                                    name, 
-                                    sourceName, 
-                                    finalUrl,
-                                    if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = referer
-                                    this.quality = qualityVal
-                                    this.headers = videoHeaders
-                                })
-                                found = true
-                            }
+                            processUrl(realUrl, referer)
                         }
                     } catch (_: Exception) {}
                 }
+            }
+
+            // 2. Flashvars Fallback
+            val flashvarsRegex = Regex("""(?:video_url|video_alt_url\d*)\s*[:=]\s*['"](http[^'"]+)['"]""")
+            for (match in flashvarsRegex.findAll(html)) {
+                processUrl(match.groupValues[1], referer)
+            }
+
+            // 3. General Source Regex Fallback
+            val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4|\.m3u8)[^'"]*)['"]""")
+            for (match in generalRegex.findAll(html)) {
+                processUrl(match.groupValues[1], referer)
             }
         }
 
