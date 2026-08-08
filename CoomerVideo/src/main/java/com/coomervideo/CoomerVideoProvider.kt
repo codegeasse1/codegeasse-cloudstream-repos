@@ -36,7 +36,6 @@ class CoomerVideoProvider : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         
         if (isModelsPage) {
-            // Expanded selectors to catch Model wrappers
             val modelElements = document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, .list-models .item").ifEmpty {
                 document.select("a[href*=/models/], a[href*=/model/]")
             }
@@ -45,7 +44,6 @@ class CoomerVideoProvider : MainAPI() {
                 if (res != null) items.add(res)
             }
         } else {
-            // Original video logic untouched
             for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
                 val res = element.toSearchResult()
                 if (res != null) items.add(res)
@@ -61,7 +59,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // ITEM PARSERS (Video logic unchanged, Model logic improved)
+    // ITEM PARSERS
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("a.vx-media") ?: this.takeIf { it.tagName() == "a" } ?: return null
@@ -87,13 +85,11 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     private fun parseModelItem(element: Element): SearchResponse? {
-        // Enforce that it contains a model link
         val linkEl = element.selectFirst("a[href*=/models/], a[href*=/model/]") ?: element.takeIf { it.tagName() == "a" && it.attr("href").contains("model") } ?: return null
         val href = fixUrlNull(linkEl.attr("href")) ?: return null
 
         val imgEl = element.selectFirst("img") ?: linkEl.selectFirst("img")
         
-        // Expanded to reliably catch the image CDN screenshots
         val poster = imgEl?.let {
             it.attr("data-webp").ifBlank {
                 it.attr("data-original").ifBlank {
@@ -124,12 +120,10 @@ class CoomerVideoProvider : MainAPI() {
 
         val results = mutableListOf<SearchResponse>()
         
-        // Videos
         for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
             element.toSearchResult()?.let { results.add(it) }
         }
         
-        // Models
         for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, a[href*=/models/], a[href*=/model/]")) {
             parseModelItem(element)?.let { results.add(it) }
         }
@@ -138,7 +132,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page) - NOW WITH PAGINATION LOOP!
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -164,49 +158,75 @@ class CoomerVideoProvider : MainAPI() {
 
             val episodes = mutableListOf<Episode>()
             
-            // Expanded video selector for the Model Page to prevent empty lists ("Coming soon")
-            val modelVideoElements = document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, div.video-item, .list-videos .item")
-            
-            for ((index, el) in modelVideoElements.withIndex()) {
-                val linkEl = el.selectFirst("a.vx-media, a[href*=/video]") ?: el.selectFirst("a") ?: el.takeIf { it.tagName() == "a" } ?: continue
-                val videoHref = fixUrlNull(linkEl.attr("href")) ?: continue
+            // Loop through pages to get all videos
+            var currentDoc = document
+            var currentUrl = url
+            var pageCount = 1
+
+            while (pageCount <= 20) { // Limit to 20 pages max to prevent infinite loops
+                val modelVideoElements = currentDoc.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, div.video-item, .list-videos .item")
                 
-                // Skip if the link points back to the model page itself to prevent loop
-                if (videoHref == url || videoHref.contains("/models/") || videoHref.contains("/model/")) continue
+                for (el in modelVideoElements) {
+                    val linkEl = el.selectFirst("a.vx-media, a[href*=/video]") ?: el.selectFirst("a") ?: el.takeIf { it.tagName() == "a" } ?: continue
+                    val videoHref = fixUrlNull(linkEl.attr("href")) ?: continue
+                    
+                    if (videoHref == currentUrl || videoHref.contains("/models/") || videoHref.contains("/model/")) continue
 
-                val imgEl = el.selectFirst("img") ?: linkEl.selectFirst("img")
-                val videoTitle = imgEl?.attr("alt")?.ifBlank { null }
-                    ?: el.selectFirst(".vx-text, .title, .name")?.text()?.trim()
-                    ?: linkEl.attr("title").ifBlank { null }
-                    ?: "Video ${index + 1}"
+                    val imgEl = el.selectFirst("img") ?: linkEl.selectFirst("img")
+                    val videoTitle = imgEl?.attr("alt")?.ifBlank { null }
+                        ?: el.selectFirst(".vx-text, .title, .name")?.text()?.trim()
+                        ?: linkEl.attr("title").ifBlank { null }
+                        ?: "Video"
 
-                val videoPoster = imgEl?.let {
-                    it.attr("data-webp").ifBlank {
-                        it.attr("data-original").ifBlank {
-                            it.attr("data-src").ifBlank {
-                                it.attr("src")
+                    val videoPoster = imgEl?.let {
+                        it.attr("data-webp").ifBlank {
+                            it.attr("data-original").ifBlank {
+                                it.attr("data-src").ifBlank {
+                                    it.attr("src")
+                                }
                             }
                         }
-                    }
-                } ?: el.selectFirst("[data-original]")?.attr("data-original")
+                    } ?: el.selectFirst("[data-original]")?.attr("data-original")
 
-                episodes.add(
-                    newEpisode(videoHref) {
-                        this.name = videoTitle
-                        this.episode = index + 1
-                        this.posterUrl = videoPoster
-                    }
-                )
+                    episodes.add(
+                        newEpisode(videoHref) {
+                            this.name = videoTitle
+                            this.posterUrl = videoPoster
+                        }
+                    )
+                }
+
+                // Find the Next Page button
+                val nextBtn = currentDoc.selectFirst(".pagination a.vx-next, .pagination a[rel=next], .pagination a.next, a.next.page-numbers, li.next a, a[title*=Next]")
+                val nextHref = nextBtn?.attr("href")
+
+                if (nextHref.isNullOrBlank()) break
+
+                val nextUrl = fixUrlNull(nextHref) ?: break
+                if (nextUrl == currentUrl) break
+
+                try {
+                    currentUrl = nextUrl
+                    currentDoc = app.get(currentUrl).document
+                    pageCount++
+                } catch (e: Exception) {
+                    break
+                }
             }
 
-            return newTvSeriesLoadResponse(modelTitle, url, TvType.TvSeries, episodes.distinctBy { it.data }) {
+            // Number the episodes cleanly
+            val distinctEpisodes = episodes.distinctBy { it.data }.mapIndexed { index, ep ->
+                ep.apply { this.episode = index + 1 }
+            }
+
+            return newTvSeriesLoadResponse(modelTitle, url, TvType.TvSeries, distinctEpisodes) {
                 this.posterUrl = fixUrlNull(poster)
                 this.plot = "Videos from $modelTitle"
             }
         }
 
         // ---------------------------------------------------------------
-        // NORMAL SINGLE VIDEO PAGE (Original Logic Untouched)
+        // NORMAL SINGLE VIDEO PAGE
         // ---------------------------------------------------------------
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")
             ?: document.selectFirst("h1")?.text()?.trim()
@@ -225,7 +245,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Original Logic Untouched)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
