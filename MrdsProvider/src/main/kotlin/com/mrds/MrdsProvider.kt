@@ -184,7 +184,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page) - Using Exact C51CG Archive Button Logic
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -217,22 +217,24 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
-        // Find all unique embedded videos on the page using your exact Regex
-        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-        val m3u8Links = cdnRegex.findAll(pageHtml)
-            .map { it.value.replace("\\/", "/").replace("&amp;", "&") }
-            .filter { !it.contains("preview", ignoreCase = true) } // Prevents the 3002 Error you saw
-            .distinct()
-            .toList()
-
-        // If multiple videos are found, format them as Part 1, Part 2, etc.
-        if (m3u8Links.size > 1) {
-            val episodes = m3u8Links.mapIndexed { index, m3u8Url ->
-                newEpisode(m3u8Url) {
-                    this.name = "Part ${index + 1}"
-                    this.episode = index + 1
-                }
+        // Find collection buttons matching the exact C51CG logic
+        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/], .post-content a[href*=/archives/]")
+        
+        if (rankingLinks.isNotEmpty() && rankingLinks.size > 1) {
+            val episodes = mutableListOf<Episode>()
+            for ((index, a) in rankingLinks.withIndex()) {
+                val link = fixUrlNull(a.attr("href")) ?: continue
+                val rawEpTitle = a.parent()?.previousElementSibling()?.text()?.trim() ?: a.text().trim()
+                val epTitle = translateToEnglish(rawEpTitle) ?: "Part ${index + 1}"
+                
+                episodes.add(
+                    newEpisode(link) {
+                        this.name = epTitle
+                        this.episode = index + 1
+                    }
+                )
             }
+            
             return newAnimeLoadResponse(title, url, TvType.Anime) {
                 this.posterUrl = poster
                 this.plot = synopsis ?: "Collection of ${episodes.size} videos"
@@ -248,7 +250,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Exact original logic + preview filter)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -256,33 +258,17 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // If data is already a direct m3u8 link (passed from the multi-part episode logic above)
-        if (data.contains(".m3u8")) {
-            callback(
-                newExtractorLink(
-                    source = "MRDS Server",
-                    name = "MRDS Server",
-                    url = data,
-                    type = ExtractorLinkType.M3U8,
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            return true
-        }
-
-        // Standard link extraction using your exact original logic
         var found = false
         val html = app.get(data).text
 
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        val mappedUrls = mutableSetOf<String>()
 
         cdnRegex.findAll(html).forEach { match ->
             var cleanUrl = match.value.replace("\\/", "/")
             cleanUrl = cleanUrl.replace("&amp;", "&")
 
-            if (cleanUrl.isNotBlank() && !cleanUrl.contains("preview", ignoreCase = true)) {
+            if (cleanUrl.isNotBlank() && !cleanUrl.contains("preview", ignoreCase = true) && mappedUrls.add(cleanUrl)) {
                 callback(
                     newExtractorLink(
                         source = "MRDS Server",
