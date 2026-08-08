@@ -221,7 +221,8 @@ class Porna91Provider : MainAPI() {
 
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
 
-        fun extractAndAdd(text: String) {
+        // Restored the 'suspend' keyword here so newExtractorLink can be called
+        suspend fun extractAndAdd(text: String) {
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             
             for (match in cdnRegex.findAll(unescaped)) {
