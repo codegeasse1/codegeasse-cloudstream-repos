@@ -13,7 +13,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 class MrdsProvider : MainAPI() {
-    override var mainUrl = "https://mrds.com"   // Change to the actual domain you use
+    override var mainUrl = "https://mrds.com"
     override var name = "MRDS"
     override val hasMainPage = true
     override var lang = "en"
@@ -88,7 +88,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE – all categories from the website
+    // MAIN PAGE
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -122,7 +122,10 @@ class MrdsProvider : MainAPI() {
         // Compiler safety fix: Replaced mapNotNull with standard loop
         val homeItems = mutableListOf<SearchResponse>()
         for (element in document.select("article:not(.ad-item):has(.post-card) a")) {
-            element.toSearchResultAsync()?.let { homeItems.add(it) }
+            val res = element.toSearchResultAsync()
+            if (res != null) {
+                homeItems.add(res)
+            }
         }
 
         return newHomePageResponse(request.name, homeItems)
@@ -159,7 +162,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH (path-based pagination: /search/<term>/ / /page/N/)
+    // SEARCH
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -172,10 +175,12 @@ class MrdsProvider : MainAPI() {
                 "$mainUrl/search/$encodedQuery/$page/"
             val document = app.get(url).document
             
-            // Compiler safety fix: Replaced mapNotNull with standard loop
             val pageItems = mutableListOf<SearchResponse>()
             for (element in document.select("article:not(.ad-item):has(.post-card) a")) {
-                element.toSearchResultAsync()?.let { pageItems.add(it) }
+                val res = element.toSearchResultAsync()
+                if (res != null) {
+                    pageItems.add(res)
+                }
             }
             return pageItems
         }
@@ -190,14 +195,14 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail Page) - YOUR EXACT VIDEOMAP LOGIC MOVED HERE
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
+        val pageHtml = document.outerHtml()
 
         val rawTitle = document.selectFirst("h1, .post-title, title")?.text()?.substringBefore("-")?.trim() ?: "Video"
         val title = translateToEnglish(rawTitle) ?: "Video"
-        val pageHtml = document.outerHtml()
 
         val contentImg = document.selectFirst(".post-content img, article p img")
         var poster = contentImg?.let {
@@ -226,23 +231,23 @@ class MrdsProvider : MainAPI() {
         // ===============================================================
         // YOUR EXACT VIDEO EXTRACTION LOGIC MOVED HERE TO CREATE EPISODES
         // ===============================================================
-        val videoMap = mutableMapOf<String, String>()  // url -> title
+        val videoMap = mutableMapOf<String, String>()
 
         val dplayerRegex = Regex("""<div[^>]*data-video_title="([^"]*)"[^>]*data-config='([^']*)'""")
-        dplayerRegex.findAll(pageHtml).forEach { match ->
+        for (match in dplayerRegex.findAll(pageHtml)) {
             val epTitle = match.groupValues[1].takeIf { it.isNotBlank() } ?: "Video"
             val config = match.groupValues[2]
             val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(config)
-            urlMatch?.groupValues?.get(1)?.let { epUrl ->
-                val cleanUrl = epUrl.replace("\\/", "/")
+            if (urlMatch != null) {
+                val cleanUrl = urlMatch.groupValues[1].replace("\\/", "/")
                 videoMap[cleanUrl] = epTitle
             }
         }
 
         var index = 1
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-        cdnRegex.findAll(pageHtml).forEach { match ->
-            var epUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+        for (match in cdnRegex.findAll(pageHtml)) {
+            val epUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
             if (epUrl.isNotBlank() && !videoMap.containsKey(epUrl)) {
                 videoMap[epUrl] = "Video ${index++}"
             }
@@ -250,7 +255,7 @@ class MrdsProvider : MainAPI() {
 
         if (videoMap.isEmpty()) {
             val simpleRegex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            simpleRegex.findAll(pageHtml).forEach { match ->
+            for (match in simpleRegex.findAll(pageHtml)) {
                 val epUrl = match.value
                 if (epUrl.isNotBlank() && !videoMap.containsKey(epUrl)) {
                     videoMap[epUrl] = "Video ${index++}"
@@ -258,15 +263,16 @@ class MrdsProvider : MainAPI() {
             }
         }
 
-        // If multiple videos found, display as an Anime (Episode List)
+        // Create the Episode List for CloudStream
         if (videoMap.size > 1) {
             val episodes = mutableListOf<Episode>()
             var epNum = 1
+            // Flat for-loop used here to prevent Kotlin compiler crashes
             for ((epUrl, epTitle) in videoMap) {
-                val translatedEpTitle = translateToEnglish(epTitle) ?: epTitle
+                val translatedTitle = translateToEnglish(epTitle) ?: epTitle
                 episodes.add(
                     newEpisode(epUrl) {
-                        this.name = translatedEpTitle
+                        this.name = translatedTitle
                         this.episode = epNum++
                     }
                 )
@@ -279,7 +285,7 @@ class MrdsProvider : MainAPI() {
             }
         }
 
-        // If only 1 video found, display as a normal Movie
+        // Standard Single Video Post fallback
         val singleData = if (videoMap.isNotEmpty()) videoMap.keys.first() else url
         return newMovieLoadResponse(title, url, TvType.Movie, singleData) {
             this.posterUrl = poster
@@ -296,7 +302,7 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Since load() now passes the exact .m3u8 URL into data, we just return it to the player
+        // Because load() passed the direct .m3u8 link as the episode data, we can instantly play it!
         if (data.contains(".m3u8")) {
             callback(
                 newExtractorLink(
@@ -312,12 +318,16 @@ class MrdsProvider : MainAPI() {
             return true
         }
 
-        // Fallback (just in case)
+        // Your exact original fallback logic
         var found = false
         val html = app.get(data).text
+
         val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+
         for (match in cdnRegex.findAll(html)) {
-            var cleanUrl = match.value.replace("\\/", "/").replace("&amp;", "&")
+            var cleanUrl = match.value.replace("\\/", "/")
+            cleanUrl = cleanUrl.replace("&amp;", "&")
+
             if (cleanUrl.isNotBlank()) {
                 callback(
                     newExtractorLink(
