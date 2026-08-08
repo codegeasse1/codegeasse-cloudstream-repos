@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
-import org.json.JSONObject          // added for parsing DPlayer config
+import org.json.JSONObject
 import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -120,7 +120,6 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Skip ad-articles (class "ad-item") to avoid polluting the list
         val homeItems = document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
@@ -226,7 +225,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS – supports multiple videos (DPlayer + fallback regex)
+    // LOAD LINKS – EXTRACTS ALL .m3u8 URLs FROM THE ENTIRE HTML
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -234,84 +233,62 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var found = false
-        val document = app.get(data).document
+        // Fetch the full HTML
+        val html = app.get(data).document.outerHtml()
 
-        // 1️⃣ Try to extract all videos from DPlayer containers (most reliable)
-        val dplayers = document.select("div.dplayer[data-config]")
-        if (dplayers.isNotEmpty()) {
-            var videoIndex = 1
-            for (player in dplayers) {
-                val configJson = player.attr("data-config")
-                try {
-                    val json = JSONObject(configJson)
-                    // Prefer h265 if available, otherwise fallback to normal video
-                    val videoObj = json.optJSONObject("video_h265") ?: json.optJSONObject("video")
-                    val videoUrl = videoObj?.optString("url")?.takeIf { it.isNotBlank() }
-                    if (videoUrl != null) {
-                        val name = player.attr("data-video_title").ifBlank { "Video $videoIndex" }
-                        callback(
-                            newExtractorLink(
-                                source = "MRDS",
-                                name = name,
-                                url = videoUrl,
-                                type = ExtractorLinkType.M3U8,
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        found = true
-                        videoIndex++
-                    }
-                } catch (_: Exception) {
-                    // If JSON parsing fails, fall back to regex on the raw config string
-                    val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(configJson)
-                    urlMatch?.groupValues?.get(1)?.let { url ->
-                        val name = player.attr("data-video_title").ifBlank { "Video $videoIndex" }
-                        callback(
-                            newExtractorLink(
-                                source = "MRDS",
-                                name = name,
-                                url = url,
-                                type = ExtractorLinkType.M3U8,
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        found = true
-                        videoIndex++
-                    }
+        // Map to store video titles and URLs (deduplicated)
+        val videoMap = mutableMapOf<String, String>()  // title -> url
+
+        // 1️⃣ Try to parse DPlayer containers to get titles
+        val dplayerRegex = Regex("""<div[^>]*class="[^"]*dplayer[^"]*"[^>]*data-video_title="([^"]*)"[^>]*data-config='([^']*)'""")
+        dplayerRegex.findAll(html).forEach { match ->
+            val title = match.groupValues[1].takeIf { it.isNotBlank() } ?: "Video"
+            val configJson = match.groupValues[2]
+            try {
+                val json = JSONObject(configJson)
+                // Prefer h265, fallback to normal video
+                val videoObj = json.optJSONObject("video_h265") ?: json.optJSONObject("video")
+                val url = videoObj?.optString("url")?.takeIf { it.isNotBlank() }
+                if (url != null) {
+                    videoMap[title] = url
+                }
+            } catch (_: Exception) {
+                // If JSON parsing fails, try regex on the config string
+                val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(configJson)
+                urlMatch?.groupValues?.get(1)?.let { url ->
+                    videoMap[title] = url
                 }
             }
         }
 
-        // 2️⃣ Fallback to your original regex that scans the entire HTML for .m3u8 links
-        //    This preserves the exact behavior you had before.
-        if (!found) {
-            val html = document.outerHtml()
-            val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            var index = 1
-            cdnRegex.findAll(html).forEach { match ->
-                var cleanUrl = match.value.replace("\\/", "/")
-                cleanUrl = cleanUrl.replace("&amp;", "&")
-                if (cleanUrl.isNotBlank()) {
-                    callback(
-                        newExtractorLink(
-                            source = "MRDS Server",
-                            name = "Stream $index",
-                            url = cleanUrl,
-                            type = ExtractorLinkType.M3U8,
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    found = true
-                    index++
-                }
+        // 2️⃣ Fallback: scan the entire HTML for any .m3u8 URLs (including escaped slashes)
+        //    This will catch any videos that weren't in DPlayer containers.
+        val m3u8Regex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        var index = 1
+        m3u8Regex.findAll(html).forEach { match ->
+            var url = match.value.replace("\\/", "/").replace("&amp;", "&")
+            if (url.isNotBlank()) {
+                // Use the title from DPlayer if we have it, otherwise generate a generic name
+                val title = videoMap.keys.find { videoMap[it] == url } ?: "Stream ${index++}"
+                videoMap[title] = url
             }
+        }
+
+        // 3️⃣ Add all unique videos as sources
+        var found = false
+        videoMap.forEach { (title, url) ->
+            callback(
+                newExtractorLink(
+                    source = "MRDS",
+                    name = title,
+                    url = url,
+                    type = ExtractorLinkType.M3U8,
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            found = true
         }
 
         return found
