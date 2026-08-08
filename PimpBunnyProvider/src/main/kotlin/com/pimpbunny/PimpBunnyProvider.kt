@@ -16,7 +16,8 @@ class PimpBunnyProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.Others)
+    // Added TvSeries to support Model Episode Lists
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
 
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -34,6 +35,7 @@ class PimpBunnyProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
+        "$mainUrl/onlyfans-creators/" to "Models", // ADDED MODEL CATEGORY
         "$mainUrl/categories/4k/" to "4K",
         "$mainUrl/categories/amateur/" to "Amateur",
         "$mainUrl/categories/anal/" to "Anal",
@@ -59,27 +61,39 @@ class PimpBunnyProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         initSession()
 
-        // ----- Home / category video listing -----
         val docUrl = if (page == 1) request.data else "${request.data}${page}/"
         val document = app.get(docUrl, headers = headers).document
         
-        // Expanded selectors to catch both Home and Category page layouts
-        val items = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post").mapNotNull { it.toSearchResult() }
+        val isModelsPage = request.data.contains("/models/") || request.data.contains("/onlyfans-creators/") || request.data.contains("/channels/")
+        val items = mutableListOf<SearchResponse>()
+
+        if (isModelsPage) {
+            val modelElements = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post").ifEmpty {
+                document.select("a[href*=/onlyfans-creators/], a[href*=/models/]")
+            }
+            for (element in modelElements) {
+                parseModelItem(element)?.let { items.add(it) }
+            }
+        } else {
+            for (element in document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post")) {
+                element.toSearchResult()?.let { items.add(it) }
+            }
+        }
         
-        // Dynamic pagination check
         val hasNext = document.select(".pagination a.next, .page-next, a[rel=next]").isNotEmpty() || items.size >= 16
         
         return newHomePageResponse(
-            list = listOf(HomePageList(request.name, items)),
+            list = listOf(HomePageList(request.name, items.distinctBy { it.url })),
             hasNext = hasNext
         )
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        // Fallback to standard <a> if specific video class is missing, but exclude category links
         val link = this.selectFirst("a[href*=/video]") ?: this.selectFirst("a") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
-        if (href.contains("/categories/") || href.contains("/models/") || href.contains("/channels/")) return null
+        
+        // Prevent models from being parsed as single videos
+        if (href.contains("/categories/") || href.contains("/models/") || href.contains("/channels/") || href.contains("/onlyfans-creators/")) return null
         
         val img = this.selectFirst("img")
         val title = img?.attr("alt")?.trim()?.ifBlank { null }
@@ -95,6 +109,36 @@ class PimpBunnyProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // MODEL CARD PARSER
+    // ---------------------------------------------------------------
+    private fun parseModelItem(element: Element): SearchResponse? {
+        val linkEl = element.selectFirst("a[href*=/models/], a[href*=/onlyfans-creators/], a[href*=/channels/]") 
+            ?: element.takeIf { it.tagName() == "a" && (it.attr("href").contains("onlyfans-creators") || it.attr("href").contains("model")) } 
+            ?: return null
+        val href = fixUrlNull(linkEl.attr("href")) ?: return null
+
+        val imgEl = element.selectFirst("img") ?: linkEl.selectFirst("img")
+        val poster = imgEl?.let {
+            it.attr("data-original").ifBlank {
+                it.attr("data-src").ifBlank {
+                    it.attr("src")
+                }
+            }
+        } ?: element.selectFirst("[data-original]")?.attr("data-original") ?: ""
+
+        val title = element.selectFirst(".model-name, .name, .title, .ui-card-title, .text-truncate")?.text()?.trim()
+            ?: imgEl?.attr("alt")?.ifBlank { null }
+            ?: linkEl.attr("title")?.ifBlank { null }
+            ?: linkEl.text().trim()
+            ?: "Model"
+
+        // Return as TvSeries to prompt the episode list
+        return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+            this.posterUrl = fixUrlNull(poster)
+        }
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
         initSession()
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -105,17 +149,111 @@ class PimpBunnyProvider : MainAPI() {
                          else "$mainUrl/search/$encodedQuery/$page/"
             val document = app.get(docUrl, headers = headers).document
             
-            // Expanded search selector as well
-            val items = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post").mapNotNull { it.toSearchResult() }
-            if (items.isEmpty()) break
-            results.addAll(items)
+            // Collect standard videos
+            val videoItems = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post").mapNotNull { it.toSearchResult() }
+            
+            // Collect any models appearing in search
+            val modelItems = document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post, a[href*=/onlyfans-creators/]").mapNotNull { parseModelItem(it) }
+            
+            if (videoItems.isEmpty() && modelItems.isEmpty()) break
+            results.addAll(videoItems)
+            results.addAll(modelItems)
         }
-        return results
+        return results.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse {
         initSession()
         val document = app.get(url, headers = headers).document
+
+        val isModelPage = url.contains("/models/") || url.contains("/onlyfans-creators/") || url.contains("/channels/") || url.contains("/channel/")
+
+        // ---------------------------------------------------------------
+        // MODEL PAGE WITH PAGINATION LOOP (Like LeakPorner / CoomerVideo)
+        // ---------------------------------------------------------------
+        if (isModelPage) {
+            val modelTitle = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
+                ?: document.selectFirst("h1, h2, .page-title, .title, .model-name")?.text()?.trim()
+                ?: "Model Videos"
+
+            var poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+            if (poster.isNullOrBlank()) {
+                poster = document.selectFirst(".model-image img, .post-thumbnail img, .avatar img, .poster img")?.let {
+                    it.attr("data-original").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } }
+                }
+            }
+
+            val episodes = mutableListOf<Episode>()
+            var currentDoc = document
+            var currentUrl = url
+            var pageCount = 1
+
+            // Scrape up to 20 pages of the model's videos
+            while (pageCount <= 20) {
+                val videoElements = currentDoc.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post")
+                
+                for (el in videoElements) {
+                    val linkEl = el.selectFirst("a[href*=/video]") ?: el.selectFirst("a") ?: continue
+                    val videoHref = fixUrlNull(linkEl.attr("href")) ?: continue
+                    
+                    // Skip if the link points back to the model page itself to prevent loop
+                    if (videoHref == currentUrl || videoHref.contains("/models/") || videoHref.contains("/onlyfans-creators/") || videoHref.contains("/categories/")) continue
+
+                    val imgEl = el.selectFirst("img") ?: linkEl.selectFirst("img")
+                    val videoTitle = imgEl?.attr("alt")?.trim()?.ifBlank { null }
+                        ?: linkEl.attr("title")?.trim()?.ifBlank { null }
+                        ?: el.selectFirst(".ui-card-title, .text-truncate, .title, .video-title")?.text()?.trim()
+                        ?: "Video"
+
+                    val videoPoster = imgEl?.let {
+                        it.attr("data-original").ifBlank {
+                            it.attr("data-src").ifBlank {
+                                it.attr("src")
+                            }
+                        }
+                    }
+
+                    episodes.add(
+                        newEpisode(videoHref) {
+                            this.name = videoTitle
+                            this.posterUrl = fixUrlNull(videoPoster)
+                        }
+                    )
+                }
+
+                // Check for pagination next button
+                val nextBtn = currentDoc.selectFirst(".pagination a.next, .page-next, a[rel=next], li.next a, a[title*=Next]")
+                val nextHref = nextBtn?.attr("href")
+
+                if (nextHref.isNullOrBlank()) break
+
+                val nextUrl = fixUrlNull(nextHref) ?: break
+                if (nextUrl == currentUrl) break
+
+                try {
+                    currentUrl = nextUrl
+                    initSession() // Renew session cookies if necessary
+                    currentDoc = app.get(currentUrl, headers = headers).document
+                    pageCount++
+                } catch (e: Exception) {
+                    break
+                }
+            }
+
+            // Assign episode numbers cleanly
+            val distinctEpisodes = episodes.distinctBy { it.data }.mapIndexed { index, ep ->
+                ep.apply { this.episode = index + 1 }
+            }
+
+            return newTvSeriesLoadResponse(modelTitle, url, TvType.TvSeries, distinctEpisodes) {
+                this.posterUrl = fixUrlNull(poster)
+                this.plot = "Videos from $modelTitle"
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // NORMAL SINGLE VIDEO PAGE (Original Logic)
+        // ---------------------------------------------------------------
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: document.selectFirst("h1, h2")?.text()?.trim() ?: "Video"
         var posterUrl = document.selectFirst("meta[property=og:image]")?.attr("content")
@@ -135,6 +273,9 @@ class PimpBunnyProvider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD LINKS (Original logic untouched)
+    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
