@@ -184,7 +184,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page) - Detects Single vs Multi-part videos
+    // LOAD (Detail Page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -217,8 +217,8 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
-        // LOGIC 1: Posts with external links (Melon List style archive buttons)
-        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/]")
+        // Identify multi-part posts (like the 51CG example)
+        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/], .post-content a[href*=/archives/]")
         if (rankingLinks.isNotEmpty()) {
             val episodes = mutableListOf<Episode>()
             for ((index, a) in rankingLinks.withIndex()) {
@@ -234,30 +234,11 @@ class MrdsProvider : MainAPI() {
             }
             return newAnimeLoadResponse(title, url, TvType.Anime) {
                 this.posterUrl = poster
-                this.plot = synopsis ?: "Top ${episodes.size} entries"
+                this.plot = synopsis ?: "Collection of ${episodes.size} videos"
                 addEpisodes(DubStatus.Subbed, episodes)
             }
         }
 
-        // LOGIC 2: Posts with multiple embedded .m3u8 videos directly on the page
-        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-        val m3u8Links = cdnRegex.findAll(pageHtml).map { it.value.replace("\\/", "/").replace("&amp;", "&") }.distinct().toList()
-
-        if (m3u8Links.size > 1) {
-            val episodes = m3u8Links.mapIndexed { index, m3u8Url ->
-                newEpisode(m3u8Url) {
-                    this.name = "Part ${index + 1}"
-                    this.episode = index + 1
-                }
-            }
-            return newAnimeLoadResponse(title, url, TvType.Anime) {
-                this.posterUrl = poster
-                this.plot = synopsis
-                addEpisodes(DubStatus.Subbed, episodes)
-            }
-        }
-
-        // 3. Normal Single Video
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = synopsis
@@ -265,7 +246,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Exactly as provided)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -273,23 +254,6 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // If data is already a direct m3u8 link (passed from the Episode multi-m3u8 logic)
-        if (data.contains(".m3u8")) {
-            callback(
-                newExtractorLink(
-                    source = "MRDS Server",
-                    name = "MRDS Server",
-                    url = data,
-                    type = ExtractorLinkType.M3U8,
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            return true
-        }
-
-        // Standard link extraction
         var found = false
         val html = app.get(data).text
 
