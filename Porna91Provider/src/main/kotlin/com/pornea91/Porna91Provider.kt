@@ -172,7 +172,7 @@ class Porna91Provider : MainAPI() {
     // ================================================================
     // JAVASCRIPT UNPACKER
     // ================================================================
-    private fun unpack(html: String): List<String> {
+    private fun unpackAll(html: String): List<String> {
         val results = mutableListOf<String>()
         val outerRe = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[dr]\s*\)""", RegexOption.IGNORE_CASE)
         
@@ -239,9 +239,9 @@ class Porna91Provider : MainAPI() {
     // ================================================================
     // AES VIDEO DECRYPTORS
     // ================================================================
-    private fun decryptBase64Aes(b64: String): String {
+    private fun decryptBase64Aes(encryptedB64: String): String {
         return try {
-            val clean = b64.trim().replace("\n", "").replace("\r", "")
+            val clean = encryptedB64.trim().replace("\n", "").replace("\r", "")
             val key = SecretKeySpec("f5d965df75336270".toByteArray(Charsets.UTF_8), "AES")
             val iv = IvParameterSpec("97b60394abc2fbe1".toByteArray(Charsets.UTF_8))
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
