@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import javax.crypto.Cipher
@@ -25,7 +24,8 @@ class Porna91Provider : MainAPI() {
 
     private val headers = mapOf(
         "User-Agent" to ua,
-        "Accept" to "*/*",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.5",
         "Referer" to "$mainUrl/"
     )
 
@@ -45,6 +45,9 @@ class Porna91Provider : MainAPI() {
         "$mainUrl/comic/index/av" to "Japan AV"
     )
 
+    // ---------------------------------------------------------------
+    // AES IMAGE DECRYPTION
+    // ---------------------------------------------------------------
     private suspend fun decryptImageUrl(url: String): String? {
         if (url.isBlank() || url.startsWith("data:")) return url
         return try {
@@ -62,7 +65,6 @@ class Porna91Provider : MainAPI() {
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, key, iv)
             val decryptedBytes = cipher.doFinal(cipherBytes)
-
             val ext = url.substringAfterLast(".", "jpeg").substringBefore("?")
             "data:image/$ext;base64," + Base64.encodeToString(decryptedBytes, Base64.NO_WRAP)
         } catch (e: Exception) {
@@ -70,10 +72,12 @@ class Porna91Provider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // MAIN PAGE
+    // ---------------------------------------------------------------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val docUrl = if (page == 1) request.data else "${request.data}&page=$page"
         val document = app.get(docUrl, headers = headers).document
-
         val items = mutableListOf<SearchResponse>()
         for (el in document.select(".video-items .video-item, ul.video-items > li.video-item")) {
             el.toSearchResultAsync()?.let { items.add(it) }
@@ -110,14 +114,15 @@ class Porna91Provider : MainAPI() {
         }
     }
 
+    // ---------------------------------------------------------------
+    // SEARCH
+    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val results = mutableListOf<SearchResponse>()
-
         for (page in 1..2) {
             val docUrl = if (page == 1) "$mainUrl/comic/index/search?keyword=$encodedQuery"
             else "$mainUrl/comic/index/search?keyword=$encodedQuery&page=$page"
-
             val document = app.get(docUrl, headers = headers).document
             val items = mutableListOf<SearchResponse>()
             for (el in document.select(".video-items .video-item")) {
@@ -129,11 +134,15 @@ class Porna91Provider : MainAPI() {
         return results
     }
 
+    // ---------------------------------------------------------------
+    // LOAD
+    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url, headers = headers).document
 
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
-            ?: document.selectFirst("h1, h2, .post-title")?.text()?.trim() ?: "Video"
+            ?: document.selectFirst("h1, h2, .post-title")?.text()?.trim()
+            ?: "Video"
 
         val pageHtml = document.outerHtml()
 
@@ -147,17 +156,16 @@ class Porna91Provider : MainAPI() {
                 }
             }
         }
-
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = Regex("""loadBannerDirect\s*\(\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
         }
         if (poster.isNullOrBlank() || poster.startsWith("data:")) {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
-
         val finalPoster = poster?.let { decryptImageUrl(it) ?: it }
 
-        val tags = document.select("a[href*=/search?keyword=]").map { it.text().trim() }.filter { it.isNotBlank() }
+        val tags = document.select("a[href*=/search?keyword=]")
+            .map { it.text().trim() }.filter { it.isNotBlank() }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = finalPoster
@@ -170,13 +178,31 @@ class Porna91Provider : MainAPI() {
     // ---------------------------------------------------------------
     // DEAN EDWARDS UNPACKER
     // ---------------------------------------------------------------
+    private fun unpack(packedJs: String): String {
+        return try {
+            // Match: eval(function(p,a,c,k,e,d){...}('CODE',BASE,COUNT,'KEYS'.split('|'),0,{}))
+            val match = Regex(
+                """eval\s*\(\s*function\s*\(p,a,c,k,e,d\).*?}\s*\(\s*'(.*?)',\s*(\d+),\s*(\d+),\s*'(.*?)'\.split\(""",
+                setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+            ).find(packedJs) ?: return packedJs
+
+            val p = match.groupValues[1]
+            val a = match.groupValues[2].toIntOrNull() ?: 36
+            val c = match.groupValues[3].toIntOrNull() ?: 0
+            val kRaw = match.groupValues[4]
+            unpackTuple(p, a, c, kRaw)
+        } catch (e: Exception) {
+            packedJs
+        }
+    }
+
     private fun unpackTuple(p: String, a: Int, c: Int, kRaw: String): String {
         return try {
             val k = kRaw.split("|")
-            fun enc(cc: Int): String {
-                val first = if (cc >= a) enc(cc / a) else ""
-                val m = cc % a
-                return first + (if (m > 35) (m + 29).toChar().toString() else m.toString(36))
+            fun enc(n: Int): String {
+                val prefix = if (n >= a) enc(n / a) else ""
+                val m = n % a
+                return prefix + if (m > 35) (m + 29).toChar().toString() else m.toString(36)
             }
             val dict = mutableMapOf<String, String>()
             for (i in 0 until c) {
@@ -189,7 +215,10 @@ class Porna91Provider : MainAPI() {
         }
     }
 
-    private fun decryptAesB64(encryptedB64: String): String {
+    // ---------------------------------------------------------------
+    // AES VIDEO DECRYPTORS
+    // ---------------------------------------------------------------
+    private fun decryptVideoPayload(encryptedB64: String): String {
         return try {
             val clean = encryptedB64.trim().replace("\n", "").replace("\r", "")
             val key = SecretKeySpec("f5d965df75336270".toByteArray(Charsets.UTF_8), "AES")
@@ -202,7 +231,7 @@ class Porna91Provider : MainAPI() {
         }
     }
 
-    private fun decryptAesHex(hexStr: String): String {
+    private fun decryptHexVideoUrl(hexStr: String): String {
         return try {
             val clean = hexStr.trim()
             if (clean.length % 2 != 0) return ""
@@ -220,7 +249,62 @@ class Porna91Provider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // EXTRACTOR LINK HELPER - FIXED
+    // ---------------------------------------------------------------
+    private fun addLink(url: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+        val cleanUrl = url.trim()
+            .replace("\\/", "/")
+            .replace("&amp;", "&")
+            .replace("\\u002F", "/")
+            .replace("\\u0026", "&")
+
+        if (cleanUrl.isBlank()) return false
+        if (!cleanUrl.startsWith("http")) return false
+        if (!mappedUrls.add(cleanUrl)) return false
+
+        val isM3u8 = cleanUrl.contains(".m3u8", ignoreCase = true)
+
+        // Use the correct newExtractorLink signature
+        callback.invoke(
+            newExtractorLink(
+                source = name,
+                name = name,
+                url = cleanUrl,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = "$mainUrl/"
+                this.headers = videoHeaders
+                this.quality = Qualities.Unknown.value
+            }
+        )
+        return true
+    }
+
+    private fun extractLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+        var found = false
+        val normalized = text
+            .replace("\\/", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
+
+        // Match M3U8 URLs first (highest priority)
+        val m3u8Regex = Regex("""https?://[^\s"'\\<>]+\.m3u8[^\s"'\\<>]*""")
+        for (match in m3u8Regex.findAll(normalized)) {
+            if (addLink(match.value, mappedUrls, callback)) found = true
+        }
+
+        // Match MP4 URLs
+        val mp4Regex = Regex("""https?://[^\s"'\\<>]+\.mp4[^\s"'\\<>]*""")
+        for (match in mp4Regex.findAll(normalized)) {
+            if (addLink(match.value, mappedUrls, callback)) found = true
+        }
+
+        return found
+    }
+
+    // ---------------------------------------------------------------
+    // LOAD LINKS - MAIN LOGIC
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -228,142 +312,129 @@ class Porna91Provider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var found = false
-        val html = app.get(data, headers = headers).text
-        val document = Jsoup.parse(html)
         val mappedUrls = mutableSetOf<String>()
-        val t = System.currentTimeMillis() / 1000 / 2100
-
         val apiHeaders = mapOf(
             "User-Agent" to ua,
             "Referer" to "$mainUrl/",
             "Origin" to mainUrl,
-            "X-Requested-With" to "XMLHttpRequest"
+            "X-Requested-With" to "XMLHttpRequest",
+            "Accept" to "application/json, text/javascript, */*; q=0.01"
         )
 
-        suspend fun emit(url: String, tag: String): Boolean {
-            val u = url.replace("\\/", "/").replace("&amp;", "&").trim()
-            if (u.isBlank() || !mappedUrls.add(u)) return false
-            val isM3u8 = u.contains(".m3u8") || u.contains("m3u8?")
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "$name $tag",
-                    url = u,
-                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.headers = videoHeaders
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            return true
-        }
+        // Step 1: Fetch the page
+        val html = app.get(data, headers = headers).text
 
-        suspend fun scanText(text: String): Boolean {
-            var ok = false
-            val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
-            for (m in Regex("""https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(unescaped)) {
-                var u = m.groupValues[0]
-                if (u.contains("url=http")) {
-                    u = u.substringAfter("url=").substringBefore("&")
-                    try { u = java.net.URLDecoder.decode(u, "UTF-8") } catch (e: Exception) {}
+        // Step 2: Direct scan for links
+        if (extractLinks(html, mappedUrls, callback)) return true
+
+        // Step 3: Find and unpack eval(function(p,a,c,k...)) blocks
+        val scriptBlocks = Regex("""eval\s*\(\s*function\s*\(p,a,c,k,e,d\).*?\)\s*\)""",
+            setOf(RegexOption.DOT_MATCHES_ALL)
+        ).findAll(html)
+
+        for (block in scriptBlocks) {
+            val unpacked = unpack(block.value)
+            if (unpacked == block.value) continue // didn't unpack
+
+            // Scan unpacked script for direct links
+            if (extractLinks(unpacked, mappedUrls, callback)) return true
+
+            // Look for detail_play API call in unpacked script
+            val detailPlayUrl = Regex("""['"]((?:https?://[^'"]*)?/comic/index/detail_play\?[^'"]+)['"]""")
+                .find(unpacked)?.groupValues?.get(1)?.replace("\\/", "/")
+
+            if (detailPlayUrl != null) {
+                val fullApiUrl = if (detailPlayUrl.startsWith("http")) detailPlayUrl
+                else "$mainUrl$detailPlayUrl"
+
+                // Extract video_key and hex payload from unpacked script
+                val videoKey = Regex("""video_key[=:]\s*['"]?(\w+)['"]?""").find(unpacked)?.groupValues?.get(1)
+                val hexPayload = Regex("""['"]([0-9a-fA-F]{32,})['"]""").find(unpacked)?.groupValues?.get(1)
+
+                val t = System.currentTimeMillis() / 1000
+
+                val urlsToTry = mutableListOf<String>()
+
+                // Add the exact URL from unpacked script
+                urlsToTry.add(fullApiUrl)
+                if (!fullApiUrl.contains("&t=")) urlsToTry.add("$fullApiUrl&t=$t")
+
+                // Try with hex payload if found
+                if (videoKey != null && hexPayload != null) {
+                    urlsToTry.add("$mainUrl/comic/index/detail_play?video_key=$videoKey&u=$hexPayload&t=$t")
+                    urlsToTry.add("$mainUrl/comic/index/detail_play?video_key=$videoKey&u=${URLEncoder.encode(hexPayload, "UTF-8")}&t=$t")
                 }
-                if (emit(u, "CDN")) ok = true
-            }
-            if (!ok) {
-                for (m in Regex("""[A-Za-z0-9+/=]{64,}""").findAll(text)) {
-                    val dec = decryptAesB64(m.value)
-                    if (dec.isNotBlank()) {
-                        for (m2 in Regex("""https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""").findAll(dec.replace("\\/", "/"))) {
-                            if (emit(m2.value, "Dec")) ok = true
+                if (videoKey != null) {
+                    urlsToTry.add("$mainUrl/comic/index/detail_play?video_key=$videoKey&t=$t")
+                }
+
+                for (apiUrl in urlsToTry.distinct()) {
+                    try {
+                        val resp = app.get(apiUrl, headers = apiHeaders).text
+                        // Try direct extraction
+                        if (extractLinks(resp, mappedUrls, callback)) return true
+
+                        // Try base64 decryption on any long base64 strings
+                        for (b64Match in Regex("""[A-Za-z0-9+/]{40,}={0,2}""").findAll(resp)) {
+                            val dec = decryptVideoPayload(b64Match.value)
+                            if (dec.isNotBlank() && extractLinks(dec, mappedUrls, callback)) return true
                         }
+
+                        // Try hex decryption
+                        for (hexMatch in Regex("""[0-9a-fA-F]{64,}""").findAll(resp)) {
+                            val dec = decryptHexVideoUrl(hexMatch.value)
+                            if (dec.startsWith("http") && addLink(dec, mappedUrls, callback)) return true
+                        }
+                    } catch (e: Exception) { /* continue */ }
+                }
+            }
+
+            // Look for hex encrypted URLs in unpacked script
+            for (hexMatch in Regex("""['"]([0-9a-fA-F]{64,})['"]""").findAll(unpacked)) {
+                val dec = decryptHexVideoUrl(hexMatch.value)
+                if (dec.startsWith("http") && addLink(dec, mappedUrls, callback)) return true
+            }
+        }
+
+        // Step 4: Extract video_key from page and try API endpoints directly
+        val videoKey = Regex("""video_key[='":\s]+(\w+)""").find(html)?.groupValues?.get(1)
+            ?: Regex("""[?&]video_key=([^&"'\s]+)""").find(data)?.groupValues?.get(1)
+            ?: Regex("""/detail[^/]*/(\d+)""").find(data)?.groupValues?.get(1)
+            ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
+
+        if (videoKey.isNotBlank()) {
+            val t = System.currentTimeMillis() / 1000
+            val endpoints = listOf(
+                "$mainUrl/comic/index/detail_play?video_key=$videoKey&t=$t",
+                "$mainUrl/api/comic/video/detail?video_key=$videoKey",
+                "$mainUrl/api/video/detail?video_key=$videoKey",
+                "$mainUrl/api/video/get_video?video_key=$videoKey",
+                "$mainUrl/api/v1/video/detail?video_key=$videoKey"
+            )
+            for (endpoint in endpoints) {
+                try {
+                    val resp = app.get(endpoint, headers = apiHeaders).text
+                    if (extractLinks(resp, mappedUrls, callback)) return true
+                    // Try decrypting response
+                    for (b64Match in Regex("""[A-Za-z0-9+/]{40,}={0,2}""").findAll(resp)) {
+                        val dec = decryptVideoPayload(b64Match.value)
+                        if (dec.isNotBlank() && extractLinks(dec, mappedUrls, callback)) return true
                     }
-                    if (ok) break
-                }
-            }
-            return ok
-        }
-
-        suspend fun emitIfMedia(res: com.lagradost.nicehttp.NiceResponse): Boolean {
-            val finalUrl = res.okhttpResponse.request.url.toString()
-            return if (finalUrl.contains(".m3u8") || finalUrl.contains(".mp4")) emit(finalUrl, "Direct") else false
-        }
-
-        val scriptBodies = mutableListOf(html)
-        for (el in document.select("script[src]")) {
-            val src = fixUrlNull(el.attr("src")) ?: continue
-            if (!src.startsWith("http")) continue
-            try { scriptBodies.add(app.get(src, headers = apiHeaders).text) } catch (e: Exception) {}
-        }
-        for (el in document.select("iframe[src]")) {
-            val src = fixUrlNull(el.attr("src")) ?: continue
-            try { scriptBodies.add(app.get(src, headers = apiHeaders).text) } catch (e: Exception) {}
-        }
-
-        val tupleRegex = Regex("""\('((?:[^'\\]|\\.)*)',\s*(\d+),\s*(\d+),\s*'((?:[^'\\]|\\.)*)'\.split\('\|'\)""", RegexOption.DOT_MATCHES_ALL)
-        val detailPlayRegex = Regex("""["']?(/comic/index/detail_play\?[^"'\s]+)["']?""")
-        val hexRegex = Regex("""encodeURIComponent\(\s*['"]([0-9a-fA-F]{16,})['"]\s*\)""")
-        val hexLooseRegex = Regex("""['"]([0-9a-fA-F]{64,})['"]""")
-
-        val vidKey = Regex("""video_key=([A-Za-z0-9]+)""").find(data)?.groupValues?.get(1)
-            ?: Regex("""video_key=([A-Za-z0-9]+)""").find(html)?.groupValues?.get(1)
-
-        val detailPlayCandidates = linkedSetOf<String>()
-
-        for (body in scriptBodies) {
-            if (scanText(body)) return true
-
-            for (tm in tupleRegex.findAll(body)) {
-                val kParam = tm.groupValues[4].replace("\\'", "'").replace("\\\\", "\\")
-                val unpacked = unpackTuple(tm.groupValues[1], tm.groupValues[2].toIntOrNull() ?: 62, tm.groupValues[3].toIntOrNull() ?: 0, kParam)
-                
-                if (scanText(unpacked)) return true
-
-                val hex = hexRegex.find(unpacked)?.groupValues?.get(1) ?: hexLooseRegex.find(unpacked)?.groupValues?.get(1)
-                if (hex != null) {
-                    val dec = decryptAesHex(hex)
-                    if (dec.startsWith("http") && emit(dec, "AES")) return true
-                    if (scanText(dec)) return true
-                }
-
-                for (dp in detailPlayRegex.findAll(unpacked)) {
-                    val u = dp.groupValues[1].replace("\\/", "/")
-                    detailPlayCandidates.add(u)
-                    detailPlayCandidates.add(u.replace(Regex("t=\\d+"), "t=$t"))
-                    if (hex != null) {
-                        detailPlayCandidates.add(u.replace(Regex("u=[^&]+"), "u=" + URLEncoder.encode(hex, "UTF-8")))
-                    }
-                }
-            }
-
-            for (dp in detailPlayRegex.findAll(body)) {
-                val u = dp.groupValues[1].replace("\\/", "/")
-                detailPlayCandidates.add(u)
-                detailPlayCandidates.add(u.replace(Regex("t=\\d+"), "t=$t"))
+                } catch (e: Exception) { /* continue */ }
             }
         }
 
-        if (vidKey != null) {
-            detailPlayCandidates.add("/comic/index/detail_play?video_key=$vidKey&t=$t")
-            detailPlayCandidates.add("/comic/index/detail_play?video_key=$vidKey")
-        }
-
-        for (cand in detailPlayCandidates) {
-            val full = if (cand.startsWith("http")) cand else mainUrl + cand
-            try {
-                val res = app.get(full, headers = apiHeaders)
-                if (emitIfMedia(res)) return true
-                if (scanText(res.text)) return true
-            } catch (e: Exception) {}
-        }
-
+        // Step 5: Mobile UA fallback
         try {
-            val mobileUa = "Mozilla/5.0 (Linux; Android 13; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-            val mobileHtml = app.get(data, headers = mapOf("User-Agent" to mobileUa, "Referer" to "$mainUrl/")).text
-            if (scanText(mobileHtml)) return true
-        } catch (e: Exception) {}
+            val mobileHtml = app.get(
+                data, headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+                    "Referer" to "$mainUrl/"
+                )
+            ).text
+            if (extractLinks(mobileHtml, mappedUrls, callback)) return true
+        } catch (e: Exception) { /* ignore */ }
 
-        return found
+        return mappedUrls.isNotEmpty()
     }
 }
