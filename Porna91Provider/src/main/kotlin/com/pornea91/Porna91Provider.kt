@@ -196,11 +196,12 @@ class Porna91Provider : MainAPI() {
     // ---------------------------------------------------------------
     private fun decryptVideoPayload(encryptedB64: String): String {
         return try {
+            val clean = encryptedB64.trim().replace("\n", "").replace("\r", "")
             val key = SecretKeySpec("f5d965df75336270".toByteArray(Charsets.UTF_8), "AES")
             val iv = IvParameterSpec("97b60394abc2fbe1".toByteArray(Charsets.UTF_8))
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, key, iv)
-            String(cipher.doFinal(Base64.decode(encryptedB64, Base64.DEFAULT)), Charsets.UTF_8)
+            String(cipher.doFinal(Base64.decode(clean, Base64.DEFAULT)), Charsets.UTF_8)
         } catch (e: Exception) {
             ""
         }
@@ -260,10 +261,28 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 1. Scan the main HTML first
+        // 1. Scan the main HTML
         tryDecryptAndExtract(html)
 
-        // 2. Scan APIs if it's hidden
+        // 2. Fetch and decrypt external .txt payload files (e.g., https://g.lp-is.com/.../*.txt)
+        if (!found) {
+            val txtRegex = Regex("""(https?://[^\s"'<>]+\.txt[^\s"'<>]*)""")
+            for (match in txtRegex.findAll(html)) {
+                val txtUrl = match.groupValues[1]
+                try {
+                    val txtContent = app.get(txtUrl, headers = headers).text
+                    val decrypted = decryptVideoPayload(txtContent)
+                    if (decrypted.isNotBlank()) {
+                        extractAndAdd(decrypted)
+                    } else {
+                        extractAndAdd(txtContent)
+                    }
+                    if (found) break
+                } catch (e: Exception) {}
+            }
+        }
+
+        // 3. Scan API endpoints as fallback
         if (!found) {
             val vidIdMatch = Regex("""video_key=([^&"']+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
             val vidId = vidIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
