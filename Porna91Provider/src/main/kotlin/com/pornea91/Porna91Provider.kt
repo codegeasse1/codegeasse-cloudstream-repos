@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import javax.crypto.Cipher
@@ -251,7 +252,7 @@ class Porna91Provider : MainAPI() {
     // ---------------------------------------------------------------
     // EXTRACTOR LINK HELPER - FIXED
     // ---------------------------------------------------------------
-    private fun addLink(url: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun addLink(url: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         val cleanUrl = url.trim()
             .replace("\\/", "/")
             .replace("&amp;", "&")
@@ -280,7 +281,7 @@ class Porna91Provider : MainAPI() {
         return true
     }
 
-    private fun extractLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun extractLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         var found = false
         val normalized = text
             .replace("\\/", "/")
