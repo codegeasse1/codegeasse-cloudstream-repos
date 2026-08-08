@@ -236,9 +236,9 @@ class Porna91Provider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SAFE CLASS-LEVEL EXTRACTORS (Bypasses Coroutine Compiler Bugs)
+    // SAFE CLASS-LEVEL EXTRACTORS 
     // ---------------------------------------------------------------
-    private fun extractAndAddLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun extractAndAddLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         var localFound = false
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
         val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
@@ -253,24 +253,27 @@ class Porna91Provider : MainAPI() {
 
             if (cleanUrl.isNotBlank() && mappedUrls.add(cleanUrl)) {
                 val isM3u8 = cleanUrl.contains(".m3u8")
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name Server",
-                        url = cleanUrl,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+                
+                // Suspends safely because this entire method is now marked as suspend
+                val link = newExtractorLink(
+                    source = name,
+                    name = "$name Server",
+                    url = cleanUrl,
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                }
+                
+                // Normal callback invoke
+                callback.invoke(link)
                 localFound = true
             }
         }
         return localFound
     }
 
-    private fun tryDecryptAndExtract(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun tryDecryptAndExtract(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         var localFound = extractAndAddLinks(text, mappedUrls, callback)
         if (localFound) return true
 
