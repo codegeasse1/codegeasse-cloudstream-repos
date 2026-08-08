@@ -1,6 +1,5 @@
 package com.coomervideo
 
-import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -34,21 +33,27 @@ class CoomerVideoProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
-        // Fixed compiler error: simplified the check
         val isModelsPage = request.data.contains("/models/")
 
-        val items = if (isModelsPage) {
-            // Parse model cards
-            document.select("a[href*=/models/]").mapNotNull { parseModelItem(it) }.distinctBy { it.url }
+        // Compiler safety fix: Replaced mapNotNull with a flat loop
+        val items = mutableListOf<SearchResponse>()
+        
+        if (isModelsPage) {
+            for (element in document.select("a[href*=/models/], a[href*=/model/]")) {
+                val res = parseModelItem(element)
+                if (res != null) items.add(res)
+            }
         } else {
-            // Parse video items (existing logic)
-            document.select("div.vx-main-card, div.vx-card, a.vx-card-short").mapNotNull { it.toSearchResult() }
+            for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
+                val res = element.toSearchResult()
+                if (res != null) items.add(res)
+            }
         }
 
         val hasNext = document.select(".pagination a.vx-next, .pagination a[rel=next]").isNotEmpty()
 
         return newHomePageResponse(
-            list = listOf(HomePageList(request.name, items)),
+            list = listOf(HomePageList(request.name, items.distinctBy { it.url })),
             hasNext = hasNext
         )
     }
@@ -80,8 +85,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     private fun parseModelItem(element: Element): SearchResponse? {
-        // Try to find a direct link to the model page
-        val linkEl = element.selectFirst("a[href*=/models/]") ?: return null
+        val linkEl = element.selectFirst("a[href*=/models/], a[href*=/model/]") ?: element.takeIf { it.tagName() == "a" && it.attr("href").contains("model") } ?: return null
         val href = fixUrlNull(linkEl.attr("href")) ?: return null
 
         val imgEl = element.selectFirst("img")
@@ -98,7 +102,8 @@ class CoomerVideoProvider : MainAPI() {
             ?: linkEl.text().trim()
             ?: "Model"
 
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
+        // IMPORTANT: Return TvSeries so CloudStream knows to show the Episode List UI
+        return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
             this.posterUrl = poster
         }
     }
@@ -110,11 +115,18 @@ class CoomerVideoProvider : MainAPI() {
         val searchUrl = "$mainUrl/search/$query/"
         val document = app.get(searchUrl).document
 
-        // Search results may include both videos and models
-        val videoItems = document.select("div.vx-main-card, div.vx-card, a.vx-card-short").mapNotNull { it.toSearchResult() }
-        val modelItems = document.select("a[href*=/models/]").mapNotNull { parseModelItem(it) }
+        // Compiler safety fix: Replaced mapNotNull with flat loops
+        val results = mutableListOf<SearchResponse>()
+        
+        for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
+            element.toSearchResult()?.let { results.add(it) }
+        }
+        
+        for (element in document.select("a[href*=/models/], a[href*=/model/]")) {
+            parseModelItem(element)?.let { results.add(it) }
+        }
 
-        return (videoItems + modelItems).distinctBy { it.url }
+        return results.distinctBy { it.url }
     }
 
     // ---------------------------------------------------------------
@@ -123,18 +135,19 @@ class CoomerVideoProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        // Detect if this is a model page (contains a list of videos)
-        val isModelPage = url.contains("/models/") &&
-                document.select("div.vx-main-card, div.vx-card, a.vx-card-short").size > 1
+        val videoElements = document.select("div.vx-main-card, div.vx-card, a.vx-card-short")
+        
+        // Detect if this is an actor profile page (like LeakPorner)
+        val isModelPage = url.contains("/models/") || url.contains("/model/") || 
+                (document.select("iframe, video, .player").isEmpty() && videoElements.isNotEmpty())
 
         if (isModelPage) {
-            // Parse model name as series title
-            val modelTitle = document.selectFirst("h1, .page-title, .title")?.text()?.trim()
+            val modelTitle = document.selectFirst("h1, .page-title, .title, .model-name")?.text()?.trim()
                 ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore("-")?.trim()
                 ?: "Model Videos"
 
             val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: document.selectFirst(".model-image img, .post-thumbnail img")?.let {
+                ?: document.selectFirst(".model-image img, .post-thumbnail img, .avatar img")?.let {
                     it.attr("data-webp").ifBlank {
                         it.attr("data-original").ifBlank {
                             it.attr("src")
@@ -142,11 +155,11 @@ class CoomerVideoProvider : MainAPI() {
                     }
                 }
 
-            // Collect all video items on the model page
             val episodes = mutableListOf<Episode>()
-            document.select("div.vx-main-card, div.vx-card, a.vx-card-short").forEachIndexed { index, el ->
+            videoElements.forEachIndexed { index, el ->
                 val linkEl = el.selectFirst("a.vx-media") ?: el.takeIf { it.tagName() == "a" } ?: return@forEachIndexed
                 val videoHref = fixUrlNull(linkEl.attr("href")) ?: return@forEachIndexed
+                if (videoHref == url) return@forEachIndexed // Prevent infinite loops
 
                 val imgEl = el.selectFirst("img")
                 val videoTitle = imgEl?.attr("alt")?.ifBlank { null }
@@ -171,13 +184,13 @@ class CoomerVideoProvider : MainAPI() {
             }
 
             return newTvSeriesLoadResponse(modelTitle, url, TvType.TvSeries, episodes.distinctBy { it.data }) {
-                this.posterUrl = poster
+                this.posterUrl = fixUrlNull(poster)
                 this.plot = "Videos from $modelTitle"
             }
         }
 
         // ---------------------------------------------------------------
-        // NORMAL SINGLE VIDEO PAGE (original logic)
+        // NORMAL SINGLE VIDEO PAGE
         // ---------------------------------------------------------------
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")
             ?: document.selectFirst("h1")?.text()?.trim()
@@ -210,12 +223,13 @@ class CoomerVideoProvider : MainAPI() {
         val mappedUrls = mutableSetOf<String>()
         val foundQualities = mutableSetOf<Int>()
 
-        suspend fun extractStreams(sourceHtml: String, referer: String) {
+        fun extractStreams(sourceHtml: String, referer: String) {
             val flashvarsRegex = Regex("""(?:video_url|video_alt_url\d*)\s*[:=]\s*['"](http[^'"]+)['"]""")
             val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4)[^'"]*)['"]""")
 
-            val allMatches = flashvarsRegex.findAll(sourceHtml).map { it.groupValues[1] } +
-                    generalRegex.findAll(sourceHtml).map { it.groupValues[1] }
+            val allMatches = mutableListOf<String>()
+            flashvarsRegex.findAll(sourceHtml).forEach { allMatches.add(it.groupValues[1]) }
+            generalRegex.findAll(sourceHtml).forEach { allMatches.add(it.groupValues[1]) }
 
             for (rawUrl in allMatches) {
                 val streamUrl = rawUrl.replace("&amp;", "&").replace("\\/", "/")
