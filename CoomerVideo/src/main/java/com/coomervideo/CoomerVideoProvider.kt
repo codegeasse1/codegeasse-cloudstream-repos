@@ -17,7 +17,6 @@ class CoomerVideoProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW, TvType.TvSeries)
 
-    // Main page tabs: added "Models"
     override val mainPage = mainPageOf(
         "$mainUrl/latest-updates/" to "Latest",
         "$mainUrl/top-rated/" to "Top Rated",
@@ -34,15 +33,19 @@ class CoomerVideoProvider : MainAPI() {
         val document = app.get(url).document
 
         val isModelsPage = request.data.contains("/models/")
-
         val items = mutableListOf<SearchResponse>()
         
         if (isModelsPage) {
-            for (element in document.select("a[href*=/models/], a[href*=/model/]")) {
+            // Expanded selectors to catch Model wrappers
+            val modelElements = document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, .list-models .item").ifEmpty {
+                document.select("a[href*=/models/], a[href*=/model/]")
+            }
+            for (element in modelElements) {
                 val res = parseModelItem(element)
                 if (res != null) items.add(res)
             }
         } else {
+            // Original video logic untouched
             for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
                 val res = element.toSearchResult()
                 if (res != null) items.add(res)
@@ -58,7 +61,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // ITEM PARSERS
+    // ITEM PARSERS (Video logic unchanged, Model logic improved)
     // ---------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("a.vx-media") ?: this.takeIf { it.tagName() == "a" } ?: return null
@@ -84,24 +87,29 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     private fun parseModelItem(element: Element): SearchResponse? {
+        // Enforce that it contains a model link
         val linkEl = element.selectFirst("a[href*=/models/], a[href*=/model/]") ?: element.takeIf { it.tagName() == "a" && it.attr("href").contains("model") } ?: return null
         val href = fixUrlNull(linkEl.attr("href")) ?: return null
 
-        val imgEl = element.selectFirst("img")
+        val imgEl = element.selectFirst("img") ?: linkEl.selectFirst("img")
+        
+        // Expanded to reliably catch the image CDN screenshots
         val poster = imgEl?.let {
             it.attr("data-webp").ifBlank {
                 it.attr("data-original").ifBlank {
-                    it.attr("src")
+                    it.attr("data-src").ifBlank {
+                        it.attr("src")
+                    }
                 }
             }
-        } ?: ""
+        } ?: element.selectFirst("[data-original]")?.attr("data-original") ?: ""
 
         val title = element.selectFirst(".model-name, .name, .title, .vx-text")?.text()?.trim()
-            ?: linkEl.attr("title")
+            ?: imgEl?.attr("alt")?.ifBlank { null }
+            ?: linkEl.attr("title").ifBlank { null }
             ?: linkEl.text().trim()
             ?: "Model"
 
-        // Returns TvSeries to show the Episode List UI
         return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
             this.posterUrl = poster
         }
@@ -116,11 +124,13 @@ class CoomerVideoProvider : MainAPI() {
 
         val results = mutableListOf<SearchResponse>()
         
+        // Videos
         for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
             element.toSearchResult()?.let { results.add(it) }
         }
         
-        for (element in document.select("a[href*=/models/], a[href*=/model/]")) {
+        // Models
+        for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, a[href*=/models/], a[href*=/model/]")) {
             parseModelItem(element)?.let { results.add(it) }
         }
 
@@ -133,11 +143,8 @@ class CoomerVideoProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val videoElements = document.select("div.vx-main-card, div.vx-card, a.vx-card-short")
-        
-        // Detect if this is an actor profile page (like LeakPorner)
         val isModelPage = url.contains("/models/") || url.contains("/model/") || 
-                (document.select("iframe, video, .player").isEmpty() && videoElements.isNotEmpty())
+                (document.select("iframe, video, .player").isEmpty() && document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item").isNotEmpty())
 
         if (isModelPage) {
             val modelTitle = document.selectFirst("h1, .page-title, .title, .model-name")?.text()?.trim()
@@ -148,29 +155,40 @@ class CoomerVideoProvider : MainAPI() {
                 ?: document.selectFirst(".model-image img, .post-thumbnail img, .avatar img")?.let {
                     it.attr("data-webp").ifBlank {
                         it.attr("data-original").ifBlank {
-                            it.attr("src")
+                            it.attr("data-src").ifBlank {
+                                it.attr("src")
+                            }
                         }
                     }
                 }
 
             val episodes = mutableListOf<Episode>()
-            videoElements.forEachIndexed { index, el ->
-                val linkEl = el.selectFirst("a.vx-media") ?: el.takeIf { it.tagName() == "a" } ?: return@forEachIndexed
-                val videoHref = fixUrlNull(linkEl.attr("href")) ?: return@forEachIndexed
-                if (videoHref == url) return@forEachIndexed
+            
+            // Expanded video selector for the Model Page to prevent empty lists ("Coming soon")
+            val modelVideoElements = document.select("div.vx-main-card, div.vx-card, a.vx-card-short, div.item, div.video-item, .list-videos .item")
+            
+            for ((index, el) in modelVideoElements.withIndex()) {
+                val linkEl = el.selectFirst("a.vx-media, a[href*=/video]") ?: el.selectFirst("a") ?: el.takeIf { it.tagName() == "a" } ?: continue
+                val videoHref = fixUrlNull(linkEl.attr("href")) ?: continue
+                
+                // Skip if the link points back to the model page itself to prevent loop
+                if (videoHref == url || videoHref.contains("/models/") || videoHref.contains("/model/")) continue
 
-                val imgEl = el.selectFirst("img")
+                val imgEl = el.selectFirst("img") ?: linkEl.selectFirst("img")
                 val videoTitle = imgEl?.attr("alt")?.ifBlank { null }
-                    ?: el.selectFirst(".vx-text")?.text()?.trim()
+                    ?: el.selectFirst(".vx-text, .title, .name")?.text()?.trim()
+                    ?: linkEl.attr("title").ifBlank { null }
                     ?: "Video ${index + 1}"
 
                 val videoPoster = imgEl?.let {
                     it.attr("data-webp").ifBlank {
                         it.attr("data-original").ifBlank {
-                            it.attr("src")
+                            it.attr("data-src").ifBlank {
+                                it.attr("src")
+                            }
                         }
                     }
-                }
+                } ?: el.selectFirst("[data-original]")?.attr("data-original")
 
                 episodes.add(
                     newEpisode(videoHref) {
@@ -188,7 +206,7 @@ class CoomerVideoProvider : MainAPI() {
         }
 
         // ---------------------------------------------------------------
-        // NORMAL SINGLE VIDEO PAGE
+        // NORMAL SINGLE VIDEO PAGE (Original Logic Untouched)
         // ---------------------------------------------------------------
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")
             ?: document.selectFirst("h1")?.text()?.trim()
@@ -207,7 +225,7 @@ class CoomerVideoProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS (Original Logic Untouched)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -221,7 +239,6 @@ class CoomerVideoProvider : MainAPI() {
         val mappedUrls = mutableSetOf<String>()
         val foundQualities = mutableSetOf<Int>()
 
-        // FIXED: Re-added 'suspend' keyword to properly handle CloudStream API async calls
         suspend fun extractStreams(sourceHtml: String, referer: String) {
             val flashvarsRegex = Regex("""(?:video_url|video_alt_url\d*)\s*[:=]\s*['"](http[^'"]+)['"]""")
             val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4)[^'"]*)['"]""")
