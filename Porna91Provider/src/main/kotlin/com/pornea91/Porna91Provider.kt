@@ -229,7 +229,7 @@ class Porna91Provider : MainAPI() {
     // ---------------------------------------------------------------
     // LINK HELPERS
     // ---------------------------------------------------------------
-    private fun extractAndAddLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun extractAndAddLinks(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         var localFound = false
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
         val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
@@ -262,7 +262,7 @@ class Porna91Provider : MainAPI() {
         return localFound
     }
 
-    private fun tryDecryptAndExtract(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun tryDecryptAndExtract(text: String, mappedUrls: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
         if (extractAndAddLinks(text, mappedUrls, callback)) return true
 
         for (match in Regex("""[A-Za-z0-9+/=]{40,}""").findAll(text)) {
