@@ -221,7 +221,6 @@ class Porna91Provider : MainAPI() {
 
         val cdnRegex = Regex("""(https?://[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*)""")
 
-        // Restored the 'suspend' keyword here so newExtractorLink can be called
         suspend fun extractAndAdd(text: String) {
             val unescaped = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
             
@@ -245,12 +244,28 @@ class Porna91Provider : MainAPI() {
             }
         }
 
-        // 1. Scan the main HTML first
-        extractAndAdd(html)
+        suspend fun tryDecryptAndExtract(text: String) {
+            extractAndAdd(text)
+            if (found) return
 
-        // 2. Scan APIs if it's hidden (with AES cracking built-in)
+            // Scan for candidate encrypted Base64 strings embedded in JSON or HTML
+            val b64Regex = Regex("""[A-Za-z0-9+/=]{30,}""")
+            for (match in b64Regex.findAll(text)) {
+                val candidate = match.value.trim()
+                val decrypted = decryptVideoPayload(candidate)
+                if (decrypted.isNotBlank()) {
+                    extractAndAdd(decrypted)
+                    if (found) return
+                }
+            }
+        }
+
+        // 1. Scan the main HTML first
+        tryDecryptAndExtract(html)
+
+        // 2. Scan APIs if it's hidden
         if (!found) {
-            val vidIdMatch = Regex("""video_key=([^&]+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
+            val vidIdMatch = Regex("""video_key=([^&"']+)""").find(data) ?: Regex("""/detail/(\d+)""").find(data)
             val vidId = vidIdMatch?.groupValues?.get(1) ?: data.substringAfterLast("/").substringBefore("?").substringBefore(".")
             
             if (vidId.isNotBlank()) {
@@ -258,22 +273,14 @@ class Porna91Provider : MainAPI() {
                     "/api/comic/video/detail?video_key=$vidId",
                     "/api/video/detail?video_key=$vidId",
                     "/api/video/get_video?video_key=$vidId",
-                    "/api/v1/video/detail?video_key=$vidId"
+                    "/api/v1/video/detail?video_key=$vidId",
+                    "/comic/index/detail_play?video_key=$vidId"
                 )
                 
                 for (api in apiEndpoints) {
                     try {
-                        val apiHtml = app.get(fixUrl(api), headers = headers).text
-                        extractAndAdd(apiHtml) // Try direct read first
-                        
-                        // Crack the AES Payload if it's returning the massive Base64 string
-                        if (!found && apiHtml.isNotBlank() && !apiHtml.trim().startsWith("{") && !apiHtml.trim().startsWith("<")) {
-                            val decrypted = decryptVideoPayload(apiHtml.trim())
-                            if (decrypted.isNotBlank()) {
-                                extractAndAdd(decrypted)
-                            }
-                        }
-                        
+                        val apiRes = app.get(fixUrl(api), headers = headers).text
+                        tryDecryptAndExtract(apiRes)
                         if (found) break
                     } catch (e: Exception) {}
                 }
