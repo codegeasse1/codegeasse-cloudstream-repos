@@ -12,7 +12,6 @@ import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlin.math.pow
 
 class Porna91Provider : MainAPI() {
     override var mainUrl = "https://91porna.com"
@@ -244,8 +243,8 @@ class Porna91Provider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: suspend (SubtitleFile) -> Unit,
-        callback: suspend (ExtractorLink) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
         val html = app.get(data, headers = headers).text
@@ -300,7 +299,6 @@ class Porna91Provider : MainAPI() {
             for (match in evalRegex.findAll(html)) {
                 val unpackedScript = getUnpacked(match.value)
                 
-                // If the unpacked script contains an iframe pointing to a player endpoint
                 val playerSrc = Regex("""src=['"]([^'"]+)['"]""").find(unpackedScript)?.groupValues?.get(1)
                     ?: Regex("""<iframe[^>]+src=['"]([^'"]+)['"]""").find(unpackedScript)?.groupValues?.get(1)
                 
