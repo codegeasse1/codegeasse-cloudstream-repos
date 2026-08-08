@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
+import org.json.JSONObject          // added for parsing DPlayer config
 import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -225,7 +226,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS – supports multiple videos (DPlayer + fallback regex)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -234,27 +235,82 @@ class MrdsProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val html = app.get(data).text
+        val document = app.get(data).document
 
-        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-
-        cdnRegex.findAll(html).forEach { match ->
-            var cleanUrl = match.value.replace("\\/", "/")
-            cleanUrl = cleanUrl.replace("&amp;", "&")
-
-            if (cleanUrl.isNotBlank()) {
-                callback(
-                    newExtractorLink(
-                        source = "MRDS Server",
-                        name = "MRDS Server",
-                        url = cleanUrl,
-                        type = ExtractorLinkType.M3U8,
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
+        // 1️⃣ Try to extract all videos from DPlayer containers (most reliable)
+        val dplayers = document.select("div.dplayer[data-config]")
+        if (dplayers.isNotEmpty()) {
+            var videoIndex = 1
+            for (player in dplayers) {
+                val configJson = player.attr("data-config")
+                try {
+                    val json = JSONObject(configJson)
+                    // Prefer h265 if available, otherwise fallback to normal video
+                    val videoObj = json.optJSONObject("video_h265") ?: json.optJSONObject("video")
+                    val videoUrl = videoObj?.optString("url")?.takeIf { it.isNotBlank() }
+                    if (videoUrl != null) {
+                        val name = player.attr("data-video_title").ifBlank { "Video $videoIndex" }
+                        callback(
+                            newExtractorLink(
+                                source = "MRDS",
+                                name = name,
+                                url = videoUrl,
+                                type = ExtractorLinkType.M3U8,
+                            ) {
+                                this.referer = "$mainUrl/"
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        found = true
+                        videoIndex++
                     }
-                )
-                found = true
+                } catch (_: Exception) {
+                    // If JSON parsing fails, fall back to regex on the raw config string
+                    val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(configJson)
+                    urlMatch?.groupValues?.get(1)?.let { url ->
+                        val name = player.attr("data-video_title").ifBlank { "Video $videoIndex" }
+                        callback(
+                            newExtractorLink(
+                                source = "MRDS",
+                                name = name,
+                                url = url,
+                                type = ExtractorLinkType.M3U8,
+                            ) {
+                                this.referer = "$mainUrl/"
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        found = true
+                        videoIndex++
+                    }
+                }
+            }
+        }
+
+        // 2️⃣ Fallback to your original regex that scans the entire HTML for .m3u8 links
+        //    This preserves the exact behavior you had before.
+        if (!found) {
+            val html = document.outerHtml()
+            val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+            var index = 1
+            cdnRegex.findAll(html).forEach { match ->
+                var cleanUrl = match.value.replace("\\/", "/")
+                cleanUrl = cleanUrl.replace("&amp;", "&")
+                if (cleanUrl.isNotBlank()) {
+                    callback(
+                        newExtractorLink(
+                            source = "MRDS Server",
+                            name = "Stream $index",
+                            url = cleanUrl,
+                            type = ExtractorLinkType.M3U8,
+                        ) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    found = true
+                    index++
+                }
             }
         }
 
