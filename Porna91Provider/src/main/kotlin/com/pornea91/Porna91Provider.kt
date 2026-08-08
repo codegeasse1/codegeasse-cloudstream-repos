@@ -4,6 +4,7 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import javax.crypto.Cipher
@@ -201,9 +202,13 @@ class Porna91Provider : MainAPI() {
     }
 
     // ----------------------------------------------------------------
-    // LINK EXTRACTION - FIXED: Use direct ExtractorLink constructor
+    // LINK EXTRACTION - PROPERLY MARKED AS SUSPEND
     // ----------------------------------------------------------------
-    private fun addLink(rawUrl: String, seen: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun addLink(
+        rawUrl: String,
+        seen: MutableSet<String>,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val url = rawUrl.trim()
             .replace("\\/", "/")
             .replace("&amp;", "&")
@@ -217,26 +222,39 @@ class Porna91Provider : MainAPI() {
         val isMp4 = url.contains(".mp4", ignoreCase = true)
         if (!isM3u8 && !isMp4) return false
 
-        // CORRECT CloudStream 3 ExtractorLink constructor
-        callback(
-            ExtractorLink(
+        // Use M3u8Helper for M3U8 links
+        if (isM3u8) {
+            M3u8Helper.generateM3u8(
                 source = name,
-                name = name,
-                url = url,
+                streamUrl = url,
                 referer = "$mainUrl/",
-                quality = Qualities.Unknown.value,
-                isM3u8 = isM3u8,
                 headers = mapOf(
                     "User-Agent" to ua,
                     "Referer" to "$mainUrl/",
                     "Origin" to mainUrl
                 )
+            ).forEach(callback)
+        } else {
+            // Direct MP4 link
+            callback(
+                ExtractorLink(
+                    source = name,
+                    name = name,
+                    url = url,
+                    referer = "$mainUrl/",
+                    quality = Qualities.Unknown.value,
+                    isM3u8 = false
+                )
             )
-        )
+        }
         return true
     }
 
-    private fun extractLinks(text: String, seen: MutableSet<String>, callback: (ExtractorLink) -> Unit): Boolean {
+    private suspend fun extractLinks(
+        text: String,
+        seen: MutableSet<String>,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val normalized = text.replace("\\/", "/").replace("\\u002F", "/").replace("&amp;", "&")
         var found = false
         for (m in Regex("""https?://[^\s"'<>\u0000-\u001F\\]+""").findAll(normalized)) {
@@ -314,7 +332,12 @@ class Porna91Provider : MainAPI() {
         return seen.isNotEmpty()
     }
 
-    private suspend fun tryFetch(url: String, hdrs: Map<String, String>, seen: MutableSet<String>, callback: (ExtractorLink) -> Unit) {
+    private suspend fun tryFetch(
+        url: String,
+        hdrs: Map<String, String>,
+        seen: MutableSet<String>,
+        callback: (ExtractorLink) -> Unit
+    ) {
         try {
             val resp = app.get(url, headers = hdrs).text
             extractLinks(resp, seen, callback)
