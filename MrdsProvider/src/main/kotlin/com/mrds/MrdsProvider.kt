@@ -7,14 +7,13 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
-import org.json.JSONObject
 import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 class MrdsProvider : MainAPI() {
-    override var mainUrl = "https://mrds.com"
+    override var mainUrl = "https://mrds.com"   // Change to the actual domain you use
     override var name = "MRDS"
     override val hasMainPage = true
     override var lang = "en"
@@ -225,7 +224,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS – EXTRACTS ALL .m3u8 URLs FROM THE ENTIRE HTML
+    // LOAD LINKS – EXTRACTS ALL .m3u8 URLs FROM RAW HTML
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -233,50 +232,51 @@ class MrdsProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Fetch the full HTML
-        val html = app.get(data).document.outerHtml()
+        // Fetch raw HTML text (like 51CG does)
+        val html = app.get(data).text
 
-        // Map to store video titles and URLs (deduplicated)
-        val videoMap = mutableMapOf<String, String>()  // title -> url
+        // Regex to find all .m3u8 URLs (handles escaped slashes)
+        val cdnRegex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
 
-        // 1️⃣ Try to parse DPlayer containers to get titles
-        val dplayerRegex = Regex("""<div[^>]*class="[^"]*dplayer[^"]*"[^>]*data-video_title="([^"]*)"[^>]*data-config='([^']*)'""")
+        // Map to store unique URLs and their titles (if we can find them)
+        val videoMap = mutableMapOf<String, String>()  // url -> title
+
+        // First, try to extract titles from DPlayer data-video_title
+        val dplayerRegex = Regex("""<div[^>]*data-video_title="([^"]*)"[^>]*data-config='([^']*)'""")
         dplayerRegex.findAll(html).forEach { match ->
             val title = match.groupValues[1].takeIf { it.isNotBlank() } ?: "Video"
-            val configJson = match.groupValues[2]
-            try {
-                val json = JSONObject(configJson)
-                // Prefer h265, fallback to normal video
-                val videoObj = json.optJSONObject("video_h265") ?: json.optJSONObject("video")
-                val url = videoObj?.optString("url")?.takeIf { it.isNotBlank() }
-                if (url != null) {
-                    videoMap[title] = url
-                }
-            } catch (_: Exception) {
-                // If JSON parsing fails, try regex on the config string
-                val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(configJson)
-                urlMatch?.groupValues?.get(1)?.let { url ->
-                    videoMap[title] = url
-                }
+            val config = match.groupValues[2]
+            // Try to find the first .m3u8 URL in the config
+            val urlMatch = Regex(""""url"\s*:\s*"([^"]+)"""").find(config)
+            urlMatch?.groupValues?.get(1)?.let { url ->
+                val cleanUrl = url.replace("\\/", "/")
+                videoMap[cleanUrl] = title
             }
         }
 
-        // 2️⃣ Fallback: scan the entire HTML for any .m3u8 URLs (including escaped slashes)
-        //    This will catch any videos that weren't in DPlayer containers.
-        val m3u8Regex = Regex("""https?:\\?/\\?/[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+        // Now find all M3U8 URLs in the entire HTML and add any missing ones
         var index = 1
-        m3u8Regex.findAll(html).forEach { match ->
+        cdnRegex.findAll(html).forEach { match ->
             var url = match.value.replace("\\/", "/").replace("&amp;", "&")
-            if (url.isNotBlank()) {
-                // Use the title from DPlayer if we have it, otherwise generate a generic name
-                val title = videoMap.keys.find { videoMap[it] == url } ?: "Stream ${index++}"
-                videoMap[title] = url
+            if (url.isNotBlank() && !videoMap.containsKey(url)) {
+                videoMap[url] = "Video ${index++}"
             }
         }
 
-        // 3️⃣ Add all unique videos as sources
+        // If still no URLs, try alternative regex without escaped slashes (just in case)
+        if (videoMap.isEmpty()) {
+            val simpleRegex = Regex("""https?://[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
+            simpleRegex.findAll(html).forEach { match ->
+                val url = match.value
+                if (url.isNotBlank() && !videoMap.containsKey(url)) {
+                    videoMap[url] = "Video ${index++}"
+                }
+            }
+        }
+
+        // Add each unique video as a separate source
         var found = false
-        videoMap.forEach { (title, url) ->
+        videoMap.forEach { (url, title) ->
             callback(
                 newExtractorLink(
                     source = "MRDS",
