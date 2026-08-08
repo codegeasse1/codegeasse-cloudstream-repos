@@ -35,7 +35,6 @@ class CoomerVideoProvider : MainAPI() {
 
         val isModelsPage = request.data.contains("/models/")
 
-        // Compiler safety fix: Replaced mapNotNull with a flat loop
         val items = mutableListOf<SearchResponse>()
         
         if (isModelsPage) {
@@ -102,7 +101,7 @@ class CoomerVideoProvider : MainAPI() {
             ?: linkEl.text().trim()
             ?: "Model"
 
-        // IMPORTANT: Return TvSeries so CloudStream knows to show the Episode List UI
+        // Returns TvSeries to show the Episode List UI
         return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
             this.posterUrl = poster
         }
@@ -115,7 +114,6 @@ class CoomerVideoProvider : MainAPI() {
         val searchUrl = "$mainUrl/search/$query/"
         val document = app.get(searchUrl).document
 
-        // Compiler safety fix: Replaced mapNotNull with flat loops
         val results = mutableListOf<SearchResponse>()
         
         for (element in document.select("div.vx-main-card, div.vx-card, a.vx-card-short")) {
@@ -159,7 +157,7 @@ class CoomerVideoProvider : MainAPI() {
             videoElements.forEachIndexed { index, el ->
                 val linkEl = el.selectFirst("a.vx-media") ?: el.takeIf { it.tagName() == "a" } ?: return@forEachIndexed
                 val videoHref = fixUrlNull(linkEl.attr("href")) ?: return@forEachIndexed
-                if (videoHref == url) return@forEachIndexed // Prevent infinite loops
+                if (videoHref == url) return@forEachIndexed
 
                 val imgEl = el.selectFirst("img")
                 val videoTitle = imgEl?.attr("alt")?.ifBlank { null }
@@ -223,7 +221,8 @@ class CoomerVideoProvider : MainAPI() {
         val mappedUrls = mutableSetOf<String>()
         val foundQualities = mutableSetOf<Int>()
 
-        fun extractStreams(sourceHtml: String, referer: String) {
+        // FIXED: Re-added 'suspend' keyword to properly handle CloudStream API async calls
+        suspend fun extractStreams(sourceHtml: String, referer: String) {
             val flashvarsRegex = Regex("""(?:video_url|video_alt_url\d*)\s*[:=]\s*['"](http[^'"]+)['"]""")
             val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4)[^'"]*)['"]""")
 
