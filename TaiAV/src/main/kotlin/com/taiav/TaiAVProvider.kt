@@ -64,7 +64,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE – exactly the links you extracted
+    // MAIN PAGE
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/cn/hots" to "Popular Videos",
@@ -83,7 +83,9 @@ class TaiAVProvider : MainAPI() {
                 val rawName = a.text().trim()
                 if (rawName.isBlank()) return@mapNotNull null
                 val translatedName = translateText(rawName, true) ?: rawName
-                newMovieSearchResponse(translatedName, href, TvType.NSFW) {
+                
+                // Return as TvSeries so CloudStream knows it contains multiple items
+                newTvSeriesSearchResponse(translatedName, href, TvType.NSFW) {
                     this.posterUrl = null
                 }
             }.distinctBy { it.url }
@@ -146,7 +148,7 @@ class TaiAVProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD (Detail Page)
+    // LOAD (Detail / Category Page)
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
@@ -155,27 +157,61 @@ class TaiAVProvider : MainAPI() {
         val rawTitle = document.selectFirst("h1.uk-h4")?.text() ?: "Video"
         val title = translateText(rawTitle, true) ?: rawTitle
 
-        var posterUrl = Regex("""poster:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
-        if (posterUrl.isNullOrBlank()) {
-            posterUrl = Regex(""""thumbnailUrl"\s*:\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
-        }
-        posterUrl = fixUrlNull(posterUrl)
+        // Check if this is a Category, Tag, or Search page displaying a grid of videos
+        val isDirectoryPage = url.contains("/category/") || url.contains("/tag/") || 
+                              (!url.contains("/video/") && document.select("div.movie-card").isNotEmpty())
 
-        val tagElements = document.select("a[href*=/cn/tag/]")
-        val rawTags = tagElements.map { it.text().trim() }.filter { it.isNotBlank() }
+        if (isDirectoryPage) {
+            val episodes = mutableListOf<Episode>()
+            val videoElements = document.select("div.movie-card")
 
-        val tagsList = if (rawTags.isNotEmpty()) {
-            val combinedTags = rawTags.joinToString(" ~ ")
-            val translatedCombinedTags = translateText(combinedTags, true) ?: combinedTags
-            translatedCombinedTags.split(" ~ ").map { it.trim() }
+            videoElements.forEachIndexed { index, el ->
+                val aTag = el.selectFirst("a") ?: return@forEachIndexed
+                val videoHref = fixUrlNull(aTag.attr("href")) ?: return@forEachIndexed
+                if (videoHref.isBlank() || videoHref == url) return@forEachIndexed
+
+                val img = el.selectFirst("img")
+                val rawVidTitle = img?.attr("alt")?.ifBlank { el.selectFirst(".movie-title")?.text() }?.trim() ?: "Video ${index + 1}"
+                val videoTitle = translateText(rawVidTitle, true) ?: rawVidTitle
+                val videoPoster = fixUrlNull(img?.attr("src"))
+
+                episodes.add(
+                    newEpisode(videoHref) {
+                        this.name = videoTitle
+                        this.episode = index + 1
+                        this.posterUrl = videoPoster
+                    }
+                )
+            }
+
+            return newTvSeriesLoadResponse(title, url, TvType.NSFW, episodes.distinctBy { it.data }) {
+                this.posterUrl = episodes.firstOrNull()?.posterUrl // Fallback to first video poster
+                this.plot = "Collection: $title"
+            }
         } else {
-            emptyList()
-        }
+            // Normal Single Video Page
+            var posterUrl = Regex("""poster:\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)
+            if (posterUrl.isNullOrBlank()) {
+                posterUrl = Regex(""""thumbnailUrl"\s*:\s*"([^"]+)"""").find(pageHtml)?.groupValues?.get(1)
+            }
+            posterUrl = fixUrlNull(posterUrl)
 
-        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            this.posterUrl = posterUrl
-            this.plot = title
-            this.tags = tagsList
+            val tagElements = document.select("a[href*=/cn/tag/]")
+            val rawTags = tagElements.map { it.text().trim() }.filter { it.isNotBlank() }
+
+            val tagsList = if (rawTags.isNotEmpty()) {
+                val combinedTags = rawTags.joinToString(" ~ ")
+                val translatedCombinedTags = translateText(combinedTags, true) ?: combinedTags
+                translatedCombinedTags.split(" ~ ").map { it.trim() }
+            } else {
+                emptyList()
+            }
+
+            return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+                this.posterUrl = posterUrl
+                this.plot = title
+                this.tags = tagsList
+            }
         }
     }
 
