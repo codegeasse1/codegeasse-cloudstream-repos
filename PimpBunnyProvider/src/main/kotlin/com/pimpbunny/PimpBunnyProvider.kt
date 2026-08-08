@@ -16,7 +16,6 @@ class PimpBunnyProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    // Added TvSeries to support Model Episode Lists
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
 
     private val headers = mapOf(
@@ -35,7 +34,7 @@ class PimpBunnyProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
-        "$mainUrl/onlyfans-creators/" to "Models", // Model Category added here
+        "$mainUrl/onlyfans-creators/" to "Models",
         "$mainUrl/categories/4k/" to "4K",
         "$mainUrl/categories/amateur/" to "Amateur",
         "$mainUrl/categories/anal/" to "Anal",
@@ -92,7 +91,6 @@ class PimpBunnyProvider : MainAPI() {
         val link = this.selectFirst("a[href*=/video]") ?: this.selectFirst("a") ?: return null
         val href = fixUrlNull(link.attr("href")) ?: return null
         
-        // Prevent models from being parsed as single videos
         if (href.contains("/categories/") || href.contains("/models/") || href.contains("/channels/") || href.contains("/onlyfans-creators/")) return null
         
         val img = this.selectFirst("img")
@@ -110,7 +108,7 @@ class PimpBunnyProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MODEL CARD PARSER (With strict blacklist filtering for fakes)
+    // MODEL CARD PARSER (With Strict Blacklist)
     // ---------------------------------------------------------------
     private fun parseModelItem(element: Element): SearchResponse? {
         val linkEl = element.selectFirst("a[href*=/models/], a[href*=/onlyfans-creators/], a[href*=/channels/]") 
@@ -118,7 +116,6 @@ class PimpBunnyProvider : MainAPI() {
             ?: return null
         val href = fixUrlNull(linkEl.attr("href")) ?: return null
 
-        // Filter out fake models (pagination buttons, sorting tabs, and root directories)
         val uriPath = href.substringAfter(mainUrl).substringBefore("?")
         if (uriPath == "/onlyfans-creators/" || uriPath == "/models/" || uriPath == "/channels/") return null
         if (href.contains("?sort_by=") || href.contains("?mode=")) return null
@@ -138,12 +135,10 @@ class PimpBunnyProvider : MainAPI() {
             ?: linkEl.text().trim()
             ?: "Model"
 
-        // Blacklist filtering for fake sorting buttons masquerading as models (e.g. "EN", "Most Viewed", "1", "2")
         val titleLow = title.lowercase()
         val blacklist = setOf("verified", "models", "all models", "open to collab", "collab", "alphabetical", "most viewed", "newest", "tr", "en", "es", "fr", "pt", "de", "it", "cn", "jp", "ru", "...", "next", "prev")
         if (blacklist.contains(titleLow) || titleLow.matches(Regex("""^\d+$"""))) return null
 
-        // Return as TvSeries to prompt the episode list
         return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
             this.posterUrl = fixUrlNull(poster)
         }
@@ -159,13 +154,11 @@ class PimpBunnyProvider : MainAPI() {
                          else "$mainUrl/search/$encodedQuery/$page/"
             val document = app.get(docUrl, headers = headers).document
             
-            // Collect standard videos
             val videoItems = mutableListOf<SearchResponse>()
             for (element in document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post")) {
                 element.toSearchResult()?.let { videoItems.add(it) }
             }
             
-            // Collect any models appearing in search
             val modelItems = mutableListOf<SearchResponse>()
             for (element in document.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post, a[href*=/onlyfans-creators/]")) {
                 parseModelItem(element)?.let { modelItems.add(it) }
@@ -185,7 +178,7 @@ class PimpBunnyProvider : MainAPI() {
         val isModelPage = url.contains("/models/") || url.contains("/onlyfans-creators/") || url.contains("/channels/") || url.contains("/channel/")
 
         // ---------------------------------------------------------------
-        // MODEL PAGE WITH PAGINATION LOOP (Scrapes all pages of videos)
+        // MODEL PAGE WITH FULL PAGINATION LOOP
         // ---------------------------------------------------------------
         if (isModelPage) {
             val modelTitle = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
@@ -204,15 +197,14 @@ class PimpBunnyProvider : MainAPI() {
             var currentUrl = url
             var pageCount = 1
 
-            // Scrape up to 50 pages of the model's videos (safely handles 500+ videos)
-            while (pageCount <= 50) {
+            // Scrape up to 20 pages (640 videos) automatically
+            while (pageCount <= 20) {
                 val videoElements = currentDoc.select("div.b6m-video, div.item, div.video-block, div.video-item, article.post")
                 
                 for (el in videoElements) {
                     val linkEl = el.selectFirst("a[href*=/video]") ?: el.selectFirst("a") ?: continue
                     val videoHref = fixUrlNull(linkEl.attr("href")) ?: continue
                     
-                    // Skip if the link points back to the model page itself to prevent loop
                     if (videoHref == currentUrl || videoHref.contains("/models/") || videoHref.contains("/onlyfans-creators/") || videoHref.contains("/categories/")) continue
 
                     val imgEl = el.selectFirst("img") ?: linkEl.selectFirst("img")
@@ -237,8 +229,14 @@ class PimpBunnyProvider : MainAPI() {
                     )
                 }
 
-                // Check for pagination next button
-                val nextBtn = currentDoc.selectFirst(".pagination a.next, .pagination li.next a, .page-next, a[rel=next], .pagination a:contains(Next)")
+                // Advanced Pagination Logic: Looks for "Next" OR the exact number of the next page
+                val nextBtn = currentDoc.select(".pagination a").firstOrNull {
+                    val text = it.text().trim().lowercase()
+                    it.hasClass("next") || it.parent()?.hasClass("next") == true || text.contains("next") || text == "»" || text == ">"
+                } ?: currentDoc.select(".pagination a").firstOrNull {
+                    it.text().trim() == (pageCount + 1).toString()
+                }
+
                 var nextHref = nextBtn?.attr("href")
 
                 if (nextHref.isNullOrBlank() || nextHref == "#" || nextHref.startsWith("javascript:")) {
@@ -250,7 +248,6 @@ class PimpBunnyProvider : MainAPI() {
 
                 if (nextHref.isNullOrBlank()) break
 
-                // Safely resolve the relative ?from=2 link against the current model's URL
                 val nextUrl = when {
                     nextHref.startsWith("http") -> nextHref
                     nextHref.startsWith("?") -> currentUrl.substringBefore("?") + nextHref
@@ -262,7 +259,6 @@ class PimpBunnyProvider : MainAPI() {
 
                 try {
                     currentUrl = nextUrl
-                    initSession() // Renew session cookies if necessary
                     currentDoc = app.get(currentUrl, headers = headers).document
                     pageCount++
                 } catch (e: Exception) {
@@ -270,7 +266,6 @@ class PimpBunnyProvider : MainAPI() {
                 }
             }
 
-            // Assign episode numbers cleanly
             val distinctEpisodes = episodes.distinctBy { it.data }.mapIndexed { index, ep ->
                 ep.apply { this.episode = index + 1 }
             }
@@ -282,7 +277,7 @@ class PimpBunnyProvider : MainAPI() {
         }
 
         // ---------------------------------------------------------------
-        // NORMAL SINGLE VIDEO PAGE (Original Logic)
+        // NORMAL SINGLE VIDEO PAGE
         // ---------------------------------------------------------------
         val title = document.selectFirst("title")?.text()?.substringBefore("-")?.trim()
             ?: document.selectFirst("h1, h2")?.text()?.trim() ?: "Video"
@@ -304,7 +299,25 @@ class PimpBunnyProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (GIF blocking and Full Quality Extraction)
+    // 302 REDIRECT RESOLVER (Fixes ExoPlayer Buffering Bug)
+    // ---------------------------------------------------------------
+    private suspend fun resolveIfRedirect(url: String, referer: String): String {
+        if (!url.contains("/get_file/")) return url
+        return try {
+            val response = app.get(url, headers = headers + mapOf("Referer" to referer), allowRedirects = false)
+            val location = response.headers["location"] ?: response.headers["Location"]
+            if (!location.isNullOrBlank()) {
+                if (location.startsWith("http")) location else mainUrl.trimEnd('/') + location
+            } else {
+                url
+            }
+        } catch (e: Exception) {
+            url
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -314,16 +327,19 @@ class PimpBunnyProvider : MainAPI() {
     ): Boolean {
         initSession()
         var found = false
-        val mainHtml = app.get(data, headers = headers).text
+        
+        // Use exact referer to fetch initial page properly
+        val reqHeaders = headers + mapOf("Referer" to "$mainUrl/")
+        val mainHtml = app.get(data, headers = reqHeaders).text
         val mappedUrls = mutableSetOf<String>()
 
         suspend fun searchForStream(html: String, referer: String) {
-            // General Regex that catches direct sources and get_file paths
+            // General Regex that catches direct sources
             val generalRegex = Regex("""['"](https?://[^'"]+?(?:/get_file/|\.mp4|\.m3u8)[^'"]*)['"]""")
             for (match in generalRegex.findAll(html)) {
                 val url = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
                 
-                // Block GIF and image previews masquerading as video sources
+                // Block GIF and image previews
                 if (url.endsWith(".gif", true) || url.contains(".gif?")) continue
                 if (url.contains(".jpg") || url.contains(".png")) continue
 
@@ -333,7 +349,10 @@ class PimpBunnyProvider : MainAPI() {
                     val qualityVal = getQualityFromString(qualityStr)
                     val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name M3U8" else "$name MP4"
 
-                    callback(newExtractorLink(name, sourceName, url, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                    // Resolve redirects before feeding to ExoPlayer to prevent buffering
+                    val finalUrl = resolveIfRedirect(url, referer)
+
+                    callback(newExtractorLink(name, sourceName, finalUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                         this.referer = referer
                         this.quality = qualityVal
                     })
@@ -346,7 +365,6 @@ class PimpBunnyProvider : MainAPI() {
             for (match in flashvarsRegex.findAll(html)) {
                 val rawUrl = match.groupValues[1].replace("&amp;", "&").replace("\\/", "/")
                 
-                // Block GIF previews
                 if (rawUrl.endsWith(".gif", true) || rawUrl.contains(".gif?")) continue
                 if (rawUrl.contains(".jpg") || rawUrl.contains(".png")) continue
 
@@ -356,7 +374,9 @@ class PimpBunnyProvider : MainAPI() {
                     val qualityVal = getQualityFromString(qualityStr)
                     val sourceName = if (qualityStr != "Unknown") "$name ${qualityStr}p" else if (isM3u8) "$name M3U8" else "$name MP4"
 
-                    callback(newExtractorLink(name, sourceName, rawUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                    val finalUrl = resolveIfRedirect(rawUrl, referer)
+
+                    callback(newExtractorLink(name, sourceName, finalUrl, if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                         this.referer = referer
                         this.quality = qualityVal
                     })
@@ -364,7 +384,7 @@ class PimpBunnyProvider : MainAPI() {
                 }
             }
 
-            // KVS Player JSON extraction (Loops to find EVERY quality available, no breaks)
+            // KVS Player JSON extraction (Loops to find EVERY quality available)
             val playerNames = listOf(
                 "player_aaaa", "player_data", "player_info", "player", "videoConfig",
                 "config", "playInfo", "playerConfig", "videoInfo"
@@ -376,7 +396,6 @@ class PimpBunnyProvider : MainAPI() {
                         val json = match.groupValues[1]
                         val encrypt = Regex("\"encrypt\"\\s*:\\s*(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                         
-                        // Regex matches url, video_url, video_alt_url, video_alt_url2, etc.
                         val urlMatches = Regex(""""(?:url|video_url|video_alt_url\d*)["']?\s*:\s*["']([^"']+)["']""").findAll(json)
                         
                         for (uMatch in urlMatches) {
@@ -389,7 +408,6 @@ class PimpBunnyProvider : MainAPI() {
                             
                             val cleanUrl = realUrl.replace("\\/", "/").replace("&amp;", "&")
                             
-                            // Block GIF previews
                             if (cleanUrl.endsWith(".gif", true) || cleanUrl.contains(".gif?")) continue
                             if (cleanUrl.contains(".jpg") || cleanUrl.contains(".png")) continue
                             
@@ -399,10 +417,12 @@ class PimpBunnyProvider : MainAPI() {
                                 val qualityVal = getQualityFromString(qualityStr)
                                 val sourceName = if (qualityStr != "Unknown") "Player ${qualityStr}p" else if (isM3u8) "Player M3U8" else "Player MP4"
 
+                                val finalUrl = resolveIfRedirect(cleanUrl, referer)
+
                                 callback(newExtractorLink(
                                     name, 
                                     sourceName, 
-                                    cleanUrl,
+                                    finalUrl,
                                     if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = referer
@@ -416,26 +436,9 @@ class PimpBunnyProvider : MainAPI() {
             }
         }
 
-        // 1. Search main page
         searchForStream(mainHtml, data)
 
-        // 2. Iframes
-        if (!found) {
-            val document = app.get(data, headers = headers).document
-            val iframes = document.select("iframe")
-            for (iframe in iframes) {
-                val src = iframe.attr("src")
-                if (src.isNotBlank() && src.startsWith("http")) {
-                    try {
-                        val iframeHtml = app.get(src, headers = headers + ("Referer" to data)).text
-                        searchForStream(iframeHtml, src)
-                        if (found) break
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-
-        // 3. API fallback (if a video_key parameter exists)
+        // API fallback if normal extraction fails
         if (!found && data.contains("video_key=")) {
             val videoKey = data.substringAfter("video_key=").substringBefore("&")
             val apiUrls = listOf(
@@ -451,7 +454,8 @@ class PimpBunnyProvider : MainAPI() {
                     if (urlMatch != null) {
                         val streamUrl = urlMatch.groupValues[1]
                         if (streamUrl.contains(".m3u8") && mappedUrls.add(streamUrl)) {
-                            callback(newExtractorLink(name, "API", streamUrl, ExtractorLinkType.M3U8) {
+                            val finalUrl = resolveIfRedirect(streamUrl, data)
+                            callback(newExtractorLink(name, "API", finalUrl, ExtractorLinkType.M3U8) {
                                 this.referer = data
                                 this.quality = Qualities.Unknown.value
                             })
@@ -468,7 +472,6 @@ class PimpBunnyProvider : MainAPI() {
 
     // ---------- Quality Parsing Helpers ----------
     private fun extractQualityFromUrl(url: String): String {
-        // Matches typical quality tags like "_1080p.mp4", "/720/", "-480p", etc.
         val qualityMatch = Regex("""(?i)(?:_|-|/)(\d{3,4})p?(?:\.mp4|/)""").find(url) 
             ?: Regex("""(?i)(\d{3,4})p""").find(url)
         return qualityMatch?.groupValues?.get(1) ?: "Unknown"
