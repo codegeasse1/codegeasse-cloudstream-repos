@@ -18,7 +18,7 @@ class MrdsProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.Anime, TvType.Others)
+    override val supportedTypes = setOf(TvType.Movie, TvType.Others)
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
@@ -88,7 +88,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // MAIN PAGE
+    // MAIN PAGE – all categories from the website
     // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -119,6 +119,7 @@ class MrdsProvider : MainAPI() {
         val url = if (page == 1) request.data else "${request.data}page/$page/"
         val document = app.get(url).document
 
+        // Skip ad-articles (class "ad-item") to avoid polluting the list
         val homeItems = document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
@@ -157,7 +158,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // SEARCH
+    // SEARCH (path-based pagination: /search/<term>/ / /page/N/)
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -217,28 +218,7 @@ class MrdsProvider : MainAPI() {
         val rawSynopsis = document.selectFirst(".post-content p, article p")?.text()
         val synopsis = translateToEnglish(rawSynopsis)
 
-        // Identify multi-part posts (like the 51CG example)
-        val rankingLinks = document.select(".post-content a.btn.btn-primary[href*=/archives/], .post-content a[href*=/archives/]")
-        if (rankingLinks.isNotEmpty()) {
-            val episodes = mutableListOf<Episode>()
-            for ((index, a) in rankingLinks.withIndex()) {
-                val link = fixUrlNull(a.attr("href")) ?: continue
-                val rawEpTitle = a.parent()?.previousElementSibling()?.text()?.trim() ?: a.text().trim()
-                val epTitle = translateToEnglish(rawEpTitle) ?: rawEpTitle
-                episodes.add(
-                    newEpisode(link) {
-                        this.name = epTitle
-                        this.episode = index + 1
-                    }
-                )
-            }
-            return newAnimeLoadResponse(title, url, TvType.Anime) {
-                this.posterUrl = poster
-                this.plot = synopsis ?: "Collection of ${episodes.size} videos"
-                addEpisodes(DubStatus.Subbed, episodes)
-            }
-        }
-
+        // Restored to return a standard Movie to prevent fake related-posts from appearing as Episodes
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = synopsis
@@ -246,7 +226,7 @@ class MrdsProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Exactly as provided)
+    // LOAD LINKS
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
