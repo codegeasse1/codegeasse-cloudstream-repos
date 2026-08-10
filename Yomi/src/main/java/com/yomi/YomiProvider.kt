@@ -16,12 +16,11 @@ class YomiProvider : MainAPI() {
 
     override val mainPage = mainPageOf(
         "TRENDING_DESC" to "Trending Now",
-        "POPULAR_DESC" to "All Time Popular",
+        "POPULARITY_DESC" to "All Time Popular",
         "SCORE_DESC" to "Top Rated",
         "START_DATE_DESC" to "New Releases"
     )
 
-    // FIXED: Accept a Map for variables and use the `json` parameter to send a proper JSON body.
     private suspend fun queryAnilist(query: String, variables: Map<String, Any> = emptyMap()): JSONObject {
         val payload = mapOf(
             "query" to query,
@@ -58,7 +57,6 @@ class YomiProvider : MainAPI() {
             }
         """.trimIndent()
 
-        // FIXED: Pass variables as a Map
         val variables = mapOf("sort" to listOf(request.data))
         val response = queryAnilist(query, variables)
         val mediaList = response.getJSONObject("Page").getJSONArray("media")
@@ -92,7 +90,6 @@ class YomiProvider : MainAPI() {
             }
         """.trimIndent()
 
-        // FIXED: Pass variables as a Map
         val variables = mapOf("search" to query)
         val response = queryAnilist(gql, variables)
         val mediaList = response.getJSONObject("Page").getJSONArray("media")
@@ -129,7 +126,6 @@ class YomiProvider : MainAPI() {
             }
         """.trimIndent()
 
-        // FIXED: Pass variables as a Map
         val variables = mapOf("id" to id)
         val response = queryAnilist(query, variables).getJSONObject("Media")
 
