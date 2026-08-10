@@ -184,17 +184,18 @@ class YomiProvider : MainAPI() {
                     val file = sources.getJSONObject(0).optString("file")
                     if (file.isNotBlank()) {
                         
-                        // Generates the link safely using the updated Cloudstream 3 standards
+                        // Generates the link safely using the updated Cloudstream 3 builder standards
                         callback(
                             newExtractorLink(
                                 source = name,
                                 name = "Megaplay ${type.uppercase()}",
                                 url = file,
-                                referer = "https://megaplay.buzz/",
-                                quality = Qualities.Unknown.value,
-                                type = if (file.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                                headers = mapOf("Referer" to "https://megaplay.buzz/")
-                            )
+                                type = if (file.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = "https://megaplay.buzz/"
+                                this.quality = Qualities.Unknown.value
+                                this.headers = mapOf("Referer" to "https://megaplay.buzz/")
+                            }
                         )
                         found = true
                     }
