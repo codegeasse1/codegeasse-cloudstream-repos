@@ -168,7 +168,7 @@ class YomiProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
+        override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -180,56 +180,75 @@ class YomiProvider : MainAPI() {
         val malId = splitData[0]
         val epNum = splitData[1]
 
-        if (malId == "0") return false
+        if (malId == "0") {
+            println("YOMI ERROR: malId is 0. Cannot fetch links without a valid MAL ID.")
+            return false
+        }
 
         var found = false
         val types = listOf("sub", "dub")
+        
+        // ADDED: The 5 servers to check. If Yomi uses different names on their website, 
+        // just change the names in this list to match exactly what the site uses!
+        val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload")
 
         for (type in types) {
-            try {
-                // Calls the hidden Yomi video provider directly
-                val apiRes = app.get("https://api.flikhub.net/megaplay?mal=$malId&ep=$epNum&type=$type").text
-                if (!apiRes.trim().startsWith("{")) continue
-
-                val json = JSONObject(apiRes)
-
-                val sources = json.optJSONArray("sources")
-                if (sources != null && sources.length() > 0) {
-                    val file = sources.getJSONObject(0).optString("file")
-                    if (file.isNotBlank()) {
-
-                        // Generates the link safely using the updated Cloudstream 3 builder standards
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "Megaplay ${type.uppercase()}",
-                                url = file,
-                                type = if (file.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = "https://megaplay.buzz/"
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf("Referer" to "https://megaplay.buzz/")
-                            }
+            for (server in servers) {
+                try {
+                    // Swapped the hardcoded "megaplay" for the dynamic $server variable
+                    val apiRes = app.get(
+                        "https://api.flikhub.net/$server?mal=$malId&ep=$epNum&type=$type",
+                        headers = mapOf(
+                            "Referer" to "$mainUrl/",
+                            "Origin" to mainUrl,
+                            "Accept" to "application/json"
                         )
-                        found = true
-                    }
-                }
+                    ).text
 
-                val subtitles = json.optJSONArray("subtitles")
-                if (subtitles != null) {
-                    for (i in 0 until subtitles.length()) {
-                        val sub = subtitles.getJSONObject(i)
-                        val subFile = sub.optString("file")
-                        val subLabel = sub.optString("label", "English")
-                        if (subFile.isNotBlank()) {
-                            subtitleCallback(newSubtitleFile(subLabel, subFile))
+                    if (!apiRes.trim().startsWith("{")) continue
+
+                    val json = JSONObject(apiRes)
+                    val sources = json.optJSONArray("sources")
+                    
+                    if (sources != null && sources.length() > 0) {
+                        val file = sources.getJSONObject(0).optString("file")
+                        if (file.isNotBlank()) {
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    // Capitalizes the server name for the UI (e.g., "Filemoon SUB")
+                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
+                                    url = file,
+                                    type = if (file.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    // Keep the referer general or base it on the server if needed
+                                    this.referer = "https://${server}.buzz/" 
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf("Referer" to "https://${server}.buzz/")
+                                }
+                            )
+                            found = true
                         }
                     }
+
+                    // Only grab subtitles once per type (sub/dub) so we don't get 5 duplicate subtitle tracks
+                    if (server == servers.first()) {
+                        val subtitles = json.optJSONArray("subtitles")
+                        if (subtitles != null) {
+                            for (i in 0 until subtitles.length()) {
+                                val sub = subtitles.getJSONObject(i)
+                                val subFile = sub.optString("file")
+                                val subLabel = sub.optString("label", "English")
+                                if (subFile.isNotBlank()) {
+                                    subtitleCallback(newSubtitleFile(subLabel, subFile))
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    println("YOMI SERVER ERROR ($server): ${e.message}")
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
         return found
     }
-}
