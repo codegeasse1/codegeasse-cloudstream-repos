@@ -21,13 +21,28 @@ class YomiProvider : MainAPI() {
         "START_DATE_DESC" to "New Releases"
     )
 
-    private suspend fun queryAnilist(query: String, variables: String = "{}"): JSONObject {
+    // FIXED: Accept a Map for variables and use the `json` parameter to send a proper JSON body.
+    private suspend fun queryAnilist(query: String, variables: Map<String, Any> = emptyMap()): JSONObject {
+        val payload = mapOf(
+            "query" to query,
+            "variables" to variables
+        )
+        
         val req = app.post(
             anilistApi,
             headers = mapOf("Content-Type" to "application/json", "Accept" to "application/json"),
-            data = mapOf("query" to query, "variables" to variables)
+            json = payload 
         )
-        return JSONObject(req.text).getJSONObject("data")
+        
+        val jsonResponse = JSONObject(req.text)
+        
+        // Safety check: Throw a readable error if Anilist rejects the query
+        if (jsonResponse.has("errors")) {
+            val errorMessage = jsonResponse.optJSONArray("errors")?.optJSONObject(0)?.optString("message") ?: "Unknown GraphQL Error"
+            throw ErrorLoadingException("Anilist Error: $errorMessage")
+        }
+        
+        return jsonResponse.getJSONObject("data")
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -43,10 +58,11 @@ class YomiProvider : MainAPI() {
             }
         """.trimIndent()
 
-        val variables = """{"sort": ["${request.data}"]}"""
+        // FIXED: Pass variables as a Map
+        val variables = mapOf("sort" to listOf(request.data))
         val response = queryAnilist(query, variables)
         val mediaList = response.getJSONObject("Page").getJSONArray("media")
-        
+
         val items = mutableListOf<SearchResponse>()
         for (i in 0 until mediaList.length()) {
             val media = mediaList.getJSONObject(i)
@@ -75,8 +91,9 @@ class YomiProvider : MainAPI() {
                 }
             }
         """.trimIndent()
-        
-        val variables = JSONObject().apply { put("search", query) }.toString()
+
+        // FIXED: Pass variables as a Map
+        val variables = mapOf("search" to query)
         val response = queryAnilist(gql, variables)
         val mediaList = response.getJSONObject("Page").getJSONArray("media")
 
@@ -97,7 +114,7 @@ class YomiProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val id = url.substringAfterLast("/").toIntOrNull() ?: throw ErrorLoadingException("Invalid ID")
-        
+
         val query = """
             query(${'$'}id: Int) {
                 Media(id: ${'$'}id) {
@@ -112,14 +129,15 @@ class YomiProvider : MainAPI() {
             }
         """.trimIndent()
 
-        val variables = """{"id": $id}"""
+        // FIXED: Pass variables as a Map
+        val variables = mapOf("id" to id)
         val response = queryAnilist(query, variables).getJSONObject("Media")
-        
+
         val titleObj = response.getJSONObject("title")
         val title = titleObj.optString("english").ifBlank { titleObj.optString("romaji") }.ifBlank { titleObj.optString("userPreferred") }
         val poster = response.getJSONObject("coverImage").optString("extraLarge")
         val plot = response.optString("description")
-        
+
         val genres = mutableListOf<String>()
         val genresArr = response.optJSONArray("genres")
         if (genresArr != null) {
@@ -127,7 +145,7 @@ class YomiProvider : MainAPI() {
         }
 
         val malId = response.optInt("idMal", 0)
-        
+
         var maxEp = try {
             if (!response.isNull("nextAiringEpisode")) {
                 response.getJSONObject("nextAiringEpisode").getInt("episode") - 1
@@ -135,7 +153,7 @@ class YomiProvider : MainAPI() {
                 response.optInt("episodes", 0)
             }
         } catch (e: Exception) { 0 }
-        
+
         if (maxEp == 0) maxEp = 1 // Fallback in case of Anilist 0-episode ghosting
 
         val episodes = mutableListOf<Episode>()
@@ -162,10 +180,10 @@ class YomiProvider : MainAPI() {
     ): Boolean {
         val splitData = data.split("|")
         if (splitData.size < 2) return false
-        
+
         val malId = splitData[0]
         val epNum = splitData[1]
-        
+
         if (malId == "0") return false
 
         var found = false
@@ -176,14 +194,14 @@ class YomiProvider : MainAPI() {
                 // Calls the hidden Yomi video provider directly
                 val apiRes = app.get("https://api.flikhub.net/megaplay?mal=$malId&ep=$epNum&type=$type").text
                 if (!apiRes.trim().startsWith("{")) continue
-                
+
                 val json = JSONObject(apiRes)
-                
+
                 val sources = json.optJSONArray("sources")
                 if (sources != null && sources.length() > 0) {
                     val file = sources.getJSONObject(0).optString("file")
                     if (file.isNotBlank()) {
-                        
+
                         // Generates the link safely using the updated Cloudstream 3 builder standards
                         callback(
                             newExtractorLink(
