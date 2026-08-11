@@ -31,7 +31,7 @@ class AnimeKhorProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else request.data.replace("?", "page/$page/?")
         val document = app.get(url).document
-        val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
+        val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
         return newHomePageResponse(request.name, home)
     }
 
@@ -60,7 +60,7 @@ class AnimeKhorProvider : MainAPI() {
     // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
-        return document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }
+        return document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
     }
 
     // ---------------------------------------------------------------
@@ -95,7 +95,6 @@ class AnimeKhorProvider : MainAPI() {
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 
-                // Safely handles "14 END" texts to pull just the number
                 val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
@@ -152,7 +151,7 @@ class AnimeKhorProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Fully Tuned for All 10 Servers)
+    // LOAD LINKS (Supports All 10 Servers)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -180,7 +179,7 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-        // 1. Decode all dropdown mirrors from select.mirror
+        // 1. Extract all dropdown mirrors from select.mirror
         document.select("select.mirror option[value]").forEach { element ->
             val value = element.attr("value").trim()
             val label = element.text().trim().ifBlank { "Server" }
@@ -205,161 +204,130 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-        // 2. Extract visible iframes and player divs
+        // 2. Extract visible iframes
         document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe").forEach { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") }
             addEmbed(src, "Default Player")
         }
 
-        // 3. Process all unique embed sources
+        // 3. Process all extracted server links
         for ((embedUrl, serverLabel) in embedLinks) {
             try {
-                // A. Dailymotion
-                if (embedUrl.contains("dailymotion.com") || embedUrl.contains("geo.dailymotion")) {
-                    val vid = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
-                    if (vid != null) {
-                        val tempLinks = mutableListOf<ExtractorLink>()
-                        if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback) { tempLinks.add(it) }) {
-                            found = true
-                            for (link in tempLinks) {
-                                callback(
-                                    newExtractorLink(
-                                        source = link.source.ifBlank { name },
-                                        name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
-                                        url = link.url,
-                                        type = link.type
-                                    ) {
-                                        this.quality = link.quality
-                                        this.headers = siteHeaders
-                                        this.extractorData = link.extractorData
-                                        this.referer = link.referer.ifBlank { data }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    continue
-                }
-
-                // B. Native Cloudstream Extractors
-                val tempLinks = mutableListOf<ExtractorLink>()
-                if (loadExtractor(embedUrl, data, subtitleCallback) { tempLinks.add(it) }) {
+                // A. Try Native Cloudstream Extractors First (ok.ru, Turbovid, etc.)
+                if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
                     found = true
-                    for (link in tempLinks) {
-                        callback(
-                            newExtractorLink(
-                                source = link.source.ifBlank { name },
-                                name = if (serverLabel.isNotBlank() && !serverLabel.contains("Default")) "$serverLabel (${link.name})" else link.name,
-                                url = link.url,
-                                type = link.type
-                            ) {
-                                this.quality = link.quality
-                                this.headers = siteHeaders
-                                this.extractorData = link.extractorData
-                                this.referer = link.referer.ifBlank { embedUrl }
-                            }
-                        )
-                    }
                     continue
                 }
 
-                // C. AnimeKhor Multi-Player / Custom Proxy Servers
-                val res = app.get(embedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT))
-                val pageText = res.text
-                val pageDoc = res.document
-
-                // Extract Subtitles
-                pageDoc.select("track").forEach { track ->
-                    val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
-                    val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "Subtitle" }
-                    val subUrl = fixRelativeUrl(trackSrc, embedUrl)
-                    if (!subUrl.isNullOrBlank()) {
-                        subtitleCallback(newSubtitleFile(label, subUrl))
+                // B. Dailymotion Handler
+                if (embedUrl.contains("dailymotion.com") || embedUrl.contains("geo.dailymotion")) {
+                    val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                    if (vidId != null) {
+                        if (loadExtractor("https://www.dailymotion.com/video/$vidId", data, subtitleCallback, callback)) {
+                            found = true
+                            continue
+                        }
+                        try {
+                            val metaJson = app.get("https://www.dailymotion.com/player/metadata/video/$vidId").text
+                            val m3u8Url = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(metaJson)?.value
+                            if (!m3u8Url.isNullOrBlank()) {
+                                M3u8Helper.generateM3u8(serverLabel, m3u8Url, "https://www.dailymotion.com/", headers = siteHeaders).forEach { link ->
+                                    callback(link)
+                                    found = true
+                                }
+                                continue
+                            }
+                        } catch (e: Exception) {}
                     }
                 }
 
-                // Extract Video Streams
-                var customFound = false
-                pageDoc.select("source").forEach { source ->
-                    val streamUrl = fixRelativeUrl(source.attr("src"), embedUrl)
+                // C. Rumble Handler
+                if (embedUrl.contains("rumble.com")) {
+                    try {
+                        val html = app.get(embedUrl).text
+                        val m3u8Url = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
+                        if (!m3u8Url.isNullOrBlank()) {
+                            M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                                callback(link)
+                                found = true
+                            }
+                            continue
+                        }
+                    } catch (e: Exception) {}
+                }
+
+                // D. D.Tube Handler
+                if (embedUrl.contains("d.tube")) {
+                    val vidId = Regex("""v=([a-zA-Z0-9-]+)""").find(embedUrl)?.groupValues?.get(1) 
+                        ?: embedUrl.substringAfter("/videos/").substringBefore("/")
+                    if (vidId.isNotBlank()) {
+                        val m3u8Url = "https://nas2.d.tube/videos/$vidId/master.m3u8"
+                        M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                            callback(link)
+                            found = true
+                        }
+                        continue
+                    }
+                }
+
+                // E. UPNS / CloudPlayer Handler
+                if (embedUrl.contains("upns.live")) {
+                    val id = embedUrl.substringAfterLast("/").substringAfter("#")
+                    val apiUrl = "https://animekhor.upns.live/api/v1/video?id=$id&w=1280&h=800&r=animekhor.org"
+                    try {
+                        val apiText = app.get(apiUrl, headers = siteHeaders).text
+                        val m3u8Url = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiText)?.value
+                        if (!m3u8Url.isNullOrBlank()) {
+                            M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                                callback(link)
+                                found = true
+                            }
+                            continue
+                        }
+                    } catch (e: Exception) {}
+                }
+
+                // F. P2PStream / FilePlayer Handler
+                if (embedUrl.contains("p2pstream.vip")) {
+                    val id = embedUrl.substringAfterLast("/").substringAfter("#")
+                    val apiUrl = "https://animekhor.p2pstream.vip/api/v1/video?id=$id&w=1280&h=800&r=animekhor.org"
+                    try {
+                        val apiText = app.get(apiUrl, headers = siteHeaders).text
+                        val m3u8Url = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiText)?.value
+                        if (!m3u8Url.isNullOrBlank()) {
+                            M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                                callback(link)
+                                found = true
+                            }
+                            continue
+                        }
+                    } catch (e: Exception) {}
+                }
+
+                // G. General Embed Scraper (VGPlayer, AbyssPlayer, Turbovid, etc.)
+                try {
+                    val embedRes = app.get(embedUrl, headers = siteHeaders)
+                    val embedHtml = embedRes.text
+                    val doc = embedRes.document
+
+                    // Rip Subtitles
+                    doc.select("track").forEach { track ->
+                        val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
+                        val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "English" }
+                        val subUrl = fixRelativeUrl(trackSrc, embedUrl)
+                        if (!subUrl.isNullOrBlank()) {
+                            subtitleCallback(newSubtitleFile(label, subUrl))
+                        }
+                    }
+
+                    val streamUrl = Regex("""https?://[^\s"'<>]+?(?:\.m3u8|\.txt|playlist\.m3u8|master\.m3u8)(?:\?[^\s"'<>]*)?""").find(embedHtml)?.value
                     if (!streamUrl.isNullOrBlank()) {
-                        val isM3u8 = streamUrl.contains(".m3u8", true) || streamUrl.contains(".txt", true) || source.attr("type").contains("mpegurl", true)
-                        if (isM3u8) {
-                            M3u8Helper.generateM3u8(name, streamUrl, embedUrl, headers = siteHeaders).forEach { link ->
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "$serverLabel (HLS)",
-                                        url = link.url,
-                                        type = ExtractorLinkType.M3U8
-                                    ) {
-                                        this.quality = link.quality
-                                        this.headers = siteHeaders
-                                        this.referer = embedUrl
-                                    }
-                                )
-                                customFound = true
-                            }
-                        } else {
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$serverLabel (MP4)",
-                                    url = streamUrl,
-                                    type = ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = siteHeaders
-                                    this.referer = embedUrl
-                                }
-                            )
-                            customFound = true
+                        M3u8Helper.generateM3u8(serverLabel, streamUrl, embedUrl, headers = siteHeaders).forEach { link ->
+                            callback(link)
+                            found = true
                         }
                     }
-                }
-
-                // Regex Fallback
-                if (!customFound) {
-                    val streamMatches = Regex("""https?://[^\s"'<>]+?(?:\.m3u8|\.mp4|\.txt|playlist\.m3u8|master\.m3u8)(?:\?[^\s"'<>]*)?""")
-                        .findAll(pageText).map { it.value.replace("\\/", "/") }.distinct().toList()
-
-                    for (streamUrl in streamMatches) {
-                        val isM3u8 = streamUrl.contains(".m3u8", true) || streamUrl.contains(".txt", true)
-                        if (isM3u8) {
-                            M3u8Helper.generateM3u8(name, streamUrl, embedUrl, headers = siteHeaders).forEach { link ->
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "$serverLabel (HLS)",
-                                        url = link.url,
-                                        type = ExtractorLinkType.M3U8
-                                    ) {
-                                        this.quality = link.quality
-                                        this.headers = siteHeaders
-                                        this.referer = embedUrl
-                                    }
-                                )
-                                customFound = true
-                            }
-                        } else {
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$serverLabel (Direct)",
-                                    url = streamUrl,
-                                    type = ExtractorLinkType.VIDEO
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = siteHeaders
-                                    this.referer = embedUrl
-                                }
-                            )
-                            customFound = true
-                        }
-                    }
-                }
-
-                if (customFound) found = true
+                } catch (e: Exception) {}
 
             } catch (e: Exception) {
                 e.printStackTrace()
