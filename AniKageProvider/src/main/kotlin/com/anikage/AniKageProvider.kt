@@ -2,7 +2,6 @@ package com.anikage
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.delay
 import org.jsoup.Jsoup
 
 class AniKageProvider : MainAPI() {
@@ -321,7 +320,6 @@ class AniKageProvider : MainAPI() {
                             break
                         } catch (e: Exception) {
                             retries++
-                            if (retries < 3) delay(400)
                         }
                     }
 
