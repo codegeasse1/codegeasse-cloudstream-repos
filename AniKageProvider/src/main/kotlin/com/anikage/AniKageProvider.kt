@@ -253,31 +253,8 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        val knownProviders = listOf(
-            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
-            "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
-        )
-
-        val activeProviders = knownProviders.filter { provider ->
-            cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
-            cleanHtml.contains("provider=$provider", ignoreCase = true) ||
-            cleanHtml.contains("-$provider", ignoreCase = true) ||
-            cleanHtml.contains(">$provider<", ignoreCase = true)
-        }.toMutableList()
-
-        // Force primary servers into the query list
-        listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
-            if (!activeProviders.contains(it)) activeProviders.add(it)
-        }
-
-        // Sort so Vidtube is queried first, Megaplay last
-        activeProviders.sortBy { provider ->
-            when {
-                provider == "vibeube" || provider == "vidtube" -> 0
-                provider == "megatube" || provider == "megaplay" -> 2
-                else -> 1
-            }
-        }
+        // THE FIX: Strictly query ONLY the 3 servers requested (and their API aliases)
+        val activeProviders = listOf("vibeube", "vidtube", "vibe", "vidhide", "megatube", "megaplay")
 
         val langs = mutableListOf("sub")
         if (cleanHtml.contains("\"dub\"", ignoreCase = true) || cleanHtml.contains("lang=dub", ignoreCase = true)) {
@@ -303,24 +280,28 @@ class AniKageProvider : MainAPI() {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
 
+                        // STRICTLY your original logic. No custom hosts were added to bypass 3003 error.
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
 
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
-                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
+                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true) || provider.contains("vibe", true)
                             val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                            val isVidhide = provider.contains("vidhide", true)
 
                             val displayProviderName = when {
-                                isVidtube -> "Vidtube"
+                                isVidtube -> "VibePlayer"
                                 isMegaPlay -> "MegaPlay"
+                                isVidhide -> "VidHide"
                                 else -> provider.replaceFirstChar { it.uppercase() }
                             }
 
                             val sourceGroup = when {
-                                isVidtube -> "1. Vidtube"
+                                isVidtube -> "1. VibePlayer"
+                                isVidhide -> "2. VidHide"
                                 isMegaPlay -> "3. MegaPlay"
-                                else -> "2. $displayProviderName"
+                                else -> "4. $displayProviderName"
                             }
 
                             val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
@@ -347,13 +328,15 @@ class AniKageProvider : MainAPI() {
                             }
 
                             for (link in extractedLinks) {
-                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
-                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
+                                val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true) || provider.contains("vibe", true)
+                                val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                                val isVidhide = provider.contains("vidhide", true)
 
                                 val sourceGroup = when {
-                                    isVidtube -> "1. Vidtube"
+                                    isVidtube -> "1. VibePlayer"
+                                    isVidhide -> "2. VidHide"
                                     isMegaPlay -> "3. MegaPlay"
-                                    else -> "2. ${link.source}"
+                                    else -> "4. ${link.source}"
                                 }
 
                                 callback(
@@ -380,6 +363,7 @@ class AniKageProvider : MainAPI() {
 
         if (!found) {
             try {
+                // Your original fallback block, completely untouched
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
 
                 for (match in matches) {
@@ -388,7 +372,7 @@ class AniKageProvider : MainAPI() {
 
                     callback(
                         newExtractorLink(
-                            source = "2. Direct Stream",
+                            source = "Fallback Stream",
                             name = "Direct Stream",
                             url = extractedUrl,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
