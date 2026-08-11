@@ -3,6 +3,7 @@ package com.yomi
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
+import java.net.URLDecoder
 
 class YomiProvider : MainAPI() {
     override var mainUrl = "https://yomi.to"
@@ -26,20 +27,20 @@ class YomiProvider : MainAPI() {
             "query" to query,
             "variables" to variables
         )
-        
+
         val req = app.post(
             anilistApi,
             headers = mapOf("Content-Type" to "application/json", "Accept" to "application/json"),
-            json = payload 
+            json = payload
         )
-        
+
         val jsonResponse = JSONObject(req.text)
-        
+
         if (jsonResponse.has("errors")) {
             val errorMessage = jsonResponse.optJSONArray("errors")?.optJSONObject(0)?.optString("message") ?: "Unknown GraphQL Error"
             throw ErrorLoadingException("Anilist Error: $errorMessage")
         }
-        
+
         return jsonResponse.getJSONObject("data")
     }
 
@@ -149,7 +150,7 @@ class YomiProvider : MainAPI() {
             }
         } catch (e: Exception) { 0 }
 
-        if (maxEp == 0) maxEp = 1 
+        if (maxEp == 0) maxEp = 1
 
         val episodes = mutableListOf<Episode>()
         for (i in 1..maxEp) {
@@ -164,6 +165,22 @@ class YomiProvider : MainAPI() {
             this.plot = plot
             this.tags = genres
             addEpisodes(DubStatus.Subbed, episodes)
+        }
+    }
+
+    // Some proxy URLs (m3u8-proxy, /fetch, /proxy on lemon.anixx.cloud,
+    // proxy.flikhub.net, upcloud.animanga.fun, etc.) carry their own correct
+    // Referer/Origin as a "headers=" JSON query param — confirmed from real
+    // captured links. Using a hardcoded "${server}.buzz" referer instead of
+    // this embedded one is why previously-valid stream URLs were rejected.
+    private fun extractRefererFromProxyUrl(url: String, fallback: String): String {
+        val headersParam = Regex("""[?&]headers=([^&]+)""").find(url)?.groupValues?.get(1) ?: return fallback
+        return try {
+            val decoded = URLDecoder.decode(headersParam, "UTF-8")
+            val json = JSONObject(decoded)
+            json.optString("Referer", json.optString("referer", fallback))
+        } catch (e: Exception) {
+            fallback
         }
     }
 
@@ -184,10 +201,36 @@ class YomiProvider : MainAPI() {
         var found = false
         val types = listOf("sub", "dub")
         val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload", "vidplay")
-        
-        // We will test multiple known backend domains in case one is blocked by Cloudflare
-        val apiDomains = listOf("api.flikhub.net", "api.yenime.net", "api.animanga.fun")
+
+        // "upcloud.animanga.fun" added — confirmed via captured proxy traffic
+        // as a real working domain, distinct from the originally-guessed
+        // "api.animanga.fun". Kept both since it's unconfirmed which one (if
+        // either) is the actual query entry point vs. just a downstream proxy.
+        val apiDomains = listOf("api.flikhub.net", "api.yenime.net", "api.animanga.fun", "upcloud.animanga.fun")
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+        // Emits a link with the correct referer pulled from its own "headers="
+        // param when present, falling back to the server-guessed referer.
+        suspend fun addProxyAwareLink(fileUrl: String, label: String, fallbackReferer: String) {
+            if (fileUrl.isBlank() || fileUrl.startsWith("blob:")) return // dead end, never fetchable
+            val realReferer = extractRefererFromProxyUrl(fileUrl, fallbackReferer)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = label,
+                    url = fileUrl,
+                    type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = realReferer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf(
+                        "Referer" to realReferer,
+                        "User-Agent" to userAgent
+                    )
+                }
+            )
+            found = true
+        }
 
         for (type in types) {
             for (server in servers) {
@@ -202,44 +245,30 @@ class YomiProvider : MainAPI() {
                                 "User-Agent" to userAgent
                             )
                         )
-                        
-                        // Strategy 1: Check for a Server Redirect 
-                        // (e.g. if api.flikhub.net redirects you straight to megaplay.buzz)
-                        if (req.url != apiUrl && req.url.startsWith("http")) {
+
+                        // Strategy 1: Redirect straight to a playable host
+                        if (req.url != apiUrl && req.url.startsWith("http") && !req.url.startsWith("blob:")) {
                             if (loadExtractor(req.url, "$mainUrl/", subtitleCallback, callback)) {
                                 found = true
-                                break // Stop checking domains, move to the next server
+                                break
                             }
                         }
 
                         val apiRes = req.text
 
-                        // Strategy 2: Check for standard JSON Response
+                        // Strategy 2: Standard JSON Response
                         if (apiRes.trim().startsWith("{")) {
                             val json = JSONObject(apiRes)
                             val sources = json.optJSONArray("sources")
-                            
+
                             if (sources != null && sources.length() > 0) {
                                 for (i in 0 until sources.length()) {
                                     val fileUrl = sources.getJSONObject(i).optString("file")
-                                    if (fileUrl.isNotBlank()) {
-                                        callback(
-                                            newExtractorLink(
-                                                source = name,
-                                                name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                                url = fileUrl,
-                                                type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                            ) {
-                                                this.referer = "https://${server}.buzz/"
-                                                this.quality = Qualities.Unknown.value
-                                                this.headers = mapOf(
-                                                    "Referer" to "https://${server}.buzz/",
-                                                    "User-Agent" to userAgent
-                                                )
-                                            }
-                                        )
-                                        found = true
-                                    }
+                                    addProxyAwareLink(
+                                        fileUrl,
+                                        "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
+                                        "https://${server}.buzz/"
+                                    )
                                 }
                             }
 
@@ -248,52 +277,44 @@ class YomiProvider : MainAPI() {
                                 for (i in 0 until subtitles.length()) {
                                     val subFile = subtitles.getJSONObject(i).optString("file")
                                     val subLabel = subtitles.getJSONObject(i).optString("label", "English")
-                                    if (subFile.isNotBlank()) subtitleCallback(newSubtitleFile(subLabel, subFile))
+                                    if (subFile.isNotBlank() && !subFile.startsWith("blob:")) {
+                                        subtitleCallback(newSubtitleFile(subLabel, subFile))
+                                    }
                                 }
                             }
-                            
-                            if (found) break 
+
+                            if (found) break
                         }
 
-                        // Strategy 3: Check for an iFrame hiding inside HTML
+                        // Strategy 3: iFrame hiding inside HTML
                         val iframeRegex = Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""")
                         val iframeUrl = iframeRegex.find(apiRes)?.groupValues?.get(1)
-                        if (iframeUrl != null) {
+                        if (iframeUrl != null && !iframeUrl.startsWith("blob:")) {
                             if (loadExtractor(iframeUrl, apiUrl, subtitleCallback, callback)) {
                                 found = true
                                 break
                             }
                         }
 
-                        // Strategy 4: Raw Regex extraction for Proxy links and direct M3U8 files
+                        // Strategy 4: Raw regex extraction — skips blob: explicitly
                         val urlRegex = Regex("""https?://[^\s"'<>\\]+""")
                         val extractedUrls = urlRegex.findAll(apiRes).map { it.value.replace("\\/", "/") }.distinct().toList()
 
                         for (url in extractedUrls) {
                             if (url.contains("w3.org") || url.contains("googleapis") || url.endsWith(".js") || url.endsWith(".css")) continue
+                            if (url.startsWith("blob:")) continue
 
                             if (loadExtractor(url, apiUrl, subtitleCallback, callback)) {
                                 found = true
                                 continue
                             }
 
-                            if (url.contains(".m3u8") || url.contains(".mp4") || url.contains("proxy")) {
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Raw)",
-                                        url = url,
-                                        type = if (url.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.referer = "https://${server}.buzz/"
-                                        this.quality = Qualities.Unknown.value
-                                        this.headers = mapOf(
-                                            "Referer" to "https://${server}.buzz/",
-                                            "User-Agent" to userAgent
-                                        )
-                                    }
+                            if (url.contains(".m3u8") || url.contains(".mp4") || url.contains("proxy") || url.contains("m3u8-proxy") || url.contains("/fetch")) {
+                                addProxyAwareLink(
+                                    url,
+                                    "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Raw)",
+                                    "https://${server}.buzz/"
                                 )
-                                found = true
                             }
                         }
 
@@ -302,20 +323,13 @@ class YomiProvider : MainAPI() {
                         for (b64 in base64Regex.findAll(apiRes)) {
                             try {
                                 val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
-                                if (decoded.startsWith("http")) {
+                                if (decoded.startsWith("http") && !decoded.startsWith("blob:")) {
                                     if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                        callback(
-                                            newExtractorLink(
-                                                source = name,
-                                                name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
-                                                url = decoded,
-                                                type = if (decoded.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                            ) {
-                                                this.referer = "https://${server}.buzz/"
-                                                this.quality = Qualities.Unknown.value
-                                            }
+                                        addProxyAwareLink(
+                                            decoded,
+                                            "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
+                                            "https://${server}.buzz/"
                                         )
-                                        found = true
                                     } else {
                                         if (loadExtractor(decoded, apiUrl, subtitleCallback, callback)) found = true
                                     }
@@ -323,10 +337,10 @@ class YomiProvider : MainAPI() {
                             } catch (e: Exception) {}
                         }
 
-                        if (found) break 
-                        
+                        if (found) break
+
                     } catch (e: Exception) {
-                        // The server threw a 403 or 404 block. Ignore it and let the loop try the next domain.
+                        // Domain likely blocked/404'd — move on to the next domain guess
                     }
                 }
             }
