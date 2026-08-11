@@ -187,59 +187,71 @@ class YomiProvider : MainAPI() {
 
         var found = false
         val types = listOf("sub", "dub")
-        
-        // ADDED: The 5 servers to check. If Yomi uses different names on their website, 
-        // just change the names in this list to match exactly what the site uses!
         val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload")
 
         for (type in types) {
             for (server in servers) {
                 try {
-                    // Swapped the hardcoded "megaplay" for the dynamic $server variable
+                    // ADDED: Strict User-Agent to bypass server blocks
                     val apiRes = app.get(
                         "https://api.flikhub.net/$server?mal=$malId&ep=$epNum&type=$type",
                         headers = mapOf(
                             "Referer" to "$mainUrl/",
                             "Origin" to mainUrl,
-                            "Accept" to "application/json"
+                            "Accept" to "application/json",
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
                         )
                     ).text
 
+                    // If the API blocks us (returns HTML instead of JSON), skip to the next server
                     if (!apiRes.trim().startsWith("{")) continue
 
                     val json = JSONObject(apiRes)
                     val sources = json.optJSONArray("sources")
                     
                     if (sources != null && sources.length() > 0) {
-                        val file = sources.getJSONObject(0).optString("file")
-                        if (file.isNotBlank()) {
+                        var fileUrl = sources.getJSONObject(0).optString("file")
+                        
+                        if (fileUrl.isNotBlank()) {
+                            // ADDED: If the API returns a proxy wrapper, extract the direct m3u8 link
+                            if (fileUrl.contains("url=")) {
+                                val extracted = fileUrl.substringAfter("url=").substringBefore("&")
+                                fileUrl = java.net.URLDecoder.decode(extracted, "UTF-8")
+                            }
+
                             callback(
                                 newExtractorLink(
                                     source = name,
-                                    // Capitalizes the server name for the UI (e.g., "Filemoon SUB")
                                     name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                    url = file,
-                                    type = if (file.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    url = fileUrl,
+                                    type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    // Keep the referer general or base it on the server if needed
                                     this.referer = "https://${server}.buzz/" 
                                     this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("Referer" to "https://${server}.buzz/")
+                                    this.headers = mapOf(
+                                        "Referer" to "https://${server}.buzz/",
+                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
+                                    )
                                 }
                             )
                             found = true
                         }
                     }
 
-                    // Only grab subtitles once per type (sub/dub) so we don't get 5 duplicate subtitle tracks
                     if (server == servers.first()) {
                         val subtitles = json.optJSONArray("subtitles")
                         if (subtitles != null) {
                             for (i in 0 until subtitles.length()) {
                                 val sub = subtitles.getJSONObject(i)
-                                val subFile = sub.optString("file")
+                                var subFile = sub.optString("file")
                                 val subLabel = sub.optString("label", "English")
+                                
                                 if (subFile.isNotBlank()) {
+                                    // Extract direct subtitle URL if proxied
+                                    if (subFile.contains("url=")) {
+                                        val extractedSub = subFile.substringAfter("url=").substringBefore("&")
+                                        subFile = java.net.URLDecoder.decode(extractedSub, "UTF-8")
+                                    }
                                     subtitleCallback(newSubtitleFile(subLabel, subFile))
                                 }
                             }
@@ -252,4 +264,4 @@ class YomiProvider : MainAPI() {
         }
         return found
     }
-} 
+)
