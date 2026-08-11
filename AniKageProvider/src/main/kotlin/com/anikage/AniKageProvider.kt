@@ -3,7 +3,6 @@ package com.anikage
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
-import kotlinx.coroutines.delay
 
 class AniKageProvider : MainAPI() {
     override var mainUrl = "https://anikage.cc"
@@ -203,7 +202,6 @@ class AniKageProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
-        // FIXED: Dynamically check nextAiringEpisode to prevent generating future/unaired episodes
         var limit = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
         if (limit <= 0) {
             val nextAiring = Regex("""nextAiringEpisode\s*:\s*\{[^}]*?episode\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
@@ -252,7 +250,6 @@ class AniKageProvider : MainAPI() {
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        // FIXED: Extract Direct links from HTML first (Includes the new gg.akage.lol host)
         try {
             val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|akage\.lol|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
 
@@ -309,13 +306,12 @@ class AniKageProvider : MainAPI() {
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            // FIXED: Cap the loop to the top 6 providers to prevent AniKage from Rate Limiting / IP Banning the connection
             for (provider in activeProviders.take(6)) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    // FIXED: Add a small delay so the API doesn't trip Cloudflare bot protection
-                    delay(250)
+                    // Safe thread sleep to bypass SvelteKit rate limits
+                    Thread.sleep(250)
                     
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
@@ -324,7 +320,6 @@ class AniKageProvider : MainAPI() {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
 
-                        // Added akage.lol to the known hosts check
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("akage.lol") || cleanUrl.contains("workers.dev")
