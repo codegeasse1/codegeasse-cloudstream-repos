@@ -168,11 +168,6 @@ class YomiProvider : MainAPI() {
         }
     }
 
-    // Some proxy URLs (m3u8-proxy, /fetch, /proxy on lemon.anixx.cloud,
-    // proxy.flikhub.net, upcloud.animanga.fun, etc.) carry their own correct
-    // Referer/Origin as a "headers=" JSON query param — confirmed from real
-    // captured links. Using a hardcoded "${server}.buzz" referer instead of
-    // this embedded one is why previously-valid stream URLs were rejected.
     private fun extractRefererFromProxyUrl(url: String, fallback: String): String {
         val headersParam = Regex("""[?&]headers=([^&]+)""").find(url)?.groupValues?.get(1) ?: return fallback
         return try {
@@ -201,28 +196,24 @@ class YomiProvider : MainAPI() {
         var found = false
         val types = listOf("sub", "dub")
         val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload", "vidplay")
-
-        // "upcloud.animanga.fun" added — confirmed via captured proxy traffic
-        // as a real working domain, distinct from the originally-guessed
-        // "api.animanga.fun". Kept both since it's unconfirmed which one (if
-        // either) is the actual query entry point vs. just a downstream proxy.
-        val apiDomains = listOf("api.flikhub.net", "api.yenime.net", "api.animanga.fun", "upcloud.animanga.fun")
+        // Added api.yomi.to as a fallback
+        val apiDomains = listOf("api.flikhub.net", "api.yenime.net", "api.animanga.fun", "upcloud.animanga.fun", "api.yomi.to")
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-        // Emits a link with the correct referer pulled from its own "headers="
-        // param when present, falling back to the server-guessed referer.
-        suspend fun addProxyAwareLink(fileUrl: String, label: String, fallbackReferer: String) {
-            if (fileUrl.isBlank() || fileUrl.startsWith("blob:")) return // dead end, never fetchable
-            val realReferer = extractRefererFromProxyUrl(fileUrl, fallbackReferer)
+        suspend fun addLink(fileUrl: String, label: String, fallbackReferer: String, quality: Int = Qualities.Unknown.value) {
+            if (fileUrl.isBlank() || fileUrl.startsWith("blob:")) return
+            val cleanUrl = fileUrl.replace("\\/", "/")
+            val realReferer = extractRefererFromProxyUrl(cleanUrl, fallbackReferer)
+            
             callback(
                 newExtractorLink(
                     source = name,
                     name = label,
-                    url = fileUrl,
-                    type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    url = cleanUrl,
+                    type = if (cleanUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = realReferer
-                    this.quality = Qualities.Unknown.value
+                    this.quality = quality
                     this.headers = mapOf(
                         "Referer" to realReferer,
                         "User-Agent" to userAgent
@@ -230,6 +221,49 @@ class YomiProvider : MainAPI() {
                 }
             )
             found = true
+        }
+
+        suspend fun parseM3U8Text(m3u8Text: String, serverName: String, typeName: String, fallbackReferer: String) {
+            if (!m3u8Text.contains("#EXTM3U")) return
+            
+            val lines = m3u8Text.lines()
+            var currentQuality = Qualities.Unknown.value
+            var currentLabel = "Unknown"
+            
+            for (line in lines) {
+                val trimmedLine = line.trim()
+                if (trimmedLine.startsWith("#EXT-X-STREAM-INF:")) {
+                    val resolution = Regex("""RESOLUTION=\d+x(\d+)""").find(trimmedLine)?.groupValues?.get(1)?.toIntOrNull()
+                    val bandwidth = Regex("""BANDWIDTH=(\d+)""").find(trimmedLine)?.groupValues?.get(1)?.toIntOrNull()
+                    val name = Regex("""NAME="([^"]+)"""").find(trimmedLine)?.groupValues?.get(1)
+                    
+                    if (resolution != null) {
+                        currentQuality = when {
+                            resolution >= 1080 -> Qualities.P1080.value
+                            resolution >= 720 -> Qualities.P720.value
+                            resolution >= 480 -> Qualities.P480.value
+                            resolution >= 360 -> Qualities.P360.value
+                            else -> Qualities.P240.value
+                        }
+                        currentLabel = name ?: "${resolution}p"
+                    } else if (bandwidth != null) {
+                        currentQuality = when {
+                            bandwidth > 4000000 -> Qualities.P1080.value
+                            bandwidth > 2000000 -> Qualities.P720.value
+                            bandwidth > 1000000 -> Qualities.P480.value
+                            else -> Qualities.P360.value
+                        }
+                        currentLabel = name ?: "${bandwidth / 1000}kbps"
+                    }
+                } else if (trimmedLine.startsWith("http") && !trimmedLine.startsWith("blob:")) {
+                    addLink(
+                        trimmedLine,
+                        "$serverName ${typeName.uppercase()} - $currentLabel",
+                        fallbackReferer,
+                        currentQuality
+                    )
+                }
+            }
         }
 
         for (type in types) {
@@ -246,7 +280,6 @@ class YomiProvider : MainAPI() {
                             )
                         )
 
-                        // Strategy 1: Redirect straight to a playable host
                         if (req.url != apiUrl && req.url.startsWith("http") && !req.url.startsWith("blob:")) {
                             if (loadExtractor(req.url, "$mainUrl/", subtitleCallback, callback)) {
                                 found = true
@@ -256,37 +289,39 @@ class YomiProvider : MainAPI() {
 
                         val apiRes = req.text
 
-                        // Strategy 2: Standard JSON Response
+                        // Strategy 1: JSON Parsing
                         if (apiRes.trim().startsWith("{")) {
-                            val json = JSONObject(apiRes)
-                            val sources = json.optJSONArray("sources")
-
-                            if (sources != null && sources.length() > 0) {
-                                for (i in 0 until sources.length()) {
-                                    val fileUrl = sources.getJSONObject(i).optString("file")
-                                    addProxyAwareLink(
-                                        fileUrl,
-                                        "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                        "https://${server}.buzz/"
-                                    )
-                                }
-                            }
-
-                            val subtitles = json.optJSONArray("subtitles")
-                            if (subtitles != null) {
-                                for (i in 0 until subtitles.length()) {
-                                    val subFile = subtitles.getJSONObject(i).optString("file")
-                                    val subLabel = subtitles.getJSONObject(i).optString("label", "English")
-                                    if (subFile.isNotBlank() && !subFile.startsWith("blob:")) {
-                                        subtitleCallback(newSubtitleFile(subLabel, subFile))
+                            try {
+                                val json = JSONObject(apiRes)
+                                val sources = json.optJSONArray("sources")
+                                if (sources != null && sources.length() > 0) {
+                                    for (i in 0 until sources.length()) {
+                                        val fileUrl = sources.getJSONObject(i).optString("file")
+                                        addLink(fileUrl, "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}", "https://${server}.buzz/")
                                     }
                                 }
-                            }
+                                
+                                val subtitles = json.optJSONArray("subtitles")
+                                if (subtitles != null) {
+                                    for (i in 0 until subtitles.length()) {
+                                        val subFile = subtitles.getJSONObject(i).optString("file")
+                                        val subLabel = subtitles.getJSONObject(i).optString("label", "English")
+                                        if (subFile.isNotBlank() && !subFile.startsWith("blob:")) {
+                                            subtitleCallback(newSubtitleFile(subLabel, subFile.replace("\\/", "/")))
+                                        }
+                                    }
+                                }
+                                if (found) break
+                            } catch (e: Exception) {}
+                        }
 
+                        // Strategy 2: Raw M3U8 Text Parsing
+                        if (apiRes.contains("#EXTM3U")) {
+                            parseM3U8Text(apiRes, server.replaceFirstChar { it.uppercase() }, type, "https://${server}.buzz/")
                             if (found) break
                         }
 
-                        // Strategy 3: iFrame hiding inside HTML
+                        // Strategy 3: iFrame Extraction
                         val iframeRegex = Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""")
                         val iframeUrl = iframeRegex.find(apiRes)?.groupValues?.get(1)
                         if (iframeUrl != null && !iframeUrl.startsWith("blob:")) {
@@ -296,54 +331,40 @@ class YomiProvider : MainAPI() {
                             }
                         }
 
-                        // Strategy 4: Raw regex extraction — skips blob: explicitly
-                        val urlRegex = Regex("""https?://[^\s"'<>\\]+""")
+                        // Strategy 4: Regex URL Extraction (Fixed to handle escaped slashes like https:\/\/)
+                        val urlRegex = Regex("""https?:\\?/\\?[^\s"'<>]+""")
                         val extractedUrls = urlRegex.findAll(apiRes).map { it.value.replace("\\/", "/") }.distinct().toList()
 
                         for (url in extractedUrls) {
-                            if (url.contains("w3.org") || url.contains("googleapis") || url.endsWith(".js") || url.endsWith(".css")) continue
-                            if (url.startsWith("blob:")) continue
-
+                            if (url.contains("w3.org") || url.contains("googleapis") || url.endsWith(".js") || url.endsWith(".css") || url.startsWith("blob:")) continue
+                            
                             if (loadExtractor(url, apiUrl, subtitleCallback, callback)) {
                                 found = true
                                 continue
                             }
 
                             if (url.contains(".m3u8") || url.contains(".mp4") || url.contains("proxy") || url.contains("m3u8-proxy") || url.contains("/fetch")) {
-                                addProxyAwareLink(
-                                    url,
-                                    "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Raw)",
-                                    "https://${server}.buzz/"
-                                )
+                                addLink(url, "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Raw)", "https://${server}.buzz/")
                             }
                         }
-
-                        // Strategy 5: Base64 Encoded URLs
-                        val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""")
-                        for (b64 in base64Regex.findAll(apiRes)) {
-                            try {
-                                val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
-                                if (decoded.startsWith("http") && !decoded.startsWith("blob:")) {
-                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                        addProxyAwareLink(
-                                            decoded,
-                                            "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
-                                            "https://${server}.buzz/"
-                                        )
-                                    } else {
-                                        if (loadExtractor(decoded, apiUrl, subtitleCallback, callback)) found = true
-                                    }
-                                }
-                            } catch (e: Exception) {}
+                        
+                        // Strategy 5: Raw Subtitle Extraction (.vtt)
+                        val subRegex = Regex("""https?:\\?/\\?[^\s"'<>]+\.vtt[^\s"'<>]*""")
+                        val extractedSubs = subRegex.findAll(apiRes).map { it.value.replace("\\/", "/") }.distinct().toList()
+                        for (subUrl in extractedSubs) {
+                            if (subUrl.startsWith("blob:")) continue
+                            subtitleCallback(newSubtitleFile("English", subUrl))
                         }
 
                         if (found) break
 
                     } catch (e: Exception) {
-                        // Domain likely blocked/404'd — move on to the next domain guess
+                        // Ignore and try next domain/server
                     }
                 }
+                if (found) break
             }
+            if (found) break
         }
         return found
     }
