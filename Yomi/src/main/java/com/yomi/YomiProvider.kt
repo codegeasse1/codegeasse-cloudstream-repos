@@ -226,10 +226,11 @@ class YomiProvider : MainAPI() {
                                             source = name,
                                             name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Nested)",
                                             url = nestedUrl,
-                                            referer = "https://${server}.buzz/",
-                                            quality = Qualities.Unknown.value,
                                             type = if (nestedUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                        )
+                                        ) {
+                                            this.referer = "https://${server}.buzz/"
+                                            this.quality = Qualities.Unknown.value
+                                        }
                                     )
                                     found = true
                                 } catch (e: Exception) {}
@@ -241,10 +242,10 @@ class YomiProvider : MainAPI() {
                                     source = name,
                                     name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
                                     url = url,
-                                    referer = "https://${server}.buzz/",
-                                    quality = Qualities.Unknown.value,
                                     type = if (url.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
+                                    this.referer = "https://${server}.buzz/"
+                                    this.quality = Qualities.Unknown.value
                                     this.headers = mapOf(
                                         "Referer" to "https://${server}.buzz/",
                                         "User-Agent" to userAgent
