@@ -202,6 +202,7 @@ class AniKageProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
+        // Checks nextAiringEpisode to avoid generating unreleased episode buttons
         var limit = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
         if (limit <= 0) {
             val nextAiring = Regex("""nextAiringEpisode\s*:\s*\{[^}]*?episode\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
@@ -245,35 +246,6 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        val videoHeaders = mapOf(
-            "Referer" to "$mainUrl/",
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-
-        try {
-            val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|akage\.lol|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
-
-            for (match in matches) {
-                val extractedUrl = match.value
-                val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("akage.lol") || extractedUrl.contains("prox.anicore")
-
-                callback(
-                    newExtractorLink(
-                        source = "1. Direct Stream",
-                        name = "Direct Stream",
-                        url = extractedUrl,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.headers = videoHeaders
-                    }
-                )
-                found = true
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
         val knownProviders = listOf(
             "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
@@ -286,10 +258,12 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
+        // Force primary servers into the query list
         listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
+        // Sort so Vidtube is queried first, Megaplay last
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
@@ -303,16 +277,18 @@ class AniKageProvider : MainAPI() {
             langs.add("dub")
         }
 
+        val videoHeaders = mapOf(
+            "Referer" to "$mainUrl/",
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            for (provider in activeProviders.take(6)) {
+            for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    // Safe thread sleep to bypass SvelteKit rate limits
-                    Thread.sleep(250)
-                    
                     val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
 
@@ -335,9 +311,9 @@ class AniKageProvider : MainAPI() {
                             }
 
                             val sourceGroup = when {
-                                isVidtube -> "2. Vidtube"
-                                isMegaPlay -> "4. MegaPlay"
-                                else -> "3. $displayProviderName"
+                                isVidtube -> "1. Vidtube"
+                                isMegaPlay -> "3. MegaPlay"
+                                else -> "2. $displayProviderName"
                             }
 
                             val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
@@ -368,9 +344,9 @@ class AniKageProvider : MainAPI() {
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
 
                                 val sourceGroup = when {
-                                    isVidtube -> "2. Vidtube"
-                                    isMegaPlay -> "4. MegaPlay"
-                                    else -> "3. ${link.source}"
+                                    isVidtube -> "1. Vidtube"
+                                    isMegaPlay -> "3. MegaPlay"
+                                    else -> "2. ${link.source}"
                                 }
 
                                 callback(
@@ -392,6 +368,32 @@ class AniKageProvider : MainAPI() {
                 } catch (e: Exception) {
                     // Ignore missing endpoints quietly
                 }
+            }
+        }
+
+        if (!found) {
+            try {
+                val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|akage\.lol|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
+
+                for (match in matches) {
+                    val extractedUrl = match.value
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("akage.lol") || extractedUrl.contains("prox.anicore")
+
+                    callback(
+                        newExtractorLink(
+                            source = "2. Direct Stream",
+                            name = "Direct Stream",
+                            url = extractedUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = videoHeaders
+                        }
+                    )
+                    found = true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
