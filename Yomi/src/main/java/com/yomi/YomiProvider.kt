@@ -1,174 +1,4 @@
-package com.yomi
-
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import org.json.JSONObject
-import android.util.Base64
-
-class YomiProvider : MainAPI() {
-    override var mainUrl = "https://yomi.to"
-    override var name = "Yomi"
-    override val hasMainPage = true
-    override var lang = "en"
-    override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
-
-    private val anilistApi = "https://graphql.anilist.co"
-
-    override val mainPage = mainPageOf(
-        "TRENDING_DESC" to "Trending Now",
-        "POPULARITY_DESC" to "All Time Popular",
-        "SCORE_DESC" to "Top Rated",
-        "START_DATE_DESC" to "New Releases"
-    )
-
-    private suspend fun queryAnilist(query: String, variables: Map<String, Any> = emptyMap()): JSONObject {
-        val payload = mapOf(
-            "query" to query,
-            "variables" to variables
-        )
-        
-        val req = app.post(
-            anilistApi,
-            headers = mapOf("Content-Type" to "application/json", "Accept" to "application/json"),
-            json = payload 
-        )
-        
-        val jsonResponse = JSONObject(req.text)
-        
-        if (jsonResponse.has("errors")) {
-            val errorMessage = jsonResponse.optJSONArray("errors")?.optJSONObject(0)?.optString("message") ?: "Unknown GraphQL Error"
-            throw ErrorLoadingException("Anilist Error: $errorMessage")
-        }
-        
-        return jsonResponse.getJSONObject("data")
-    }
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val query = """
-            query(${'$'}sort: [MediaSort]) {
-                Page(page: $page, perPage: 20) {
-                    media(sort: ${'$'}sort, type: ANIME, isAdult: false) {
-                        id
-                        title { romaji english userPreferred }
-                        coverImage { extraLarge }
-                    }
-                }
-            }
-        """.trimIndent()
-
-        val variables = mapOf("sort" to listOf(request.data))
-        val response = queryAnilist(query, variables)
-        val mediaList = response.getJSONObject("Page").getJSONArray("media")
-
-        val items = mutableListOf<SearchResponse>()
-        for (i in 0 until mediaList.length()) {
-            val media = mediaList.getJSONObject(i)
-            val titleObj = media.getJSONObject("title")
-            val title = titleObj.optString("english").ifBlank { titleObj.optString("romaji") }.ifBlank { titleObj.optString("userPreferred") }
-            val poster = media.getJSONObject("coverImage").optString("extraLarge")
-            val id = media.getInt("id")
-
-            items.add(newAnimeSearchResponse(title, "$mainUrl/anime/$id", TvType.Anime) {
-                this.posterUrl = poster
-            })
-        }
-
-        return newHomePageResponse(request.name, items)
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        val gql = """
-            query(${'$'}search: String) {
-                Page(page: 1, perPage: 20) {
-                    media(search: ${'$'}search, type: ANIME, isAdult: false) {
-                        id
-                        title { romaji english userPreferred }
-                        coverImage { extraLarge }
-                    }
-                }
-            }
-        """.trimIndent()
-
-        val variables = mapOf("search" to query)
-        val response = queryAnilist(gql, variables)
-        val mediaList = response.getJSONObject("Page").getJSONArray("media")
-
-        val items = mutableListOf<SearchResponse>()
-        for (i in 0 until mediaList.length()) {
-            val media = mediaList.getJSONObject(i)
-            val titleObj = media.getJSONObject("title")
-            val title = titleObj.optString("english").ifBlank { titleObj.optString("romaji") }.ifBlank { titleObj.optString("userPreferred") }
-            val poster = media.getJSONObject("coverImage").optString("extraLarge")
-            val id = media.getInt("id")
-
-            items.add(newAnimeSearchResponse(title, "$mainUrl/anime/$id", TvType.Anime) {
-                this.posterUrl = poster
-            })
-        }
-        return items
-    }
-
-    override suspend fun load(url: String): LoadResponse {
-        val id = url.substringAfterLast("/").toIntOrNull() ?: throw ErrorLoadingException("Invalid ID")
-
-        val query = """
-            query(${'$'}id: Int) {
-                Media(id: ${'$'}id) {
-                    idMal
-                    title { romaji english userPreferred }
-                    description
-                    coverImage { extraLarge }
-                    episodes
-                    nextAiringEpisode { episode }
-                    genres
-                }
-            }
-        """.trimIndent()
-
-        val variables = mapOf("id" to id)
-        val response = queryAnilist(query, variables).getJSONObject("Media")
-
-        val titleObj = response.getJSONObject("title")
-        val title = titleObj.optString("english").ifBlank { titleObj.optString("romaji") }.ifBlank { titleObj.optString("userPreferred") }
-        val poster = response.getJSONObject("coverImage").optString("extraLarge")
-        val plot = response.optString("description")
-
-        val genres = mutableListOf<String>()
-        val genresArr = response.optJSONArray("genres")
-        if (genresArr != null) {
-            for (i in 0 until genresArr.length()) genres.add(genresArr.getString(i))
-        }
-
-        val malId = response.optInt("idMal", 0)
-
-        var maxEp = try {
-            if (!response.isNull("nextAiringEpisode")) {
-                response.getJSONObject("nextAiringEpisode").getInt("episode") - 1
-            } else {
-                response.optInt("episodes", 0)
-            }
-        } catch (e: Exception) { 0 }
-
-        if (maxEp == 0) maxEp = 1 
-
-        val episodes = mutableListOf<Episode>()
-        for (i in 1..maxEp) {
-            episodes.add(newEpisode("$malId|$i") {
-                this.name = "Episode $i"
-                this.episode = i
-            })
-        }
-
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
-            this.posterUrl = poster
-            this.plot = plot
-            this.tags = genres
-            addEpisodes(DubStatus.Subbed, episodes)
-        }
-    }
-
-    override suspend fun loadLinks(
+override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -189,11 +19,11 @@ class YomiProvider : MainAPI() {
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         for (type in types) {
-            var subParsed = false
             for (server in servers) {
                 try {
+                    val apiUrl = "https://api.flikhub.net/$server?mal=$malId&ep=$epNum&type=$type"
                     val apiRes = app.get(
-                        "https://api.flikhub.net/$server?mal=$malId&ep=$epNum&type=$type",
+                        apiUrl,
                         headers = mapOf(
                             "Referer" to "$mainUrl/",
                             "Origin" to mainUrl,
@@ -202,60 +32,21 @@ class YomiProvider : MainAPI() {
                         )
                     ).text
 
-                    var fileUrl = ""
-
-                    // 1. Try to parse as JSON first
+                    // 1. If it returns JSON
                     if (apiRes.trim().startsWith("{")) {
                         val json = JSONObject(apiRes)
                         val sources = json.optJSONArray("sources")
                         
                         if (sources != null && sources.length() > 0) {
-                            fileUrl = sources.getJSONObject(0).optString("file")
-                        }
-
-                        if (!subParsed) {
-                            val subtitles = json.optJSONArray("subtitles")
-                            if (subtitles != null) {
-                                for (i in 0 until subtitles.length()) {
-                                    val sub = subtitles.getJSONObject(i)
-                                    var subFile = sub.optString("file")
-                                    val subLabel = sub.optString("label", "English")
-                                    
-                                    if (subFile.isNotBlank()) {
-                                        if (subFile.contains("url=")) {
-                                            val extSub = subFile.substringAfter("url=").substringBefore("&")
-                                            subFile = java.net.URLDecoder.decode(extSub, "UTF-8")
-                                        }
-                                        subtitleCallback(newSubtitleFile(subLabel, subFile))
-                                        subParsed = true
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // 2. If not JSON, treat the response itself as an embed HTML or URL
-                        fileUrl = apiRes
-                    }
-
-                    // 3. Process the extracted URL or HTML
-                    if (fileUrl.isNotBlank()) {
-                        val isHtml = fileUrl.contains("<html") || fileUrl.contains("<body") || fileUrl.contains("eval(function")
-                        
-                        // If it's a clean link, try to use it directly or pass it to standard extractors
-                        if (!isHtml && fileUrl.startsWith("http")) {
-                            var cleanUrl = fileUrl
-                            if (cleanUrl.contains("url=")) {
-                                val extracted = cleanUrl.substringAfter("url=").substringBefore("&")
-                                cleanUrl = java.net.URLDecoder.decode(extracted, "UTF-8")
-                            }
-
-                            if (cleanUrl.contains(".m3u8") || cleanUrl.contains(".mp4") || cleanUrl.contains("mewstream")) {
+                            val fileUrl = sources.getJSONObject(0).optString("file")
+                            
+                            if (fileUrl.isNotBlank()) {
                                 callback(
                                     newExtractorLink(
                                         source = name,
                                         name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                        url = cleanUrl,
-                                        type = if (cleanUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                        url = fileUrl,
+                                        type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     ) {
                                         this.referer = "https://${server}.buzz/" 
                                         this.quality = Qualities.Unknown.value
@@ -266,45 +57,46 @@ class YomiProvider : MainAPI() {
                                     }
                                 )
                                 found = true
-                            } else {
-                                if (loadExtractor(cleanUrl, mainUrl, subtitleCallback, callback)) {
-                                    found = true
+                            }
+                        }
+
+                        val subtitles = json.optJSONArray("subtitles")
+                        if (subtitles != null) {
+                            for (i in 0 until subtitles.length()) {
+                                val sub = subtitles.getJSONObject(i)
+                                val subFile = sub.optString("file")
+                                val subLabel = sub.optString("label", "English")
+                                
+                                if (subFile.isNotBlank()) {
+                                    subtitleCallback(newSubtitleFile(subLabel, subFile))
                                 }
                             }
                         }
-
-                        // 4. Robust Anikoto HTML Unpacking / Regex Fallback
-                        var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(fileUrl)
-                        
-                        if (m3u8Match == null && fileUrl.contains("eval(function(p,a,c,k,e,d)")) {
+                    } 
+                    // 2. If it returns an HTML Player Page (which is what your log shows)
+                    else {
+                        // Unpack the HTML if it is obfuscated
+                        var htmlToSearch = apiRes
+                        if (htmlToSearch.contains("eval(function(p,a,c,k,e,d)")) {
                             try {
-                                val unpacked = getAndUnpack(fileUrl)
-                                m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
+                                htmlToSearch = getAndUnpack(htmlToSearch) + "\n" + htmlToSearch
                             } catch (e: Exception) {}
                         }
 
-                        // 5. Hunt for Base64 encoded links
-                        if (m3u8Match == null) {
-                            val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(fileUrl)
-                            for (b64 in base64Regex) {
-                                try {
-                                    val decoded = String(Base64.decode(b64.groupValues[1], Base64.DEFAULT))
-                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                        m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(decoded)
-                                        break
-                                    }
-                                } catch (e: Exception) {}
-                            }
-                        }
+                        // Aggressive Regex to find ANY proxy link or m3u8 link in the HTML
+                        val linkRegex = Regex("""https?://[^\s"'<>\\]*?(?:m3u8|mp4)[^\s"'<>\\]*""")
+                        val matches = linkRegex.findAll(htmlToSearch).map { it.value }.distinct().toList()
 
-                        if (m3u8Match != null) {
-                            val mediaUrl = m3u8Match.value
+                        for (mediaUrl in matches) {
+                            // Skip junk links that might be matched
+                            if (mediaUrl.contains("preview") || mediaUrl.contains("poster")) continue
+
                             callback(
                                 newExtractorLink(
                                     source = name,
-                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
+                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Direct)",
                                     url = mediaUrl,
-                                    type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    type = if (mediaUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = "https://${server}.buzz/"
                                     this.quality = Qualities.Unknown.value
@@ -316,6 +108,31 @@ class YomiProvider : MainAPI() {
                             )
                             found = true
                         }
+
+                        // Check for base64 encoded strings just in case
+                        val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(htmlToSearch)
+                        for (b64 in base64Regex) {
+                            try {
+                                val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
+                                if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                                    val m3u8Match = linkRegex.find(decoded)
+                                    if (m3u8Match != null) {
+                                        callback(
+                                            newExtractorLink(
+                                                source = name,
+                                                name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
+                                                url = m3u8Match.value,
+                                                type = if (m3u8Match.value.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                            ) {
+                                                this.referer = "https://${server}.buzz/"
+                                                this.quality = Qualities.Unknown.value
+                                            }
+                                        )
+                                        found = true
+                                    }
+                                }
+                            } catch (e: Exception) {}
+                        }
                     }
                 } catch (e: Exception) {
                     println("YOMI ERROR: ${e.message}")
@@ -324,4 +141,3 @@ class YomiProvider : MainAPI() {
         }
         return found
     }
-}
