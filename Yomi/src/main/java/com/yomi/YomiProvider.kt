@@ -3,7 +3,6 @@ package com.yomi
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
-import android.util.Base64
 
 class YomiProvider : MainAPI() {
     override var mainUrl = "https://yomi.to"
@@ -197,115 +196,82 @@ class YomiProvider : MainAPI() {
                         headers = mapOf(
                             "Referer" to "$mainUrl/",
                             "Origin" to mainUrl,
-                            "Accept" to "*/*", 
                             "User-Agent" to userAgent
                         )
                     ).text
 
-                    // 1. If it returns JSON
-                    if (apiRes.trim().startsWith("{")) {
-                        val json = JSONObject(apiRes)
-                        val sources = json.optJSONArray("sources")
-                        
-                        if (sources != null && sources.length() > 0) {
-                            val fileUrl = sources.getJSONObject(0).optString("file")
+                    // Extract all potential URLs (embeds or media) from the API response
+                    val urlRegex = Regex("""https?://[^\s"'<>\\]+""")
+                    val extractedUrls = urlRegex.findAll(apiRes).map { it.value.replace("\\/", "/") }.distinct().toList()
+
+                    for (url in extractedUrls) {
+                        // Skip common junk URLs that might get caught
+                        if (url.contains("w3.org") || url.contains("googleapis") || url.contains("gstatic") || url.endsWith(".js") || url.endsWith(".css")) continue
+
+                        // 1. Try Cloudstream's native extractors first (Mimicking Anikoto & Aniwaves)
+                        if (loadExtractor(url, apiUrl, subtitleCallback, callback)) {
+                            found = true
+                            continue
+                        }
+
+                        // 2. If loadExtractor fails, check if it's a raw video/proxy link we can play directly
+                        if (url.contains(".m3u8") || url.contains("/m3u8") || url.contains(".mp4") || url.contains("proxy")) {
                             
-                            if (fileUrl.isNotBlank()) {
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                        url = fileUrl,
-                                        type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.referer = "https://${server}.buzz/" 
-                                        this.quality = Qualities.Unknown.value
-                                        this.headers = mapOf(
-                                            "Referer" to "https://${server}.buzz/",
-                                            "User-Agent" to userAgent
+                            // If it's a proxy link holding an inner URL, extract the inner one as a backup
+                            if (url.contains("url=")) {
+                                try {
+                                    val nestedUrl = java.net.URLDecoder.decode(url.substringAfter("url=").substringBefore("&"), "UTF-8")
+                                    callback(
+                                        newExtractorLink(
+                                            source = name,
+                                            name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Nested)",
+                                            url = nestedUrl,
+                                            referer = "https://${server}.buzz/",
+                                            quality = Qualities.Unknown.value,
+                                            type = if (nestedUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                         )
-                                    }
-                                )
-                                found = true
+                                    )
+                                    found = true
+                                } catch (e: Exception) {}
                             }
-                        }
 
-                        val subtitles = json.optJSONArray("subtitles")
-                        if (subtitles != null) {
-                            for (i in 0 until subtitles.length()) {
-                                val sub = subtitles.getJSONObject(i)
-                                val subFile = sub.optString("file")
-                                val subLabel = sub.optString("label", "English")
-                                
-                                if (subFile.isNotBlank()) {
-                                    subtitleCallback(newSubtitleFile(subLabel, subFile))
-                                }
-                            }
-                        }
-                    } 
-                    // 2. If it returns an HTML Player Page
-                    else {
-                        // Unpack the HTML if it is obfuscated
-                        var htmlToSearch = apiRes
-                        if (htmlToSearch.contains("eval(function(p,a,c,k,e,d)")) {
-                            try {
-                                htmlToSearch = getAndUnpack(htmlToSearch) + "\n" + htmlToSearch
-                            } catch (e: Exception) {}
-                        }
-
-                        // Aggressive Regex to find ANY proxy link or m3u8 link in the HTML
-                        val linkRegex = Regex("""https?://[^\s"'<>\\]*?(?:m3u8|mp4)[^\s"'<>\\]*""")
-                        val matches = linkRegex.findAll(htmlToSearch).map { it.value }.distinct().toList()
-
-                        for (mediaUrl in matches) {
-                            // Skip junk links that might be matched
-                            if (mediaUrl.contains("preview") || mediaUrl.contains("poster")) continue
-
+                            // Add the original proxy/media link
                             callback(
                                 newExtractorLink(
                                     source = name,
-                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Direct)",
-                                    url = mediaUrl,
-                                    type = if (mediaUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
+                                    url = url,
+                                    referer = "https://${server}.buzz/",
+                                    quality = Qualities.Unknown.value,
+                                    type = if (url.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.referer = "https://${server}.buzz/"
-                                    this.quality = Qualities.Unknown.value
                                     this.headers = mapOf(
-                                        "Referer" to "https://${server}.buzz/", 
+                                        "Referer" to "https://${server}.buzz/",
                                         "User-Agent" to userAgent
                                     )
                                 }
                             )
                             found = true
                         }
-
-                        // Check for base64 encoded strings just in case
-                        val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(htmlToSearch)
-                        for (b64 in base64Regex) {
-                            try {
-                                val decoded = String(Base64.decode(b64.groupValues[1], Base64.DEFAULT))
-                                if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                    val m3u8Match = linkRegex.find(decoded)
-                                    if (m3u8Match != null) {
-                                        callback(
-                                            newExtractorLink(
-                                                source = name,
-                                                name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
-                                                url = m3u8Match.value,
-                                                type = if (m3u8Match.value.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                            ) {
-                                                this.referer = "https://${server}.buzz/"
-                                                this.quality = Qualities.Unknown.value
-                                            }
-                                        )
-                                        found = true
-                                    }
-                                }
-                            } catch (e: Exception) {}
-                        }
                     }
+
+                    // Extract Subtitles if the API returned JSON
+                    if (apiRes.contains("subtitles")) {
+                        try {
+                            val json = JSONObject(apiRes)
+                            val subs = json.optJSONArray("subtitles")
+                            if (subs != null) {
+                                for (i in 0 until subs.length()) {
+                                    val subFile = subs.getJSONObject(i).optString("file")
+                                    val subLabel = subs.getJSONObject(i).optString("label", "English")
+                                    if (subFile.isNotBlank()) subtitleCallback(newSubtitleFile(subLabel, subFile))
+                                }
+                            }
+                        } catch (e: Exception) {}
+                    }
+
                 } catch (e: Exception) {
-                    println("YOMI ERROR: ${e.message}")
+                    e.printStackTrace()
                 }
             }
         }
