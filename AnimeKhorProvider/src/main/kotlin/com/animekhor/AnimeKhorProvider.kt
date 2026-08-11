@@ -2,11 +2,7 @@ package com.animekhor
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.M3u8Helper
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -164,7 +160,7 @@ class AnimeKhorProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
         var found = false
-        val embedLinks = mutableListOf<Pair<String, String>>() // Pair(URL, ServerName)
+        val embedLinks = mutableListOf<Pair<String, String>>()
 
         val siteHeaders = mapOf(
             "Referer" to "$mainUrl/",
@@ -227,7 +223,7 @@ class AnimeKhorProvider : MainAPI() {
                     continue
                 }
 
-                // B. Native Cloudstream Extractors (ok.ru, Rumble, D.Tube, Doodstream, etc.)
+                // B. Native Cloudstream Extractors
                 if (loadExtractor(embedUrl, data, subtitleCallback) { link ->
                     callback(
                         newExtractorLink(
@@ -247,7 +243,7 @@ class AnimeKhorProvider : MainAPI() {
                     continue
                 }
 
-                // C. AnimeKhor Multi-Player / Custom Proxy Servers (UPNS, P2PStream, Turbovid, Abyss, VGPlayer)
+                // C. AnimeKhor Multi-Player / Custom Proxy Servers
                 val res = app.get(embedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT))
                 val pageText = res.text
                 val pageDoc = res.document
@@ -302,7 +298,7 @@ class AnimeKhorProvider : MainAPI() {
                     }
                 }
 
-                // Regex Fallback for Embedded / Obfuscated JS Streams (e.g. upns.live, p2pstream.vip, turbosplayer)
+                // Regex Fallback
                 if (!customFound) {
                     val streamMatches = Regex("""https?://[^\s"'<>]+?(?:\.m3u8|\.mp4|\.txt|playlist\.m3u8|master\.m3u8)(?:\?[^\s"'<>]*)?""")
                         .findAll(pageText).map { it.value.replace("\\/", "/") }.distinct().toList()
