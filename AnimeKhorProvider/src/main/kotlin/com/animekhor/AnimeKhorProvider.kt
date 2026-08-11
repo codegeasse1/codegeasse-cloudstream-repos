@@ -94,6 +94,8 @@ class AnimeKhorProvider : MainAPI() {
                 if (epHref == null) return@mapNotNull null
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
+                
+                // Safely handles "14 END" texts to pull just the number
                 val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
@@ -216,32 +218,45 @@ class AnimeKhorProvider : MainAPI() {
                 if (embedUrl.contains("dailymotion.com") || embedUrl.contains("geo.dailymotion")) {
                     val vid = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
                     if (vid != null) {
-                        if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)) {
+                        val tempLinks = mutableListOf<ExtractorLink>()
+                        if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback) { tempLinks.add(it) }) {
                             found = true
+                            for (link in tempLinks) {
+                                callback(
+                                    newExtractorLink(
+                                        source = link.source.ifBlank { name },
+                                        name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
+                                        url = link.url,
+                                        type = link.type
+                                    ) {
+                                        this.quality = link.quality
+                                        this.headers = siteHeaders
+                                        this.extractorData = link.extractorData
+                                        this.referer = link.referer.ifBlank { data }
+                                    }
+                                )
+                            }
                         }
                     }
                     continue
                 }
 
                 // B. Native Cloudstream Extractors
-                // FIXED: Collect the links into a temp list first to safely run newExtractorLink outside the callback
                 val tempLinks = mutableListOf<ExtractorLink>()
-                if (loadExtractor(embedUrl, data, subtitleCallback) { link ->
-                    tempLinks.add(link)
-                }) {
+                if (loadExtractor(embedUrl, data, subtitleCallback) { tempLinks.add(it) }) {
                     found = true
                     for (link in tempLinks) {
                         callback(
                             newExtractorLink(
                                 source = link.source.ifBlank { name },
-                                name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
+                                name = if (serverLabel.isNotBlank() && !serverLabel.contains("Default")) "$serverLabel (${link.name})" else link.name,
                                 url = link.url,
                                 type = link.type
                             ) {
                                 this.quality = link.quality
                                 this.headers = siteHeaders
                                 this.extractorData = link.extractorData
-                                this.referer = link.referer.ifBlank { data }
+                                this.referer = link.referer.ifBlank { embedUrl }
                             }
                         )
                     }
