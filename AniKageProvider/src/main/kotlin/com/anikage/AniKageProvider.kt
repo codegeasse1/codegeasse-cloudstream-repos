@@ -253,10 +253,8 @@ class AniKageProvider : MainAPI() {
         val html = app.get(cleanData).text
         val cleanHtml = html.replace("\\/", "/")
 
-        val knownProviders = listOf(
-            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
-            "neko", "ken", "megg", "vibe", "vidhide", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
-        )
+        // STRICTLY only the 3 servers requested (and their direct aliases)
+        val knownProviders = listOf("vibeube", "vidtube", "vibe", "dib", "vidhide", "e-wish", "megatube", "megaplay")
 
         val activeProviders = knownProviders.filter { provider ->
             cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
@@ -265,17 +263,16 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
-        // Force the three requested servers (and their aliases) into the query list
+        // Force primary servers into the query list
         listOf("dib", "vidhide", "vibeube", "vidtube", "megatube", "megaplay").forEach {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // Strictly prioritize the three requested servers so they don't get skipped
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" || provider == "vibe" -> 0
-                provider == "megatube" || provider == "megaplay" -> 1
-                provider == "vidhide" || provider == "dib" || provider == "e-wish" -> 2
+                provider == "dib" || provider == "vidhide" || provider == "e-wish" -> 1
+                provider == "megatube" || provider == "megaplay" -> 2
                 else -> 3
             }
         }
@@ -293,55 +290,41 @@ class AniKageProvider : MainAPI() {
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            for (provider in activeProviders.take(6)) {
+            for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    var responseText = ""
-                    var retries = 0
-                    
-                    while (retries < 3) {
-                        try {
-                            responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                            break
-                        } catch (e: Exception) {
-                            retries++
-                            java.lang.Thread.sleep(400)
-                        }
-                    }
-
-                    if (responseText.isBlank()) continue
-
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
 
                     for (match in matches) {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
 
-                        // akage.lol REMOVED from isKnownHost so it correctly routes to loadExtractor
+                        // STRICTLY YOUR ORIGINAL LOGIC
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
 
-                        val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true) || provider.contains("vibe", true)
-                        val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
-                        val isVidhide = provider.contains("vidhide", true) || provider.contains("dib", true) || provider.contains("e-wish", true)
-
-                        val displayProviderName = when {
-                            isVidtube -> "Vidtube"
-                            isMegaPlay -> "MegaPlay"
-                            isVidhide -> "VidHide"
-                            else -> provider.replaceFirstChar { it.uppercase() }
-                        }
-
-                        val sourceGroup = when {
-                            isVidtube -> "1. Vidtube"
-                            isMegaPlay -> "2. MegaPlay"
-                            isVidhide -> "3. VidHide"
-                            else -> "4. $displayProviderName"
-                        }
-
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
+                            val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true) || provider.contains("vibe", true)
+                            val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
+                            val isVidhide = provider.contains("vidhide", true) || provider.contains("dib", true) || provider.contains("e-wish", true)
+
+                            val displayProviderName = when {
+                                isVidtube -> "VibePlayer"
+                                isMegaPlay -> "MegaPlay"
+                                isVidhide -> "VidHide"
+                                else -> provider.replaceFirstChar { it.uppercase() }
+                            }
+
+                            val sourceGroup = when {
+                                isVidtube -> "1. VibePlayer"
+                                isVidhide -> "2. VidHide"
+                                isMegaPlay -> "3. MegaPlay"
+                                else -> "4. $displayProviderName"
+                            }
+
                             val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
 
                             callback(
@@ -366,6 +349,17 @@ class AniKageProvider : MainAPI() {
                             }
 
                             for (link in extractedLinks) {
+                                val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
+                                val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
+                                val isVidhide = link.name.contains("Vidhide", ignoreCase = true) || provider.contains("vidhide", ignoreCase = true) || provider.contains("dib", ignoreCase = true)
+
+                                val sourceGroup = when {
+                                    isVidtube -> "1. VibePlayer"
+                                    isVidhide -> "2. VidHide"
+                                    isMegaPlay -> "3. MegaPlay"
+                                    else -> "4. ${link.source}"
+                                }
+
                                 callback(
                                     newExtractorLink(
                                         source = sourceGroup,
@@ -390,8 +384,8 @@ class AniKageProvider : MainAPI() {
 
         if (!found) {
             try {
-                // akage.lol REMOVED from fallback regex
-                val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
+                // YOUR EXACT ORIGINAL FALLBACK. 
+                val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
 
                 for (match in matches) {
                     val extractedUrl = match.value
