@@ -269,7 +269,6 @@ class AniKageProvider : MainAPI() {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // Prioritizes Vidtube (0) and MegaPlay (1) above other providers (2)
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
@@ -291,21 +290,21 @@ class AniKageProvider : MainAPI() {
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            for (provider in activeProviders) {
+            for (provider in activeProviders.take(6)) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
+                    // FIXED: Replaced allowError with a proper Try-Catch around the network call
                     var responseText = ""
                     var retries = 0
                     
                     while (retries < 3) {
-                        val res = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/"), allowError = true)
-                        if (res.code == 429 || res.code == 403) {
+                        try {
+                            responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+                            break
+                        } catch (e: Exception) {
                             retries++
                             java.lang.Thread.sleep(400)
-                        } else {
-                            responseText = res.text
-                            break
                         }
                     }
 
