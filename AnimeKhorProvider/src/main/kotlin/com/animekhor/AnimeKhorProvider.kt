@@ -224,22 +224,27 @@ class AnimeKhorProvider : MainAPI() {
                 }
 
                 // B. Native Cloudstream Extractors
+                // FIXED: Collect the links into a temp list first to safely run newExtractorLink outside the callback
+                val tempLinks = mutableListOf<ExtractorLink>()
                 if (loadExtractor(embedUrl, data, subtitleCallback) { link ->
-                    callback(
-                        newExtractorLink(
-                            source = link.source.ifBlank { name },
-                            name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
-                            url = link.url,
-                            type = link.type
-                        ) {
-                            this.quality = link.quality
-                            this.headers = siteHeaders
-                            this.extractorData = link.extractorData
-                            this.referer = link.referer.ifBlank { data }
-                        }
-                    )
+                    tempLinks.add(link)
                 }) {
                     found = true
+                    for (link in tempLinks) {
+                        callback(
+                            newExtractorLink(
+                                source = link.source.ifBlank { name },
+                                name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
+                                url = link.url,
+                                type = link.type
+                            ) {
+                                this.quality = link.quality
+                                this.headers = siteHeaders
+                                this.extractorData = link.extractorData
+                                this.referer = link.referer.ifBlank { data }
+                            }
+                        )
+                    }
                     continue
                 }
 
