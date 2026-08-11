@@ -18,6 +18,11 @@ class AnimeKhorProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
+    companion object {
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
     // ---------------------------------------------------------------
     // MAIN PAGE
     // ---------------------------------------------------------------
@@ -38,7 +43,6 @@ class AnimeKhorProvider : MainAPI() {
         val linkEl = this.selectFirst("a") ?: return null
         val rawHref = fixUrlNull(linkEl.attr("href"))?.trimEnd('/') ?: return null
         
-        // Recover the series page URL by stripping the episode suffix
         val href = rawHref.replace(Regex("-(episode|ep)-\\d+.*$"), "")
             .let { if (it.contains("/anime/")) it else "$mainUrl/anime/${it.substringAfterLast("/")}/" }
 
@@ -70,7 +74,6 @@ class AnimeKhorProvider : MainAPI() {
         val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
         
-        // Strict Poster Extract (Avoids site banners)
         val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
         val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null } ?: posterElement?.attr("data-src")?.ifBlank { null } ?: posterElement?.attr("src")
         var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
@@ -151,7 +154,7 @@ class AnimeKhorProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------
-    // LOAD LINKS (Ultimate Extractor specifically tuned for AnimeKhor's servers)
+    // LOAD LINKS (Fully Tuned for All 10 Servers)
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -161,118 +164,189 @@ class AnimeKhorProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
         var found = false
-        val embedUrls = mutableSetOf<String>()
+        val embedLinks = mutableListOf<Pair<String, String>>() // Pair(URL, ServerName)
 
-        fun addUrl(url: String?) {
+        val siteHeaders = mapOf(
+            "Referer" to "$mainUrl/",
+            "User-Agent" to USER_AGENT
+        )
+
+        fun addEmbed(url: String?, name: String) {
             if (url.isNullOrBlank()) return
-            var cleanUrl = url.trim()
+            var cleanUrl = url.trim().replace("\\/", "/")
             if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-            if (cleanUrl.startsWith("http")) embedUrls.add(cleanUrl)
+            if (cleanUrl.startsWith("http")) {
+                if (embedLinks.none { it.first == cleanUrl }) {
+                    embedLinks.add(Pair(cleanUrl, name))
+                }
+            }
         }
 
-        // 1. Decode every single option from the dropdown mirror list
+        // 1. Decode all dropdown mirrors from select.mirror
         document.select("select.mirror option[value]").forEach { element ->
-            val value = element.attr("value")
-            if (value.isNotBlank() && value.length > 20 && !value.contains(" ")) {
-                try {
-                    val decoded = String(Base64.decode(value, Base64.DEFAULT))
-                    val src = Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(decoded)?.groupValues?.get(1)
-                    if (src != null) addUrl(src) else addUrl(value)
-                } catch (e: Exception) {
-                    addUrl(value)
-                }
-            }
-        }
+            val value = element.attr("value").trim()
+            val label = element.text().trim().ifBlank { "Server" }
 
-        // 2. Grab standard visible embeds and iframes
-        document.select("[data-default-embed], [data-embed]").forEach {
-            val value = it.attr("data-default-embed").ifBlank { it.attr("data-embed") }
             if (value.isNotBlank()) {
-                try {
-                    val decoded = String(Base64.decode(value, Base64.DEFAULT))
-                    val src = Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1)
-                    if (src != null) addUrl(src)
-                } catch (e: Exception) {}
+                if (value.startsWith("http") || value.startsWith("//")) {
+                    addEmbed(value, label)
+                } else {
+                    try {
+                        val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8)
+                        val src = Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(decoded)?.groupValues?.get(1)
+                        if (!src.isNullOrBlank()) {
+                            addEmbed(src, label)
+                        } else {
+                            val directUrl = Regex("""https?://[^\s"'<>]+""").find(decoded)?.value
+                            addEmbed(directUrl ?: value, label)
+                        }
+                    } catch (e: Exception) {
+                        addEmbed(value, label)
+                    }
+                }
             }
         }
-        document.select("iframe").forEach { iframe ->
-            addUrl(iframe.attr("src"))
-            addUrl(iframe.attr("data-src"))
-            addUrl(iframe.attr("data-lazy-src"))
+
+        // 2. Extract visible iframes and player divs
+        document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe").forEach { iframe ->
+            val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") }
+            addEmbed(src, "Default Player")
         }
 
-        // 3. Process all collected URLs through the appropriate extractors
-        for (url in embedUrls) {
-            
-            // A. Dailymotion Handler (Converts geo/embed into standard player link)
-            if (url.contains("dailymotion.com") || url.contains("geo.dailymotion")) {
-                val vid = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(url)?.groupValues?.get(1)
-                if (vid != null) {
-                    try {
-                        loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)
-                        found = true
-                    } catch (e: Exception) {}
+        // 3. Process all unique embed sources
+        for ((embedUrl, serverLabel) in embedLinks) {
+            try {
+                // A. Dailymotion
+                if (embedUrl.contains("dailymotion.com") || embedUrl.contains("geo.dailymotion")) {
+                    val vid = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                    if (vid != null) {
+                        if (loadExtractor("https://www.dailymotion.com/video/$vid", data, subtitleCallback, callback)) {
+                            found = true
+                        }
+                    }
+                    continue
                 }
-            } 
-            
-            // B. Custom Multi-Player Handler (Includes upns, p2pstream, turbovidhls, abyssplayer, d.tube)
-            else if (url.contains("animekhor") || url.contains("upns") || url.contains("p2pstream") || url.contains("turbovid") || url.contains("bysekoze") || url.contains("abyssplayer") || url.contains("d.tube")) {
-                try {
-                    // Inject original page URL as Referer to bypass protection
-                    val res = app.get(url, headers = mapOf("Referer" to data))
-                    val doc = res.document
-                    
-                    // Rip Subtitles
-                    doc.select("track").forEach { track ->
-                        val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
-                        val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "Subtitle" }
-                        val subUrl = fixRelativeUrl(trackSrc, url)
-                        if (!subUrl.isNullOrBlank()) {
-                            subtitleCallback(SubtitleFile(label, subUrl))
-                        }
-                    }
 
-                    // Rip Video Streams
-                    var customFound = false
-                    doc.select("source").forEach { source ->
-                        val streamUrl = fixRelativeUrl(source.attr("src"), url)
-                        if (!streamUrl.isNullOrBlank() && (streamUrl.contains(".m3u8") || streamUrl.contains(".txt") || source.attr("type").contains("mpegurl", true))) {
-                            M3u8Helper.generateM3u8("Multi Player", streamUrl, url).forEach { callback(it) }
-                            customFound = true
+                // B. Native Cloudstream Extractors (ok.ru, Rumble, D.Tube, Doodstream, etc.)
+                if (loadExtractor(embedUrl, data, subtitleCallback) { link ->
+                    callback(
+                        newExtractorLink(
+                            source = link.source.ifBlank { name },
+                            name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
+                            url = link.url,
+                            type = link.type
+                        ) {
+                            this.quality = link.quality
+                            this.headers = siteHeaders
+                            this.extractorData = link.extractorData
+                            this.referer = link.referer.ifBlank { data }
                         }
-                    }
+                    )
+                }) {
+                    found = true
+                    continue
+                }
 
-                    // Regex fallback for heavily embedded players
-                    if (!customFound) {
-                        Regex("""https?://[^\s"'<>]+(?:\.m3u8|\.txt|\.mp4)(?:\?[^\s"'<>]*)?""").findAll(res.text).forEach { match ->
-                            if (match.value.contains(".m3u8") || match.value.contains(".txt")) {
-                                M3u8Helper.generateM3u8("Multi Player", match.value, url).forEach { callback(it) }
-                                customFound = true
-                            } else {
+                // C. AnimeKhor Multi-Player / Custom Proxy Servers (UPNS, P2PStream, Turbovid, Abyss, VGPlayer)
+                val res = app.get(embedUrl, headers = mapOf("Referer" to data, "User-Agent" to USER_AGENT))
+                val pageText = res.text
+                val pageDoc = res.document
+
+                // Extract Subtitles
+                pageDoc.select("track").forEach { track ->
+                    val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
+                    val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "Subtitle" }
+                    val subUrl = fixRelativeUrl(trackSrc, embedUrl)
+                    if (!subUrl.isNullOrBlank()) {
+                        subtitleCallback(newSubtitleFile(label, subUrl))
+                    }
+                }
+
+                // Extract Video Streams
+                var customFound = false
+                pageDoc.select("source").forEach { source ->
+                    val streamUrl = fixRelativeUrl(source.attr("src"), embedUrl)
+                    if (!streamUrl.isNullOrBlank()) {
+                        val isM3u8 = streamUrl.contains(".m3u8", true) || streamUrl.contains(".txt", true) || source.attr("type").contains("mpegurl", true)
+                        if (isM3u8) {
+                            M3u8Helper.generateM3u8(name, streamUrl, embedUrl, headers = siteHeaders).forEach { link ->
                                 callback(
-                                    ExtractorLink(
-                                        source = "Multi Player",
-                                        name = "Multi Player",
-                                        url = match.value,
-                                        referer = url,
-                                        quality = Qualities.Unknown.value,
-                                        type = ExtractorLinkType.VIDEO
-                                    )
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "$serverLabel (HLS)",
+                                        url = link.url,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.quality = link.quality
+                                        this.headers = siteHeaders
+                                        this.referer = embedUrl
+                                    }
                                 )
                                 customFound = true
                             }
+                        } else {
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "$serverLabel (MP4)",
+                                    url = streamUrl,
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = siteHeaders
+                                    this.referer = embedUrl
+                                }
+                            )
+                            customFound = true
                         }
                     }
-                    if (customFound) found = true
-                } catch (e: Exception) {}
-            }
-            
-            // C. Fallback for native Extractors (ok.ru, rumble, etc.)
-            else {
-                try {
-                    loadExtractor(url, data, subtitleCallback, callback)
-                    found = true
-                } catch (e: Exception) {}
+                }
+
+                // Regex Fallback for Embedded / Obfuscated JS Streams (e.g. upns.live, p2pstream.vip, turbosplayer)
+                if (!customFound) {
+                    val streamMatches = Regex("""https?://[^\s"'<>]+?(?:\.m3u8|\.mp4|\.txt|playlist\.m3u8|master\.m3u8)(?:\?[^\s"'<>]*)?""")
+                        .findAll(pageText).map { it.value.replace("\\/", "/") }.distinct().toList()
+
+                    for (streamUrl in streamMatches) {
+                        val isM3u8 = streamUrl.contains(".m3u8", true) || streamUrl.contains(".txt", true)
+                        if (isM3u8) {
+                            M3u8Helper.generateM3u8(name, streamUrl, embedUrl, headers = siteHeaders).forEach { link ->
+                                callback(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "$serverLabel (HLS)",
+                                        url = link.url,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.quality = link.quality
+                                        this.headers = siteHeaders
+                                        this.referer = embedUrl
+                                    }
+                                )
+                                customFound = true
+                            }
+                        } else {
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "$serverLabel (Direct)",
+                                    url = streamUrl,
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = siteHeaders
+                                    this.referer = embedUrl
+                                }
+                            )
+                            customFound = true
+                        }
+                    }
+                }
+
+                if (customFound) found = true
+
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
