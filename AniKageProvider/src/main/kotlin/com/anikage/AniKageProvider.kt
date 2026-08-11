@@ -202,21 +202,16 @@ class AniKageProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
+        // EXACT FIX: Removed the DOM scraping entirely. Only relies on AniList data in the script.
         var limit = 0
-        val epLinks = document.select("a[href*='?ep='], a[href*='&ep=']")
-        if (epLinks.isNotEmpty()) {
-            limit = epLinks.mapNotNull { Regex("""[?&]ep=(\d+)""").find(it.attr("href"))?.groupValues?.get(1)?.toIntOrNull() }.maxOrNull() ?: 0
-        }
-
-        if (limit == 0) {
-            val nextAiring = Regex("""(?i)nextAiringEpisode[^}]*?episode["']?\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
-            if (nextAiring != null) {
-                limit = nextAiring - 1
-            } else {
-                val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
-                val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
-                limit = if (currentEps > 0) currentEps else totalEps
-            }
+        val nextAiring = Regex("""(?i)nextAiringEpisode[^}]*?episode["']?\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
+        
+        if (nextAiring != null) {
+            limit = nextAiring - 1
+        } else {
+            val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
+            val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
+            limit = if (currentEps > 0) currentEps else totalEps
         }
 
         if (limit <= 0) limit = 1
@@ -294,23 +289,11 @@ class AniKageProvider : MainAPI() {
 
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
-        // Removed the .take(6) cap from the regression version — it silently
-        // dropped providers with no error, a landmine even when the current
-        // sort order happens to keep vibeube/vidtube inside the first 6.
         for (lang in langs) {
             for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    // Fixed: the regression version used Thread.sleep() inside this
-                    // suspend function, which blocks the actual coroutine dispatcher
-                    // thread rather than yielding it — with 3 retries per provider
-                    // across up to 18 providers x 2 languages, this could easily
-                    // stall the whole loadLinks() call long enough that CloudStream's
-                    // player gives up waiting before slower providers (vibeube/vidtube,
-                    // tried first) ever get to call back, while a provider processed
-                    // without needing a retry (megaplay) still makes it through.
-                    // kotlinx.coroutines.delay() suspends without blocking the thread.
                     var responseText = ""
                     var retries = 0
 
@@ -333,7 +316,7 @@ class AniKageProvider : MainAPI() {
 
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
-                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("akage.lol") || cleanUrl.contains("workers.dev")
+                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
 
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
@@ -408,11 +391,11 @@ class AniKageProvider : MainAPI() {
 
         if (!found) {
             try {
-                val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|akage\.lol|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
+                val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("akage.lol") || extractedUrl.contains("prox.anicore")
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
 
                     callback(
                         newExtractorLink(
