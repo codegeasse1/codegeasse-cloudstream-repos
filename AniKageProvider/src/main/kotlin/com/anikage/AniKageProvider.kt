@@ -269,12 +269,12 @@ class AniKageProvider : MainAPI() {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // FIXED: Elevated MegaPlay to priority 1 so it isn't discarded by the anti-ban limiter
+        // Prioritizes Vidtube (0) and MegaPlay (1) above other providers (2)
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
-                provider == "megatube" || provider == "megaplay" -> 1 
-                else -> 2 // Other servers get pushed to the back
+                provider == "megatube" || provider == "megaplay" -> 1
+                else -> 2
             }
         }
 
@@ -291,7 +291,7 @@ class AniKageProvider : MainAPI() {
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            for (provider in activeProviders.take(6)) {
+            for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
