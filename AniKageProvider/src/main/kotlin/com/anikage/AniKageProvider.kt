@@ -202,16 +202,25 @@ class AniKageProvider : MainAPI() {
             plot = Jsoup.parse(plot).text()
         }
 
-        // Checks nextAiringEpisode to avoid generating unreleased episode buttons
-        var limit = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
-        if (limit <= 0) {
-            val nextAiring = Regex("""nextAiringEpisode\s*:\s*\{[^}]*?episode\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
+        // FIXED: Exact Episode Resolution. Scans DOM, then correctly formats the Anilist state parsing.
+        var limit = 0
+        
+        val epLinks = document.select("a[href*='?ep='], a[href*='&ep=']")
+        if (epLinks.isNotEmpty()) {
+            limit = epLinks.mapNotNull { Regex("""[?&]ep=(\d+)""").find(it.attr("href"))?.groupValues?.get(1)?.toIntOrNull() }.maxOrNull() ?: 0
+        }
+
+        if (limit == 0) {
+            val nextAiring = Regex("""(?i)nextAiringEpisode[^}]*?episode["']?\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
             if (nextAiring != null) {
                 limit = nextAiring - 1
             } else {
-                limit = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 1
+                val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
+                val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
+                limit = if (currentEps > 0) currentEps else totalEps
             }
         }
+        
         if (limit <= 0) limit = 1
 
         val episodes = mutableListOf<Episode>()
@@ -258,12 +267,10 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
-        // Force primary servers into the query list
         listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // Sort so Vidtube is queried first, Megaplay last
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
@@ -289,13 +296,30 @@ class AniKageProvider : MainAPI() {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
+                    // FIXED: Retry Logic ensures AniKage's rate limits don't crash the video scraper
+                    var responseText = ""
+                    var retries = 0
+                    
+                    while (retries < 3) {
+                        val res = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/"), allowError = true)
+                        if (res.code == 429 || res.code == 403) {
+                            retries++
+                            java.lang.Thread.sleep(400)
+                        } else {
+                            responseText = res.text
+                            break
+                        }
+                    }
+
+                    if (responseText.isBlank()) continue
+
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
 
                     for (match in matches) {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
 
+                        // Added akage.lol to the known hosts check
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("akage.lol") || cleanUrl.contains("workers.dev")
@@ -373,6 +397,7 @@ class AniKageProvider : MainAPI() {
 
         if (!found) {
             try {
+                // FIXED: Included akage.lol in the main HTML fallback regex check
                 val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|akage\.lol|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
 
                 for (match in matches) {
