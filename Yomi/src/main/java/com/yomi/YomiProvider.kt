@@ -3,6 +3,7 @@ package com.yomi
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
+import android.util.Base64
 
 class YomiProvider : MainAPI() {
     override var mainUrl = "https://yomi.to"
@@ -35,7 +36,6 @@ class YomiProvider : MainAPI() {
         
         val jsonResponse = JSONObject(req.text)
         
-        // Safety check: Throw a readable error if Anilist rejects the query
         if (jsonResponse.has("errors")) {
             val errorMessage = jsonResponse.optJSONArray("errors")?.optJSONObject(0)?.optString("message") ?: "Unknown GraphQL Error"
             throw ErrorLoadingException("Anilist Error: $errorMessage")
@@ -150,7 +150,7 @@ class YomiProvider : MainAPI() {
             }
         } catch (e: Exception) { 0 }
 
-        if (maxEp == 0) maxEp = 1 // Fallback in case of Anilist 0-episode ghosting
+        if (maxEp == 0) maxEp = 1 
 
         val episodes = mutableListOf<Episode>()
         for (i in 1..maxEp) {
@@ -180,85 +180,145 @@ class YomiProvider : MainAPI() {
         val malId = splitData[0]
         val epNum = splitData[1]
 
-        if (malId == "0") {
-            println("YOMI ERROR: malId is 0. Cannot fetch links without a valid MAL ID.")
-            return false
-        }
+        if (malId == "0") return false
 
         var found = false
         val types = listOf("sub", "dub")
-        val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload")
+        val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload", "vidplay")
+        
+        val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         for (type in types) {
+            var subParsed = false
             for (server in servers) {
                 try {
-                    // ADDED: Strict User-Agent to bypass server blocks
                     val apiRes = app.get(
                         "https://api.flikhub.net/$server?mal=$malId&ep=$epNum&type=$type",
                         headers = mapOf(
                             "Referer" to "$mainUrl/",
                             "Origin" to mainUrl,
-                            "Accept" to "application/json",
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
+                            "Accept" to "*/*", 
+                            "User-Agent" to userAgent
                         )
                     ).text
 
-                    // If the API blocks us (returns HTML instead of JSON), skip to the next server
-                    if (!apiRes.trim().startsWith("{")) continue
+                    var fileUrl = ""
 
-                    val json = JSONObject(apiRes)
-                    val sources = json.optJSONArray("sources")
-                    
-                    if (sources != null && sources.length() > 0) {
-                        var fileUrl = sources.getJSONObject(0).optString("file")
+                    // 1. Try to parse as JSON first
+                    if (apiRes.trim().startsWith("{")) {
+                        val json = JSONObject(apiRes)
+                        val sources = json.optJSONArray("sources")
                         
-                        if (fileUrl.isNotBlank()) {
-                            // ADDED: If the API returns a proxy wrapper, extract the direct m3u8 link
-                            if (fileUrl.contains("url=")) {
-                                val extracted = fileUrl.substringAfter("url=").substringBefore("&")
-                                fileUrl = java.net.URLDecoder.decode(extracted, "UTF-8")
+                        if (sources != null && sources.length() > 0) {
+                            fileUrl = sources.getJSONObject(0).optString("file")
+                        }
+
+                        if (!subParsed) {
+                            val subtitles = json.optJSONArray("subtitles")
+                            if (subtitles != null) {
+                                for (i in 0 until subtitles.length()) {
+                                    val sub = subtitles.getJSONObject(i)
+                                    var subFile = sub.optString("file")
+                                    val subLabel = sub.optString("label", "English")
+                                    
+                                    if (subFile.isNotBlank()) {
+                                        if (subFile.contains("url=")) {
+                                            val extSub = subFile.substringAfter("url=").substringBefore("&")
+                                            subFile = java.net.URLDecoder.decode(extSub, "UTF-8")
+                                        }
+                                        subtitleCallback(newSubtitleFile(subLabel, subFile))
+                                        subParsed = true
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // 2. If not JSON, treat the response itself as an embed HTML or URL
+                        fileUrl = apiRes
+                    }
+
+                    // 3. Process the extracted URL or HTML
+                    if (fileUrl.isNotBlank()) {
+                        val isHtml = fileUrl.contains("<html") || fileUrl.contains("<body") || fileUrl.contains("eval(function")
+                        
+                        // If it's a clean link, try to use it directly or pass it to standard extractors
+                        if (!isHtml && fileUrl.startsWith("http")) {
+                            var cleanUrl = fileUrl
+                            if (cleanUrl.contains("url=")) {
+                                val extracted = cleanUrl.substringAfter("url=").substringBefore("&")
+                                cleanUrl = java.net.URLDecoder.decode(extracted, "UTF-8")
                             }
 
+                            if (cleanUrl.contains(".m3u8") || cleanUrl.contains(".mp4") || cleanUrl.contains("mewstream")) {
+                                callback(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
+                                        url = cleanUrl,
+                                        type = if (cleanUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = "https://${server}.buzz/" 
+                                        this.quality = Qualities.Unknown.value
+                                        this.headers = mapOf(
+                                            "Referer" to "https://${server}.buzz/",
+                                            "User-Agent" to userAgent
+                                        )
+                                    }
+                                )
+                                found = true
+                            } else {
+                                if (loadExtractor(cleanUrl, mainUrl, subtitleCallback, callback)) {
+                                    found = true
+                                }
+                            }
+                        }
+
+                        // 4. Robust Anikoto HTML Unpacking / Regex Fallback
+                        var m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(fileUrl)
+                        
+                        if (m3u8Match == null && fileUrl.contains("eval(function(p,a,c,k,e,d)")) {
+                            try {
+                                val unpacked = getAndUnpack(fileUrl)
+                                m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(unpacked)
+                            } catch (e: Exception) {}
+                        }
+
+                        // 5. Hunt for Base64 encoded links
+                        if (m3u8Match == null) {
+                            val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""").findAll(fileUrl)
+                            for (b64 in base64Regex) {
+                                try {
+                                    val decoded = String(Base64.decode(b64.groupValues[1], Base64.DEFAULT))
+                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                                        m3u8Match = Regex("""https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*""").find(decoded)
+                                        break
+                                    }
+                                } catch (e: Exception) {}
+                            }
+                        }
+
+                        if (m3u8Match != null) {
+                            val mediaUrl = m3u8Match.value
                             callback(
                                 newExtractorLink(
                                     source = name,
-                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                    url = fileUrl,
-                                    type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
+                                    url = mediaUrl,
+                                    type = if (mediaUrl.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.referer = "https://${server}.buzz/" 
+                                    this.referer = "https://${server}.buzz/"
                                     this.quality = Qualities.Unknown.value
                                     this.headers = mapOf(
-                                        "Referer" to "https://${server}.buzz/",
-                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
+                                        "Referer" to "https://${server}.buzz/", 
+                                        "User-Agent" to userAgent
                                     )
                                 }
                             )
                             found = true
                         }
                     }
-
-                    if (server == servers.first()) {
-                        val subtitles = json.optJSONArray("subtitles")
-                        if (subtitles != null) {
-                            for (i in 0 until subtitles.length()) {
-                                val sub = subtitles.getJSONObject(i)
-                                var subFile = sub.optString("file")
-                                val subLabel = sub.optString("label", "English")
-                                
-                                if (subFile.isNotBlank()) {
-                                    // Extract direct subtitle URL if proxied
-                                    if (subFile.contains("url=")) {
-                                        val extractedSub = subFile.substringAfter("url=").substringBefore("&")
-                                        subFile = java.net.URLDecoder.decode(extractedSub, "UTF-8")
-                                    }
-                                    subtitleCallback(newSubtitleFile(subLabel, subFile))
-                                }
-                            }
-                        }
-                    }
                 } catch (e: Exception) {
-                    println("YOMI SERVER ERROR ($server): ${e.message}")
+                    println("YOMI ERROR: ${e.message}")
                 }
             }
         }
