@@ -265,15 +265,17 @@ class AniKageProvider : MainAPI() {
             cleanHtml.contains(">$provider<", ignoreCase = true)
         }.toMutableList()
 
+        // Force primary servers into the query list
         listOf("dib", "vibeube", "vidtube", "megatube", "megaplay").forEach {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
+        // Sort so Vidtube is queried first, Megaplay last
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
-                provider == "megatube" || provider == "megaplay" -> 1
-                else -> 2
+                provider == "megatube" || provider == "megaplay" -> 2
+                else -> 1
             }
         }
 
@@ -290,26 +292,11 @@ class AniKageProvider : MainAPI() {
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
-            for (provider in activeProviders.take(6)) {
+            for (provider in activeProviders) {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    // FIXED: Replaced allowError with a proper Try-Catch around the network call
-                    var responseText = ""
-                    var retries = 0
-                    
-                    while (retries < 3) {
-                        try {
-                            responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                            break
-                        } catch (e: Exception) {
-                            retries++
-                            java.lang.Thread.sleep(400)
-                        }
-                    }
-
-                    if (responseText.isBlank()) continue
-
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
 
                     for (match in matches) {
@@ -318,7 +305,7 @@ class AniKageProvider : MainAPI() {
 
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
-                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("akage.lol") || cleanUrl.contains("workers.dev")
+                        val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
 
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
@@ -345,7 +332,7 @@ class AniKageProvider : MainAPI() {
                                     url = cleanUrl,
                                     type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.quality = Qualities.Unknown.value 
+                                    this.quality = Qualities.Unknown.value
                                     this.headers = videoHeaders
                                 }
                             )
@@ -393,11 +380,11 @@ class AniKageProvider : MainAPI() {
 
         if (!found) {
             try {
-                val matches = Regex("""https?://(?:[a-zA-Z0-9-]+\.)*(?:anicore\.tv|anikage\.cc|akage\.lol|workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
+                val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
 
                 for (match in matches) {
                     val extractedUrl = match.value
-                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("akage.lol") || extractedUrl.contains("prox.anicore")
+                    val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
 
                     callback(
                         newExtractorLink(
