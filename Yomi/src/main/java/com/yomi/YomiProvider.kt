@@ -185,94 +185,149 @@ class YomiProvider : MainAPI() {
         val types = listOf("sub", "dub")
         val servers = listOf("megaplay", "filemoon", "streamwish", "vidhide", "mp4upload", "vidplay")
         
+        // We will test multiple known backend domains in case one is blocked by Cloudflare
+        val apiDomains = listOf("api.flikhub.net", "api.yenime.net", "api.animanga.fun")
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         for (type in types) {
             for (server in servers) {
-                try {
-                    val apiUrl = "https://api.flikhub.net/$server?mal=$malId&ep=$epNum&type=$type"
-                    val apiRes = app.get(
-                        apiUrl,
-                        headers = mapOf(
-                            "Referer" to "$mainUrl/",
-                            "Origin" to mainUrl,
-                            "User-Agent" to userAgent
+                for (domain in apiDomains) {
+                    try {
+                        val apiUrl = "https://$domain/$server?mal=$malId&ep=$epNum&type=$type"
+                        val req = app.get(
+                            apiUrl,
+                            headers = mapOf(
+                                "Referer" to "$mainUrl/",
+                                "Origin" to mainUrl,
+                                "User-Agent" to userAgent
+                            )
                         )
-                    ).text
-
-                    // Extract all potential URLs (embeds or media) from the API response
-                    val urlRegex = Regex("""https?://[^\s"'<>\\]+""")
-                    val extractedUrls = urlRegex.findAll(apiRes).map { it.value.replace("\\/", "/") }.distinct().toList()
-
-                    for (url in extractedUrls) {
-                        // Skip common junk URLs that might get caught
-                        if (url.contains("w3.org") || url.contains("googleapis") || url.contains("gstatic") || url.endsWith(".js") || url.endsWith(".css")) continue
-
-                        // 1. Try Cloudstream's native extractors first (Mimicking Anikoto & Aniwaves)
-                        if (loadExtractor(url, apiUrl, subtitleCallback, callback)) {
-                            found = true
-                            continue
+                        
+                        // Strategy 1: Check for a Server Redirect 
+                        // (e.g. if api.flikhub.net redirects you straight to megaplay.buzz)
+                        if (req.url != apiUrl && req.url.startsWith("http")) {
+                            if (loadExtractor(req.url, "$mainUrl/", subtitleCallback, callback)) {
+                                found = true
+                                break // Stop checking domains, move to the next server
+                            }
                         }
 
-                        // 2. If loadExtractor fails, check if it's a raw video/proxy link we can play directly
-                        if (url.contains(".m3u8") || url.contains("/m3u8") || url.contains(".mp4") || url.contains("proxy")) {
+                        val apiRes = req.text
+
+                        // Strategy 2: Check for standard JSON Response
+                        if (apiRes.trim().startsWith("{")) {
+                            val json = JSONObject(apiRes)
+                            val sources = json.optJSONArray("sources")
                             
-                            // If it's a proxy link holding an inner URL, extract the inner one as a backup
-                            if (url.contains("url=")) {
-                                try {
-                                    val nestedUrl = java.net.URLDecoder.decode(url.substringAfter("url=").substringBefore("&"), "UTF-8")
-                                    callback(
-                                        newExtractorLink(
-                                            source = name,
-                                            name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Nested)",
-                                            url = nestedUrl,
-                                            type = if (nestedUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                        ) {
-                                            this.referer = "https://${server}.buzz/"
-                                            this.quality = Qualities.Unknown.value
-                                        }
-                                    )
-                                    found = true
-                                } catch (e: Exception) {}
+                            if (sources != null && sources.length() > 0) {
+                                for (i in 0 until sources.length()) {
+                                    val fileUrl = sources.getJSONObject(i).optString("file")
+                                    if (fileUrl.isNotBlank()) {
+                                        callback(
+                                            newExtractorLink(
+                                                source = name,
+                                                name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
+                                                url = fileUrl,
+                                                type = if (fileUrl.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                            ) {
+                                                this.referer = "https://${server}.buzz/"
+                                                this.quality = Qualities.Unknown.value
+                                                this.headers = mapOf(
+                                                    "Referer" to "https://${server}.buzz/",
+                                                    "User-Agent" to userAgent
+                                                )
+                                            }
+                                        )
+                                        found = true
+                                    }
+                                }
                             }
 
-                            // Add the original proxy/media link
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()}",
-                                    url = url,
-                                    type = if (url.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = "https://${server}.buzz/"
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf(
-                                        "Referer" to "https://${server}.buzz/",
-                                        "User-Agent" to userAgent
-                                    )
-                                }
-                            )
-                            found = true
-                        }
-                    }
-
-                    // Extract Subtitles if the API returned JSON
-                    if (apiRes.contains("subtitles")) {
-                        try {
-                            val json = JSONObject(apiRes)
-                            val subs = json.optJSONArray("subtitles")
-                            if (subs != null) {
-                                for (i in 0 until subs.length()) {
-                                    val subFile = subs.getJSONObject(i).optString("file")
-                                    val subLabel = subs.getJSONObject(i).optString("label", "English")
+                            val subtitles = json.optJSONArray("subtitles")
+                            if (subtitles != null) {
+                                for (i in 0 until subtitles.length()) {
+                                    val subFile = subtitles.getJSONObject(i).optString("file")
+                                    val subLabel = subtitles.getJSONObject(i).optString("label", "English")
                                     if (subFile.isNotBlank()) subtitleCallback(newSubtitleFile(subLabel, subFile))
                                 }
                             }
-                        } catch (e: Exception) {}
-                    }
+                            
+                            if (found) break 
+                        }
 
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                        // Strategy 3: Check for an iFrame hiding inside HTML
+                        val iframeRegex = Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""")
+                        val iframeUrl = iframeRegex.find(apiRes)?.groupValues?.get(1)
+                        if (iframeUrl != null) {
+                            if (loadExtractor(iframeUrl, apiUrl, subtitleCallback, callback)) {
+                                found = true
+                                break
+                            }
+                        }
+
+                        // Strategy 4: Raw Regex extraction for Proxy links and direct M3U8 files
+                        val urlRegex = Regex("""https?://[^\s"'<>\\]+""")
+                        val extractedUrls = urlRegex.findAll(apiRes).map { it.value.replace("\\/", "/") }.distinct().toList()
+
+                        for (url in extractedUrls) {
+                            if (url.contains("w3.org") || url.contains("googleapis") || url.endsWith(".js") || url.endsWith(".css")) continue
+
+                            if (loadExtractor(url, apiUrl, subtitleCallback, callback)) {
+                                found = true
+                                continue
+                            }
+
+                            if (url.contains(".m3u8") || url.contains(".mp4") || url.contains("proxy")) {
+                                callback(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Raw)",
+                                        url = url,
+                                        type = if (url.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = "https://${server}.buzz/"
+                                        this.quality = Qualities.Unknown.value
+                                        this.headers = mapOf(
+                                            "Referer" to "https://${server}.buzz/",
+                                            "User-Agent" to userAgent
+                                        )
+                                    }
+                                )
+                                found = true
+                            }
+                        }
+
+                        // Strategy 5: Base64 Encoded URLs
+                        val base64Regex = Regex("""["'](aHR0cHM6Ly[a-zA-Z0-9+/=]+)["']""")
+                        for (b64 in base64Regex.findAll(apiRes)) {
+                            try {
+                                val decoded = String(android.util.Base64.decode(b64.groupValues[1], android.util.Base64.DEFAULT))
+                                if (decoded.startsWith("http")) {
+                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                                        callback(
+                                            newExtractorLink(
+                                                source = name,
+                                                name = "${server.replaceFirstChar { it.uppercase() }} ${type.uppercase()} (Decoded)",
+                                                url = decoded,
+                                                type = if (decoded.contains("m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                            ) {
+                                                this.referer = "https://${server}.buzz/"
+                                                this.quality = Qualities.Unknown.value
+                                            }
+                                        )
+                                        found = true
+                                    } else {
+                                        if (loadExtractor(decoded, apiUrl, subtitleCallback, callback)) found = true
+                                    }
+                                }
+                            } catch (e: Exception) {}
+                        }
+
+                        if (found) break 
+                        
+                    } catch (e: Exception) {
+                        // The server threw a 403 or 404 block. Ignore it and let the loop try the next domain.
+                    }
                 }
             }
         }
