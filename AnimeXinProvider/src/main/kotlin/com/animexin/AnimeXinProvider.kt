@@ -33,9 +33,12 @@ class AnimeXinProvider : MainAPI() {
         }
 
         val document = app.get(url).document
+        
+        // FIXED: Added distinctBy { it.url } so Cloudstream removes the duplicate shows 
+        // that appear in both the slider and the grid.
         val homeItems = document.select("article.bs, .listupd .bsx").mapNotNull { element ->
             element.toSearchResult()
-        }
+        }.distinctBy { it.url }
 
         return newHomePageResponse(request.name, homeItems)
     }
@@ -52,7 +55,6 @@ class AnimeXinProvider : MainAPI() {
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
-            // Fixed: use mutableSetOf as expected by the property type
             this.dubStatus = if (this@toSearchResult.text().contains("Dub", ignoreCase = true)) {
                 mutableSetOf(DubStatus.Dubbed)
             } else {
@@ -75,9 +77,11 @@ class AnimeXinProvider : MainAPI() {
 
             try {
                 val document = app.get(url).document
+                
+                // FIXED: Also added distinctBy here just in case search returns duplicates
                 val items = document.select("article.bs, .listupd .bsx").mapNotNull { element ->
                     element.toSearchResult()
-                }
+                }.distinctBy { it.url }
 
                 if (items.isEmpty()) break
 
@@ -127,11 +131,19 @@ class AnimeXinProvider : MainAPI() {
         document.select(".eplister ul li").forEach { ep ->
             val aTag = ep.selectFirst("a") ?: return@forEach
             val epUrl = fixUrlNull(aTag.attr("href")) ?: return@forEach
-            val epNum = ep.selectFirst(".epl-num")?.text()?.toIntOrNull()
-            val epTitle = ep.selectFirst(".epl-title")?.text() ?: "Episode $epNum"
+            
+            // FIXED: We now extract the raw text and use a Regex to pull out ONLY the digits. 
+            // This safely bypasses text like "14 END" so it correctly reads as Episode 14.
+            val epNumText = ep.selectFirst(".epl-num")?.text() ?: ""
+            val epTitleText = ep.selectFirst(".epl-title")?.text() ?: ""
+            
+            val epNum = Regex("""\d+""").find(epNumText)?.value?.toIntOrNull() 
+                ?: Regex("""\d+""").find(epTitleText)?.value?.toIntOrNull()
+                
+            val epName = if (epTitleText.isNotBlank()) epTitleText else if (epNumText.isNotBlank()) epNumText else "Episode $epNum"
 
             episodes.add(newEpisode(epUrl) {
-                this.name = epTitle
+                this.name = epName.trim()
                 this.episode = epNum
             })
         }
