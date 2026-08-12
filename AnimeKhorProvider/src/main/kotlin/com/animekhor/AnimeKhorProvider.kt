@@ -186,7 +186,6 @@ class AnimeKhorProvider : MainAPI() {
         fun addEmbed(rawUrl: String?, name: String) {
             if (rawUrl.isNullOrBlank()) return
             var url = rawUrl.trim().replace("\\/", "/")
-            // Fixes //ok.ru and //vidhide by safely converting them to https://
             if (url.startsWith("//")) url = "https:$url"
             
             if (url.startsWith("http")) {
@@ -196,7 +195,6 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-        // 1. Decode all dropdown mirrors
         val mirrorOptions = document.select("select.mirror option[value]")
         for (element in mirrorOptions) {
             val value = element.attr("value").trim()
@@ -208,8 +206,10 @@ class AnimeKhorProvider : MainAPI() {
                 } else {
                     try {
                         val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8).trim()
-                        val iframeSrc = Jsoup.parse(decoded).select("iframe").attr("src")
-                        if (iframeSrc.isNotBlank()) {
+                        val iframeSrc = Jsoup.parse(decoded).select("iframe").attr("src").ifBlank {
+                            Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(decoded)?.groupValues?.get(1)
+                        }
+                        if (!iframeSrc.isNullOrBlank()) {
                             addEmbed(iframeSrc, label)
                         } else {
                             val directUrl = Regex("""https?://[^\s"'<>]+""").find(decoded)?.value
@@ -220,14 +220,12 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-        // 2. Extract visible iframes
         val iframes = document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe")
         for (iframe in iframes) {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") }
             addEmbed(src, "Default Player")
         }
 
-        // 3. Process every unique link
         for ((embedUrl, serverLabel) in embedLinks) {
             try {
                 // A. AbyssPlayer Handler
@@ -264,6 +262,18 @@ class AnimeKhorProvider : MainAPI() {
                             found = true
                             continue
                         }
+                        // ADDED BACK: Direct M3U8 fallback for Dailymotion (VidPlayer)
+                        try {
+                            val metaJson = app.get("https://www.dailymotion.com/player/metadata/video/$vidId").text
+                            val m3u8Url = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(metaJson)?.value
+                            if (!m3u8Url.isNullOrBlank()) {
+                                M3u8Helper.generateM3u8(if (serverLabel.isNotBlank()) serverLabel else "VidPlayer", m3u8Url, "https://www.dailymotion.com/").forEach { link ->
+                                    callback(link)
+                                    found = true
+                                }
+                                continue
+                            }
+                        } catch (e: Exception) {}
                     }
                 }
 
@@ -294,7 +304,6 @@ class AnimeKhorProvider : MainAPI() {
                 }
 
                 // E. Native Extractors (OK.ru, Filemoon, VidHide, Streamwish, Turbovid, etc.)
-                // NO HEADER TAMPERING. This passes exact headers returned by loadExtractor.
                 val tempLinks = mutableListOf<ExtractorLink>()
                 if (loadExtractor(embedUrl, data, subtitleCallback) { tempLinks.add(it) }) {
                     for (link in tempLinks) {
