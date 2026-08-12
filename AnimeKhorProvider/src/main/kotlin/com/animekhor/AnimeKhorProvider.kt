@@ -3,7 +3,6 @@ package com.animekhor
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -219,16 +218,16 @@ class AnimeKhorProvider : MainAPI() {
                 // A. Native Extractors (ok.ru, Doodstream, StreamWish, etc.)
                 if (loadExtractor(embedUrl, data, subtitleCallback) { link ->
                     callback(
-                        newExtractorLink(
+                        ExtractorLink(
                             source = if (serverLabel.isNotBlank() && !serverLabel.contains("Default")) serverLabel else link.source,
                             name = if (serverLabel.isNotBlank() && !serverLabel.contains("Default")) "$serverLabel (${link.name})" else link.name,
                             url = link.url,
-                            type = link.type
-                        ) {
-                            this.quality = link.quality
-                            this.headers = siteHeaders
-                            this.referer = link.referer.ifBlank { embedUrl }
-                        }
+                            referer = link.referer.ifBlank { embedUrl },
+                            quality = link.quality,
+                            type = if (link.isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
+                            headers = siteHeaders,
+                            extractorData = link.extractorData
+                        )
                     )
                 }) {
                     found = true
@@ -333,7 +332,7 @@ class AnimeKhorProvider : MainAPI() {
                         val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "English" }
                         val subUrl = fixRelativeUrl(trackSrc, embedUrl)
                         if (!subUrl.isNullOrBlank()) {
-                            subtitleCallback(newSubtitleFile(label, subUrl))
+                            subtitleCallback(SubtitleFile(label, subUrl))
                         }
                     }
 
