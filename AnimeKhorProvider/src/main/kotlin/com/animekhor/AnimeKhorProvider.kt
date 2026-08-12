@@ -3,6 +3,7 @@ package com.animekhor
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -85,13 +86,14 @@ class AnimeKhorProvider : MainAPI() {
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
 
         fun parseEpisodeGrid(doc: org.jsoup.nodes.Document, currentUrl: String): List<Episode> {
-            return doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li").mapNotNull { li ->
+            val episodeList = mutableListOf<Episode>()
+            for (li in doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li")) {
                 val epLink = li.selectFirst("a")
                 val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) 
                              else if (li.hasClass("selected") || li.hasAttr("selected") || li.select("div.playinfo").isNotEmpty()) currentUrl 
-                             else return@mapNotNull null
+                             else continue
                              
-                if (epHref == null) return@mapNotNull null
+                if (epHref == null) continue
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 
@@ -99,11 +101,12 @@ class AnimeKhorProvider : MainAPI() {
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
 
-                newEpisode(epHref) {
+                episodeList.add(newEpisode(epHref) {
                     this.name = epTitle.ifBlank { "Episode $epNum" }
                     this.episode = epNum
-                }
-            }.distinctBy { it.data }.reversed()
+                })
+            }
+            return episodeList.distinctBy { it.data }.reversed()
         }
 
         var episodes = parseEpisodeGrid(document, url)
@@ -180,7 +183,8 @@ class AnimeKhorProvider : MainAPI() {
         }
 
         // 1. Extract all dropdown mirrors from select.mirror option[value]
-        document.select("select.mirror option[value]").forEach { element ->
+        val mirrorOptions = document.select("select.mirror option[value]")
+        for (element in mirrorOptions) {
             val value = element.attr("value").trim()
             val label = element.text().trim().ifBlank { "Server" }
 
@@ -207,7 +211,8 @@ class AnimeKhorProvider : MainAPI() {
         }
 
         // 2. Extract visible iframes
-        document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe").forEach { iframe ->
+        val iframes = document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe")
+        for (iframe in iframes) {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") }
             addEmbed(src, "Default Player")
         }
@@ -247,7 +252,8 @@ class AnimeKhorProvider : MainAPI() {
                             val metaJson = app.get("https://www.dailymotion.com/player/metadata/video/$vidId").text
                             val m3u8Url = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(metaJson)?.value
                             if (!m3u8Url.isNullOrBlank()) {
-                                M3u8Helper.generateM3u8(serverLabel, m3u8Url, "https://www.dailymotion.com/", headers = siteHeaders).forEach { link ->
+                                val links = M3u8Helper.generateM3u8(serverLabel, m3u8Url, "https://www.dailymotion.com/", headers = siteHeaders)
+                                for (link in links) {
                                     callback(link)
                                     found = true
                                 }
@@ -263,7 +269,8 @@ class AnimeKhorProvider : MainAPI() {
                         ?: embedUrl.substringAfter("/videos/").substringBefore("/")
                     if (vidId.isNotBlank()) {
                         val m3u8Url = "https://nas2.d.tube/videos/$vidId/master.m3u8"
-                        M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                        val links = M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders)
+                        for (link in links) {
                             callback(link)
                             found = true
                         }
@@ -279,7 +286,8 @@ class AnimeKhorProvider : MainAPI() {
                         val apiText = app.get(apiUrl, headers = siteHeaders).text
                         val m3u8Url = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiText)?.value
                         if (!m3u8Url.isNullOrBlank()) {
-                            M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                            val links = M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders)
+                            for (link in links) {
                                 callback(link)
                                 found = true
                             }
@@ -296,7 +304,8 @@ class AnimeKhorProvider : MainAPI() {
                         val apiText = app.get(apiUrl, headers = siteHeaders).text
                         val m3u8Url = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiText)?.value
                         if (!m3u8Url.isNullOrBlank()) {
-                            M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                            val links = M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders)
+                            for (link in links) {
                                 callback(link)
                                 found = true
                             }
@@ -311,7 +320,8 @@ class AnimeKhorProvider : MainAPI() {
                         val html = app.get(embedUrl).text
                         val m3u8Url = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
                         if (!m3u8Url.isNullOrBlank()) {
-                            M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders).forEach { link ->
+                            val links = M3u8Helper.generateM3u8(serverLabel, m3u8Url, embedUrl, headers = siteHeaders)
+                            for (link in links) {
                                 callback(link)
                                 found = true
                             }
@@ -326,8 +336,8 @@ class AnimeKhorProvider : MainAPI() {
                     val embedHtml = embedRes.text
                     val doc = embedRes.document
 
-                    // Subtitles
-                    doc.select("track").forEach { track ->
+                    val tracks = doc.select("track")
+                    for (track in tracks) {
                         val trackSrc = track.attr("src").ifBlank { track.attr("data-src") }
                         val label = track.attr("label").ifBlank { track.attr("srclang") }.ifBlank { "English" }
                         val subUrl = fixRelativeUrl(trackSrc, embedUrl)
@@ -338,7 +348,8 @@ class AnimeKhorProvider : MainAPI() {
 
                     val streamUrl = Regex("""https?://[^\s"'<>]+?(?:\.m3u8|\.txt|playlist\.m3u8|master\.m3u8)(?:\?[^\s"'<>]*)?""").find(embedHtml)?.value
                     if (!streamUrl.isNullOrBlank()) {
-                        M3u8Helper.generateM3u8(serverLabel, streamUrl, embedUrl, headers = siteHeaders).forEach { link ->
+                        val links = M3u8Helper.generateM3u8(serverLabel, streamUrl, embedUrl, headers = siteHeaders)
+                        for (link in links) {
                             callback(link)
                             found = true
                         }
