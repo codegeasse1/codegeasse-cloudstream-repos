@@ -254,15 +254,33 @@ class AnimeKhorProvider : MainAPI() {
                     }
                 }
 
-                // B. Dailymotion Handler
+                // B. Dailymotion Handler (Fixed Regex to extract full video ID)
                 if (embedUrl.contains("dailymotion.com", true) || embedUrl.contains("geo.dailymotion", true)) {
-                    val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                    val vidId = Regex("""video/([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                        ?: Regex("""video=([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+
                     if (vidId != null) {
-                        if (loadExtractor("https://www.dailymotion.com/video/$vidId", data, subtitleCallback, callback)) {
+                        val tempLinks = mutableListOf<ExtractorLink>()
+                        if (loadExtractor("https://www.dailymotion.com/video/$vidId", data, subtitleCallback) { tempLinks.add(it) }) {
+                            for (link in tempLinks) {
+                                callback(
+                                    ExtractorLink(
+                                        source = if (serverLabel.isNotBlank()) serverLabel else "VidPlayer",
+                                        name = if (serverLabel.isNotBlank()) "$serverLabel (${link.name})" else link.name,
+                                        url = link.url,
+                                        referer = link.referer,
+                                        quality = link.quality,
+                                        type = link.type,
+                                        headers = link.headers,
+                                        extractorData = link.extractorData
+                                    )
+                                )
+                            }
                             found = true
                             continue
                         }
-                        // ADDED BACK: Direct M3U8 fallback for Dailymotion (VidPlayer)
+
+                        // Direct M3U8 fallback for Dailymotion (VidPlayer)
                         try {
                             val metaJson = app.get("https://www.dailymotion.com/player/metadata/video/$vidId").text
                             val m3u8Url = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(metaJson)?.value
