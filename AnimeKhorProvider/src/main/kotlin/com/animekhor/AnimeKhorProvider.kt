@@ -2,7 +2,11 @@ package com.animekhor
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -20,9 +24,6 @@ class AnimeKhorProvider : MainAPI() {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/anime/?status=&type=&order=update" to "Latest Release",
         "$mainUrl/anime/?status=&type=&order=popular" to "Popular",
@@ -32,8 +33,14 @@ class AnimeKhorProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else request.data.replace("?", "page/$page/?")
         val document = app.get(url).document
-        val home = document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
-        return newHomePageResponse(request.name, home)
+        
+        val homeItems = mutableListOf<SearchResponse>()
+        for (element in document.select("article.bs > div.bsx")) {
+            val item = element.toSearchResult()
+            if (item != null) homeItems.add(item)
+        }
+
+        return newHomePageResponse(request.name, homeItems.distinctBy { it.url })
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -56,17 +63,30 @@ class AnimeKhorProvider : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        return document.select("article.bs > div.bsx").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        val searchResults = mutableListOf<SearchResponse>()
+        val targetLimit = 100
+        var page = 1
+
+        while (searchResults.size < targetLimit) {
+            val url = if (page == 1) "$mainUrl/?s=$query" else "$mainUrl/page/$page/?s=$query"
+            try {
+                val document = app.get(url).document
+                val elements = document.select("article.bs > div.bsx")
+                if (elements.isEmpty()) break
+
+                for (element in elements) {
+                    val item = element.toSearchResult()
+                    if (item != null) searchResults.add(item)
+                }
+                page++
+            } catch (e: Exception) {
+                break
+            }
+        }
+        return searchResults.distinctBy { it.url }.take(targetLimit)
     }
 
-    // ---------------------------------------------------------------
-    // LOAD (anime detail page + episode list)
-    // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
@@ -86,7 +106,7 @@ class AnimeKhorProvider : MainAPI() {
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
 
         fun parseEpisodeGrid(doc: org.jsoup.nodes.Document, currentUrl: String): List<Episode> {
-            val episodeList = mutableListOf<Episode>()
+            val epList = mutableListOf<Episode>()
             for (li in doc.select("div.eplister ul li, div.episodelist ul li, ul.episodelist li, div.ep_list ul li, .bixbox.bxcl ul li")) {
                 val epLink = li.selectFirst("a")
                 val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) 
@@ -97,16 +117,17 @@ class AnimeKhorProvider : MainAPI() {
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 
+                // Safely handles texts like "14 END" by extracting only digits
                 val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
 
-                episodeList.add(newEpisode(epHref) {
+                epList.add(newEpisode(epHref) {
                     this.name = epTitle.ifBlank { "Episode $epNum" }
                     this.episode = epNum
                 })
             }
-            return episodeList.distinctBy { it.data }.reversed()
+            return epList.distinctBy { it.data }.reversed()
         }
 
         var episodes = parseEpisodeGrid(document, url)
@@ -131,31 +152,6 @@ class AnimeKhorProvider : MainAPI() {
         }
     }
 
-    private fun fixRelativeUrl(url: String?, baseUrl: String): String? {
-        if (url.isNullOrBlank()) return null
-        val trimmed = url.trim()
-        return when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
-            trimmed.startsWith("//") -> "https:$trimmed"
-            trimmed.startsWith("/") -> {
-                runCatching {
-                    val uri = URI(baseUrl)
-                    "${uri.scheme}://${uri.host}$trimmed"
-                }.getOrNull() ?: trimmed
-            }
-            else -> {
-                runCatching {
-                    val uri = URI(baseUrl)
-                    val path = uri.path.substringBeforeLast("/", "")
-                    "${uri.scheme}://${uri.host}$path/${trimmed.removePrefix("./")}"
-                }.getOrNull() ?: trimmed
-            }
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // LOAD LINKS
-    // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -164,139 +160,125 @@ class AnimeKhorProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
         var found = false
-        val embedLinks = mutableListOf<Pair<String, String>>()
+        val embedLinks = mutableSetOf<String>()
 
-        fun addEmbed(url: String?, name: String) {
-            if (url.isNullOrBlank()) return
-            var cleanUrl = url.trim().replace("\\/", "/")
-            if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
-            if (cleanUrl.startsWith("http")) {
-                if (embedLinks.none { it.first == cleanUrl }) {
-                    embedLinks.add(Pair(cleanUrl, name))
-                }
-            }
-        }
-
-        // 1. Extract all dropdown mirrors
+        // 1. Fully Decode All Dropdown Mirrors
         val mirrorOptions = document.select("select.mirror option[value]")
         for (element in mirrorOptions) {
             val value = element.attr("value").trim()
-            val label = element.text().trim().ifBlank { "Server" }
-
             if (value.isNotBlank()) {
                 if (value.startsWith("http") || value.startsWith("//")) {
-                    addEmbed(value, label)
+                    embedLinks.add(if (value.startsWith("//")) "https:$value" else value)
                 } else {
                     try {
                         val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8).trim()
-                        val iframeSrc = Jsoup.parse(decoded).select("iframe").attr("src").ifBlank {
-                            Regex("""src\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(decoded)?.groupValues?.get(1)
-                        }
-                        if (!iframeSrc.isNullOrBlank()) {
-                            addEmbed(iframeSrc, label)
+                        val iframeSrc = Jsoup.parse(decoded).select("iframe").attr("src")
+                        if (iframeSrc.isNotBlank()) {
+                            embedLinks.add(iframeSrc)
                         } else {
                             val directUrl = Regex("""https?://[^\s"'<>]+""").find(decoded)?.value
-                            addEmbed(directUrl ?: value, label)
+                            if (directUrl != null) embedLinks.add(directUrl)
                         }
-                    } catch (e: Exception) {
-                        addEmbed(value, label)
-                    }
+                    } catch (e: Exception) {}
                 }
             }
         }
 
-        // 2. Extract visible iframes
+        // 2. Extract Visible Iframes
         val iframes = document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe")
         for (iframe in iframes) {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") }
-            addEmbed(src, "Default Player")
+            if (src.isNotBlank()) {
+                embedLinks.add(if (src.startsWith("//")) "https:$src" else src)
+            }
         }
 
-        // 3. Process all extracted server links
-        for ((embedUrl, serverLabel) in embedLinks) {
+        // 3. Process every unique link found
+        for (url in embedLinks) {
+            val cleanUrl = url.trim().replace("\\/", "/")
+
             try {
-                // A. AbyssPlayer Handler (Fixes infinite buffering by matching embed referer)
-                if (embedUrl.contains("abyssplayer.com", ignoreCase = true) || embedUrl.contains("abyss", ignoreCase = true)) {
-                    val embedHeaders = mapOf(
-                        "Referer" to embedUrl,
-                        "User-Agent" to USER_AGENT
-                    )
-                    val html = app.get(embedUrl, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT)).text
-                    val mp4Url = Regex("""<source[^>]+src=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-                        ?: Regex("""file:\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
-                        ?: Regex("""https?://[^\s"'<>]+?\.mp4(?:\?[^\s"'<>]*)?""").find(html)?.value
-
-                    if (!mp4Url.isNullOrBlank()) {
-                        callback(
-                            ExtractorLink(
-                                source = if (serverLabel.isNotBlank()) serverLabel else "AbyssPlayer",
-                                name = if (serverLabel.isNotBlank()) "$serverLabel (Abyss)" else "AbyssPlayer",
-                                url = mp4Url,
-                                referer = embedUrl,
-                                quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.VIDEO,
-                                headers = embedHeaders,
-                                extractorData = ""
-                            )
-                        )
-                        found = true
-                        continue
-                    }
-                }
-
-                // B. Native Extractors (ok.ru, Doodstream, StreamWish, etc.)
-                // Preserves native link.headers to prevent ok.ru HTTP 403 / 2004 errors
+                // A. Try Cloudstream Native Extractors First (OK.ru, VidHide, StreamWish, Turbovid)
+                // We pass EXACTLY what the extractor returns to avoid breaking OK.ru with forced headers
                 val tempLinks = mutableListOf<ExtractorLink>()
-                if (loadExtractor(embedUrl, data, subtitleCallback) { tempLinks.add(it) }) {
+                if (loadExtractor(cleanUrl, data, subtitleCallback) { tempLinks.add(it) }) {
                     for (link in tempLinks) {
-                        callback(
-                            ExtractorLink(
-                                source = if (serverLabel.isNotBlank() && !serverLabel.contains("Default")) serverLabel else link.source,
-                                name = if (serverLabel.isNotBlank() && !serverLabel.contains("Default")) "$serverLabel (${link.name})" else link.name,
-                                url = link.url,
-                                referer = link.referer.ifBlank { embedUrl },
-                                quality = link.quality,
-                                type = link.type,
-                                headers = link.headers,
-                                extractorData = link.extractorData
-                            )
-                        )
+                        callback(link)
                     }
                     found = true
                     continue
                 }
 
-                // C. Dailymotion Handler
-                if (embedUrl.contains("dailymotion.com") || embedUrl.contains("geo.dailymotion")) {
-                    val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(embedUrl)?.groupValues?.get(1)
+                // B. Custom Handlers for Unsupported/Embedded Servers
+                
+                // AbyssPlayer Handler (Strip Referer to fix infinite buffering)
+                if (cleanUrl.contains("abyssplayer.com", true) || cleanUrl.contains("abyss", true)) {
+                    val html = app.get(cleanUrl).text
+                    val mp4 = Regex("""<source[^>]+src=["']([^"']+\.mp4[^\s"'<>]*)["']""").find(html)?.groupValues?.get(1)
+                        ?: Regex("""(?:file|src):\s*["']([^"']+\.mp4[^\s"'<>]*)["']""").find(html)?.groupValues?.get(1)
+                    if (mp4 != null) {
+                        callback(
+                            ExtractorLink(
+                                source = "AbyssPlayer",
+                                name = "AbyssPlayer",
+                                url = mp4,
+                                referer = "", // Left blank intentionally to prevent Google/Cloudflare 403 blocks
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.VIDEO,
+                                headers = emptyMap(),
+                                extractorData = ""
+                            )
+                        )
+                        found = true
+                    }
+                } 
+                // Dailymotion Handler
+                else if (cleanUrl.contains("dailymotion.com", true) || cleanUrl.contains("geo.dailymotion", true)) {
+                    val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(cleanUrl)?.groupValues?.get(1)
                     if (vidId != null) {
-                        val dmUrl = "https://www.dailymotion.com/video/$vidId"
-                        if (loadExtractor(dmUrl, data, subtitleCallback, callback)) {
+                        if (loadExtractor("https://www.dailymotion.com/video/$vidId", data, subtitleCallback, callback)) {
                             found = true
-                            continue
                         }
                     }
-                }
-
-                // D. UPNS / CloudPlayer & P2PStream / FilePlayer Handlers
-                if (embedUrl.contains("upns.live") || embedUrl.contains("p2pstream.vip")) {
-                    val host = if (embedUrl.contains("upns.live")) "animekhor.upns.live" else "animekhor.p2pstream.vip"
-                    val id = embedUrl.substringAfter("#").substringAfterLast("/")
-                    val apiUrl = "https://$host/api/v1/video?id=$id&w=1280&h=800&r=animekhor.org"
-                    val playerHeaders = mapOf(
-                        "Referer" to "https://$host/",
-                        "User-Agent" to USER_AGENT
-                    )
+                } 
+                // Rumble Handler
+                else if (cleanUrl.contains("rumble", true)) {
+                    val html = app.get(cleanUrl).text
+                    val m3u8 = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
+                    if (m3u8 != null) {
+                        val links = M3u8Helper.generateM3u8("Rumble", m3u8, cleanUrl)
+                        for (link in links) {
+                            callback(link)
+                            found = true
+                        }
+                    }
+                } 
+                // D.Tube Handler
+                else if (cleanUrl.contains("d.tube", true)) {
+                    val vidId = Regex("""v=([a-zA-Z0-9-]+)""").find(cleanUrl)?.groupValues?.get(1) ?: cleanUrl.substringAfter("/videos/").substringBefore("/")
+                    if (vidId.isNotBlank()) {
+                        val m3u8 = "https://nas2.d.tube/videos/$vidId/master.m3u8"
+                        val links = M3u8Helper.generateM3u8("DPlayer", m3u8, cleanUrl)
+                        for (link in links) {
+                            callback(link)
+                            found = true
+                        }
+                    }
+                } 
+                // UPNS / CloudPlayer & P2PStream / FilePlayer Handlers
+                else if (cleanUrl.contains("upns.live", true) || cleanUrl.contains("p2pstream.vip", true)) {
+                    val host = URI(cleanUrl).host
+                    val id = cleanUrl.substringAfterLast("/").substringBefore("?")
+                    val apiCall = "https://$host/api/v1/video?id=$id&w=1280&h=800&r=animekhor.org"
                     try {
-                        val apiText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT)).text
-                        val m3u8Url = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiText)?.value
-                        if (!m3u8Url.isNullOrBlank()) {
-                            val links = M3u8Helper.generateM3u8(serverLabel, m3u8Url, "https://$host/", headers = playerHeaders)
+                        val apiRes = app.get(apiCall, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT)).text
+                        val m3u8 = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiRes)?.value
+                        if (m3u8 != null) {
+                            val links = M3u8Helper.generateM3u8("CloudPlayer", m3u8, "https://$host/")
                             for (link in links) {
                                 callback(link)
                                 found = true
                             }
-                            continue
                         }
                     } catch (e: Exception) {}
                 }
