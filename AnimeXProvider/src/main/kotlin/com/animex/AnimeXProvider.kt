@@ -60,8 +60,14 @@ class AnimeXProvider : MainAPI() {
                 val relPath = Regex("""["']?poster_path["']?\s*:\s*["'](/[^"'\s]+)""").find(window)?.groupValues?.get(1)
                 if (relPath != null) poster = "https://image.tmdb.org/t/p/original$relPath"
             }
-            
-            val url = "$mainUrl/anime/$slug"
+
+            // The anime detail route is /anime/{slugBase}-{anilistId} (e.g.
+            // "one-piece-21"); the full slug carries a random suffix and 404s.
+            val anilistId = Regex("""["']?anilistId["']?\s*:\s*(\d+)""").find(window)?.groupValues?.get(1)
+            val url = if (anilistId != null)
+                "$mainUrl/anime/${slug.substringBeforeLast("-")}-$anilistId"
+            else
+                "$mainUrl/anime/$slug"
             if (items.none { it.url == url }) {
                 items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
                     this.posterUrl = poster
@@ -129,8 +135,14 @@ class AnimeXProvider : MainAPI() {
                 val relPath = Regex("""["']?poster_path["']?\s*:\s*["'](/[^"'\s]+)""").find(window)?.groupValues?.get(1)
                 if (relPath != null) poster = "https://image.tmdb.org/t/p/original$relPath"
             }
-            
-            val url = "$mainUrl/anime/$slug"
+
+            // The anime detail route is /anime/{slugBase}-{anilistId} (e.g.
+            // "one-piece-21"); the full slug carries a random suffix and 404s.
+            val anilistId = Regex("""["']?anilistId["']?\s*:\s*(\d+)""").find(window)?.groupValues?.get(1)
+            val url = if (anilistId != null)
+                "$mainUrl/anime/${slug.substringBeforeLast("-")}-$anilistId"
+            else
+                "$mainUrl/anime/$slug"
             if (items.none { it.url == url }) {
                 items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
                     this.posterUrl = poster
@@ -147,44 +159,53 @@ class AnimeXProvider : MainAPI() {
     // URLs are built as {slugBase}-{anilistId}-episode-{epNum}.
     // ---------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
+        // The anime detail URL is now /anime/{slugBase}-{anilistId} (e.g. "one-piece-21").
+        // The site embeds its SvelteKit data with UNQUOTED keys (titleEnglish:"..."),
+        // so every regex below tolerates optional quotes on keys and values.
         val slug = url.substringAfter("/anime/").substringBefore("?")
+        val anilistId = slug.substringAfterLast("-").toIntOrNull()?.toString()
+            ?: Regex("""["']?anilistId["']?\s*:\s*(\d+)""").find(html)?.groupValues?.get(1)
+        val slugBase = slug.substringBeforeLast("-")
         val html = app.get(url).text
         val document = Jsoup.parse(html)
 
-        val title = Regex(""""titleEnglish"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
-            ?: Regex(""""romajiTitle"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+        val title = Regex("""["']?titleEnglish["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
+            ?: Regex("""["']?romajiTitle["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
             ?: document.selectFirst("h1")?.text()?.trim()
-            ?: slug.replace("-", " ").replaceFirstChar { it.uppercase() }
+            ?: slugBase.replace("-", " ").replaceFirstChar { it.uppercase() }
 
-        var poster = Regex(""""coverImage"\s*:\s*\{[^}]*?"extraLarge"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+        var poster = Regex("""["']?coverImage["']?\s*:\s*\{[^}]*?["']?extraLarge["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
         if (poster.isNullOrBlank()) {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
 
-        var banner = Regex(""""bannerImage"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+        var banner = Regex("""["']?bannerImage["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
+        if (banner.isNullOrBlank()) banner = Regex("""["']?backdropUrl["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
         if (banner.isNullOrBlank()) banner = poster
 
-        var plot = Regex(""""synopsis"\s*:\s*"((?:[^"\\]|\\.)*)"""").find(html)?.groupValues?.get(1)
-            ?.replace("\\u003C", "<")?.replace("\\/", "/")
+        var plot = Regex("""["']?synopsis["']?\s*:\s*["']((?:[^"\\]|\\.)*)["']""").find(html)?.groupValues?.get(1)
+            ?: Regex("""["']?description["']?\s*:\s*["']((?:[^"\\]|\\.)*)["']""").find(html)?.groupValues?.get(1)
         if (!plot.isNullOrBlank()) {
-            plot = Jsoup.parse(plot).text()
+            plot = Jsoup.parse(plot.replace("\\u003C", "<").replace("\\/", "/")).text()
         } else {
             plot = document.selectFirst("meta[property=og:description], meta[name=description]")?.attr("content")
         }
 
-        val genresBlock = Regex(""""genres"\s*:\s*\[(.*?)\]""").find(html)?.groupValues?.get(1)
+        val genresBlock = Regex("""["']?genres["']?\s*:\s*\[(.*?)\]""").find(html)?.groupValues?.get(1)
         val genres = genresBlock?.let {
-            Regex(""""name"\s*:\s*"([^"]+)"""").findAll(it).map { m -> m.groupValues[1] }.toList()
+            Regex("""["']?name["']?\s*:\s*["']([^"']+)""").findAll(it).map { m -> m.groupValues[1] }.toList()
         } ?: emptyList()
 
-        // anilistId needed to build correct /watch/ URLs
-        val anilistId = Regex(""""anilistId"\s*:\s*(\d+)""").find(html)?.groupValues?.get(1)
-        val slugBase = slug.substringBeforeLast("-")
+        // The episodes API needs the real slug (e.g. "one-piece-p8k27"), which is
+        // embedded in the page but absent from the /anime/{slugBase}-{anilistId} URL.
+        val realSlug = Regex("""["']?slug["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
+            ?: slug
 
         val episodes = mutableListOf<Episode>()
 
+
         try {
-            val epApiUrl = "https://pp.animex.one/rest/api/episodes?id=$slug"
+            val epApiUrl = "https://pp.animex.one/rest/api/episodes?id=$realSlug"
             val apiHeaders = mapOf(
                 "Accept" to "application/json",
                 "Origin" to mainUrl,
@@ -205,9 +226,9 @@ class AnimeXProvider : MainAPI() {
                 // The real slug (e.g. "one-piece-p8k27") is needed by the pp.animex.one
                 // API but is not present in the /watch/ URL, so carry it in a fragment.
                 val epUrl = if (anilistId != null)
-                    "$mainUrl/watch/$slugBase-$anilistId-episode-$epNum#slug=$slug"
+                    "$mainUrl/watch/$slugBase-$anilistId-episode-$epNum#slug=$realSlug"
                 else
-                    "$mainUrl/anime/$slug?epNum=$epNum#slug=$slug"
+                    "$mainUrl/anime/$slug?epNum=$epNum#slug=$realSlug"
 
                 episodes.add(
                     newEpisode(epUrl) {
