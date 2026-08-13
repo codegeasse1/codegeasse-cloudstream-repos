@@ -372,25 +372,6 @@ class ReAnimeProvider : MainAPI() {
         return String(cipher.doFinal(Base64.decode(blobB64, Base64.DEFAULT)), Charsets.UTF_8)
     }
 
-    // Confirms a decrypted stream URL really serves an HLS manifest before it is
-    // handed to the player (tokens are single-use, so never push a dead URL).
-    private suspend fun verifyManifest(url: String): Boolean {
-        return try {
-            val res = app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to "$FLIX/",
-                    "Origin" to FLIX,
-                    "Accept" to "*/*"
-                )
-            )
-            res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
-        } catch (e: Exception) {
-            false
-        }
-    }
-
     private fun extractSectionArray(html: String, key: String): List<SearchResponse> {
         val match = Regex("""["']?$key["']?\s*:\s*\[""").find(html) ?: return emptyList()
         val startIdx = html.indexOf('[', match.range.first)
@@ -645,8 +626,7 @@ class ReAnimeProvider : MainAPI() {
 
             // a) flixcloud v2: fetch the embed page fresh, derive the obfuscated
             //    fields, mint a playback token, run the wasm key-derivation then
-            //    PBKDF2/AES to reveal the m3u8 URL, and verify it serves a real
-            //    manifest before pushing it (tokens are single-use).
+            //    PBKDF2/AES to reveal the m3u8 URL.
             if (EMBED_ID_REGEX.find(link) != null) {
                 try {
                     val page = app.get(
@@ -661,7 +641,7 @@ class ReAnimeProvider : MainAPI() {
                     ).text.unesc()
 
                     val m3u8 = decryptFlixV2(page, link)
-                    if (m3u8.startsWith("http") && verifyManifest(m3u8)) {
+                    if (m3u8.startsWith("http")) {
                         if (push(m3u8, serverName, true, "$FLIX/")) ok = true
                     }
 
