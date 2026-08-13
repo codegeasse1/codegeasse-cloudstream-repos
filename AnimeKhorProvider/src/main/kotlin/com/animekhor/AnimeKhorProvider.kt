@@ -24,7 +24,6 @@ class AnimeKhorProvider : MainAPI() {
     )
 
     companion object {
-
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -37,23 +36,15 @@ class AnimeKhorProvider : MainAPI() {
             "https://abyssplayer.com/"
     }
 
-
     // ============================================================
     // MAIN PAGE
     // ============================================================
 
     override val mainPage = mainPageOf(
-
-        "$mainUrl/anime/?status=&type=&order=update" to
-            "Latest Release",
-
-        "$mainUrl/anime/?status=&type=&order=popular" to
-            "Popular",
-
-        "$mainUrl/anime/?status=completed&type=&order=update" to
-            "Completed",
+        "$mainUrl/anime/?status=&type=&order=update" to "Latest Release",
+        "$mainUrl/anime/?status=&type=&order=popular" to "Popular",
+        "$mainUrl/anime/?status=completed&type=&order=update" to "Completed",
     )
-
 
     override suspend fun getMainPage(
         page: Int,
@@ -62,42 +53,32 @@ class AnimeKhorProvider : MainAPI() {
 
         val url =
             if (page == 1) {
-
                 request.data
-
             } else {
-
-                request.data
-                    .replace(
-                        "?",
-                        "page/$page/?"
-                    )
+                request.data.replace(
+                    "?",
+                    "page/$page/?"
+                )
             }
-
 
         val document =
             app.get(url).document
 
-
         val homeItems =
             mutableListOf<SearchResponse>()
-
 
         for (
             element in document.select(
                 "article.bs > div.bsx"
             )
         ) {
-
             val item =
                 element.toSearchResult()
-
 
             if (item != null) {
                 homeItems.add(item)
             }
         }
-
 
         return newHomePageResponse(
             request.name,
@@ -106,7 +87,6 @@ class AnimeKhorProvider : MainAPI() {
             }
         )
     }
-
 
     // ============================================================
     // SEARCH RESULT
@@ -119,14 +99,12 @@ class AnimeKhorProvider : MainAPI() {
             this.selectFirst("a")
                 ?: return null
 
-
         val rawHref =
             fixUrlNull(
                 linkEl.attr("href")
             )
                 ?.trimEnd('/')
                 ?: return null
-
 
         val href =
             rawHref
@@ -137,23 +115,18 @@ class AnimeKhorProvider : MainAPI() {
                     ""
                 )
                 .let {
-
                     if (
                         it.contains(
                             "/anime/"
                         )
                     ) {
-
                         it
-
                     } else {
-
                         "$mainUrl/anime/" +
                             it.substringAfterLast("/") +
                             "/"
                     }
                 }
-
 
         val title =
             linkEl
@@ -165,7 +138,6 @@ class AnimeKhorProvider : MainAPI() {
                 }
                 ?.trim()
                 ?: return null
-
 
         val rawPoster =
             this
@@ -184,7 +156,6 @@ class AnimeKhorProvider : MainAPI() {
                     .selectFirst("img")
                     ?.attr("src")
 
-
         val posterUrl =
             fixUrlNull(
                 rawPoster
@@ -197,18 +168,15 @@ class AnimeKhorProvider : MainAPI() {
                     )
             )
 
-
         return newAnimeSearchResponse(
             title,
             href,
             TvType.Anime
         ) {
-
             this.posterUrl =
                 posterUrl
         }
     }
-
 
     // ============================================================
     // SEARCH
@@ -221,14 +189,11 @@ class AnimeKhorProvider : MainAPI() {
         val searchResults =
             mutableListOf<SearchResponse>()
 
-
         val targetLimit =
             100
 
-
         var page =
             1
-
 
         while (
             searchResults.size <
@@ -237,33 +202,26 @@ class AnimeKhorProvider : MainAPI() {
 
             val url =
                 if (page == 1) {
-
                     "$mainUrl/?s=$query"
-
                 } else {
-
                     "$mainUrl/page/$page/?s=$query"
                 }
-
 
             try {
 
                 val document =
                     app.get(url).document
 
-
                 val elements =
                     document.select(
                         "article.bs > div.bsx"
                     )
-
 
                 if (
                     elements.isEmpty()
                 ) {
                     break
                 }
-
 
                 for (
                     element in elements
@@ -272,23 +230,19 @@ class AnimeKhorProvider : MainAPI() {
                     val item =
                         element.toSearchResult()
 
-
                     if (item != null) {
                         searchResults.add(item)
                     }
                 }
-
 
                 page++
 
             } catch (
                 e: Exception
             ) {
-
                 break
             }
         }
-
 
         return searchResults
             .distinctBy {
@@ -298,7 +252,6 @@ class AnimeKhorProvider : MainAPI() {
                 targetLimit
             )
     }
-
 
     // ============================================================
     // LOAD
@@ -310,7 +263,6 @@ class AnimeKhorProvider : MainAPI() {
 
         val document =
             app.get(url).document
-
 
         val title =
             document
@@ -327,7 +279,6 @@ class AnimeKhorProvider : MainAPI() {
                 )
                 ?: ""
 
-
         val posterElement =
             document.selectFirst(
                 ".bigcontent .thumb img, " +
@@ -336,7 +287,6 @@ class AnimeKhorProvider : MainAPI() {
                     ".infox .imgbox img, " +
                     ".ts-post-image"
             )
-
 
         val rawPoster =
             posterElement
@@ -352,7 +302,6 @@ class AnimeKhorProvider : MainAPI() {
                 ?: posterElement
                     ?.attr("src")
 
-
         var poster =
             fixUrlNull(
                 rawPoster
@@ -365,7 +314,6 @@ class AnimeKhorProvider : MainAPI() {
                     )
             )
 
-
         if (
             poster.isNullOrBlank()
         ) {
@@ -376,7 +324,6 @@ class AnimeKhorProvider : MainAPI() {
                         "meta[property=og:image]"
                     )
                     ?.attr("content")
-
 
             if (
                 ogImage != null &&
@@ -397,7 +344,6 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-
         val synopsis =
             document
                 .selectFirst(
@@ -408,7 +354,6 @@ class AnimeKhorProvider : MainAPI() {
                 )
                 ?.text()
 
-
         val genres =
             document
                 .select(
@@ -417,7 +362,6 @@ class AnimeKhorProvider : MainAPI() {
                 .map {
                     it.text()
                 }
-
 
         // --------------------------------------------------------
         // Episode parser
@@ -431,7 +375,6 @@ class AnimeKhorProvider : MainAPI() {
             val epList =
                 mutableListOf<Episode>()
 
-
             for (
                 li in doc.select(
                     "div.eplister ul li, " +
@@ -444,7 +387,6 @@ class AnimeKhorProvider : MainAPI() {
 
                 val epLink =
                     li.selectFirst("a")
-
 
                 val epHref =
                     if (
@@ -471,13 +413,11 @@ class AnimeKhorProvider : MainAPI() {
                         continue
                     }
 
-
                 if (
                     epHref == null
                 ) {
                     continue
                 }
-
 
                 val epTitle =
                     (
@@ -490,13 +430,11 @@ class AnimeKhorProvider : MainAPI() {
                         )
                         .trim()
 
-
                 val epNumText =
                     li
                         .selectFirst(".epl-num")
                         ?.text()
                         ?: epTitle
-
 
                 val epNum =
                     Regex(
@@ -520,7 +458,6 @@ class AnimeKhorProvider : MainAPI() {
                             ?.value
                             ?.toIntOrNull()
 
-
                 epList.add(
                     newEpisode(
                         epHref
@@ -537,7 +474,6 @@ class AnimeKhorProvider : MainAPI() {
                 )
             }
 
-
             return epList
                 .distinctBy {
                     it.data
@@ -545,13 +481,11 @@ class AnimeKhorProvider : MainAPI() {
                 .reversed()
         }
 
-
         var episodes =
             parseEpisodeGrid(
                 document,
                 url
             )
-
 
         if (
             episodes.isEmpty()
@@ -567,7 +501,6 @@ class AnimeKhorProvider : MainAPI() {
                             "a:matchesOwn((?i)watch)"
                     )
                     ?.attr("href")
-
 
             val anyEpLink =
                 document
@@ -594,13 +527,11 @@ class AnimeKhorProvider : MainAPI() {
                     }
                     ?.attr("href")
 
-
             val fallbackHref =
                 fixUrlNull(
                     firstEpLink
                         ?: anyEpLink
                 )
-
 
             if (
                 fallbackHref != null
@@ -613,7 +544,6 @@ class AnimeKhorProvider : MainAPI() {
                         )
                         .document
 
-
                 episodes =
                     parseEpisodeGrid(
                         epDocument,
@@ -621,7 +551,6 @@ class AnimeKhorProvider : MainAPI() {
                     )
             }
         }
-
 
         return newAnimeLoadResponse(
             title,
@@ -645,7 +574,6 @@ class AnimeKhorProvider : MainAPI() {
         }
     }
 
-
     // ============================================================
     // URL HELPER
     // ============================================================
@@ -661,10 +589,8 @@ class AnimeKhorProvider : MainAPI() {
             return null
         }
 
-
         val trimmed =
             url.trim()
-
 
         return when {
 
@@ -678,14 +604,12 @@ class AnimeKhorProvider : MainAPI() {
                 trimmed
             }
 
-
             trimmed.startsWith(
                 "//"
             ) -> {
 
                 "https:$trimmed"
             }
-
 
             trimmed.startsWith(
                 "/"
@@ -701,7 +625,6 @@ class AnimeKhorProvider : MainAPI() {
                 }.getOrNull()
                     ?: trimmed
             }
-
 
             else -> {
 
@@ -726,24 +649,24 @@ class AnimeKhorProvider : MainAPI() {
         }
     }
 
-
     // ============================================================
-    // ABYSS HELPERS
+    // ABYSSPLAYER
     // ============================================================
 
-    private fun extractAbyssVideoUrl(
+    /*
+     * IMPORTANT:
+     *
+     * This function MUST be suspend because CloudStream's
+     * app.get() is a suspend function.
+     *
+     * This fixes the compilation errors you received at
+     * lines 758, 869 and 959.
+     */
+    private suspend fun extractAbyssVideoUrl(
         embedUrl: String
     ): String? {
 
         try {
-
-            /*
-             * ----------------------------------------------------
-             * STEP 1
-             *
-             * Load the AbyssPlayer page.
-             * ----------------------------------------------------
-             */
 
             val abyssHeaders =
                 mapOf(
@@ -753,6 +676,9 @@ class AnimeKhorProvider : MainAPI() {
                     "Accept" to "*/*",
                 )
 
+            // ----------------------------------------------------
+            // Load AbyssPlayer page
+            // ----------------------------------------------------
 
             val html =
                 app.get(
@@ -760,20 +686,14 @@ class AnimeKhorProvider : MainAPI() {
                     headers = mapOf(
                         "User-Agent" to USER_AGENT,
                         "Referer" to "$mainUrl/",
-                        "Accept" to "text/html,application/xhtml+xml"
+                        "Accept" to
+                            "text/html,application/xhtml+xml"
                     )
                 ).text
 
-
-            /*
-             * ----------------------------------------------------
-             * STEP 2
-             *
-             * First try normal direct video URLs.
-             *
-             * This preserves the old Abyss behaviour.
-             * ----------------------------------------------------
-             */
+            // ----------------------------------------------------
+            // Direct MP4 / storage URLs
+            // ----------------------------------------------------
 
             val directPatterns =
                 listOf(
@@ -799,7 +719,6 @@ class AnimeKhorProvider : MainAPI() {
                     )
                 )
 
-
             for (
                 pattern in directPatterns
             ) {
@@ -814,7 +733,6 @@ class AnimeKhorProvider : MainAPI() {
                             "/"
                         )
 
-
                 if (
                     !match.isNullOrBlank()
                 ) {
@@ -823,21 +741,15 @@ class AnimeKhorProvider : MainAPI() {
                 }
             }
 
-
-            /*
-             * ----------------------------------------------------
-             * STEP 3
-             *
-             * Your screenshot shows AbyssPlayer requesting:
-             *
-             * https://wbtqi2taq32.sssr.org/
-             *     ?timestamp=...
-             *     &sid=...
-             *
-             * The hostname can change, so don't hard-code it.
-             * Find the actual API request in the player HTML/JS.
-             * ----------------------------------------------------
-             */
+            // ----------------------------------------------------
+            // Find sssr / sssrr API URL
+            //
+            // Example from your screenshot:
+            //
+            // https://wbtqi2taq32.sssr.org/
+            // ?timestamp=...
+            // &sid=...
+            // ----------------------------------------------------
 
             val apiRequestRegex =
                 Regex(
@@ -845,23 +757,20 @@ class AnimeKhorProvider : MainAPI() {
                     RegexOption.IGNORE_CASE
                 )
 
-
             val apiMatch =
-                apiRequestRegex
-                    .find(html)
-
+                apiRequestRegex.find(html)
 
             if (
                 apiMatch != null
             ) {
 
                 val apiUrl =
-                    apiMatch.value
+                    apiMatch
+                        .value
                         .replace(
                             "\\/",
                             "/"
                         )
-
 
                 val jsonText =
                     runCatching {
@@ -872,7 +781,6 @@ class AnimeKhorProvider : MainAPI() {
                         ).text
 
                     }.getOrNull()
-
 
                 if (
                     !jsonText.isNullOrBlank()
@@ -886,26 +794,18 @@ class AnimeKhorProvider : MainAPI() {
                                 .getOrNull(1)
                         )
 
-
                     if (
                         result != null
                     ) {
+
                         return result
                     }
                 }
             }
 
-
-            /*
-             * ----------------------------------------------------
-             * STEP 4
-             *
-             * Sometimes the URL is assembled in JavaScript.
-             *
-             * Extract timestamp + sid and the sssr/sssr host
-             * separately.
-             * ----------------------------------------------------
-             */
+            // ----------------------------------------------------
+            // Find host/timestamp/sid separately
+            // ----------------------------------------------------
 
             val hostMatch =
                 Regex(
@@ -914,12 +814,10 @@ class AnimeKhorProvider : MainAPI() {
                 )
                     .find(html)
 
-
             val host =
                 hostMatch
                     ?.groupValues
                     ?.getOrNull(1)
-
 
             val timestamp =
                 Regex(
@@ -930,7 +828,6 @@ class AnimeKhorProvider : MainAPI() {
                     ?.groupValues
                     ?.getOrNull(1)
 
-
             val sid =
                 Regex(
                     """["']?sid["']?\s*[:=]\s*["']?([a-zA-Z0-9_-]+)""",
@@ -939,7 +836,6 @@ class AnimeKhorProvider : MainAPI() {
                     .find(html)
                     ?.groupValues
                     ?.getOrNull(1)
-
 
             if (
                 !host.isNullOrBlank() &&
@@ -952,7 +848,6 @@ class AnimeKhorProvider : MainAPI() {
                         "?timestamp=$timestamp" +
                         "&sid=$sid"
 
-
                 val jsonText =
                     runCatching {
 
@@ -962,7 +857,6 @@ class AnimeKhorProvider : MainAPI() {
                         ).text
 
                     }.getOrNull()
-
 
                 if (
                     !jsonText.isNullOrBlank()
@@ -974,30 +868,24 @@ class AnimeKhorProvider : MainAPI() {
                             host
                         )
 
-
                     if (
                         result != null
                     ) {
+
                         return result
                     }
                 }
             }
 
-
-            /*
-             * ----------------------------------------------------
-             * STEP 5
-             *
-             * Search directly for /sora/... in the player page.
-             * ----------------------------------------------------
-             */
+            // ----------------------------------------------------
+            // Search directly for /sora/ URL
+            // ----------------------------------------------------
 
             val soraRegex =
                 Regex(
                     """(?:(?:https?:)?//[a-zA-Z0-9.-]+\.(?:sssr|sssrr)\.org)?/sora/[^\s"'<>\\]+""",
                     RegexOption.IGNORE_CASE
                 )
-
 
             val soraMatch =
                 soraRegex
@@ -1007,7 +895,6 @@ class AnimeKhorProvider : MainAPI() {
                         "\\/",
                         "/"
                     )
-
 
             if (
                 !soraMatch.isNullOrBlank()
@@ -1025,8 +912,7 @@ class AnimeKhorProvider : MainAPI() {
                     !host.isNullOrBlank()
                 ) {
 
-                    return "https://$host" +
-                        soraMatch
+                    return "https://$host$soraMatch"
                 }
             }
 
@@ -1037,25 +923,17 @@ class AnimeKhorProvider : MainAPI() {
             e.printStackTrace()
         }
 
-
         return null
     }
 
+    // ============================================================
+    // ABYSS JSON PARSER
+    // ============================================================
 
     private fun extractAbyssSoraUrl(
         jsonText: String,
         host: String?
     ): String? {
-
-        /*
-         * The exact JSON field name isn't visible in the
-         * screenshots, so don't depend on one particular
-         * property name.
-         *
-         * Instead search the JSON returned by the API for
-         * the /sora/{id}/{token} URL/path that the browser
-         * subsequently requests.
-         */
 
         val cleaned =
             jsonText
@@ -1068,10 +946,9 @@ class AnimeKhorProvider : MainAPI() {
                     "/"
                 )
 
-
-        /*
-         * Full URL.
-         */
+        // --------------------------------------------------------
+        // Full URL
+        // --------------------------------------------------------
 
         val fullUrl =
             Regex(
@@ -1081,7 +958,6 @@ class AnimeKhorProvider : MainAPI() {
                 .find(cleaned)
                 ?.value
 
-
         if (
             !fullUrl.isNullOrBlank()
         ) {
@@ -1089,14 +965,13 @@ class AnimeKhorProvider : MainAPI() {
             return fullUrl
         }
 
-
-        /*
-         * Path-only URL.
-         *
-         * Screenshot:
-         *
-         * /sora/667504469/WVNxQW...
-         */
+        // --------------------------------------------------------
+        // Path only
+        //
+        // Example:
+        //
+        // /sora/667504469/WVNxQW...
+        // --------------------------------------------------------
 
         val path =
             Regex(
@@ -1107,21 +982,17 @@ class AnimeKhorProvider : MainAPI() {
                 ?.groupValues
                 ?.getOrNull(1)
 
-
         if (
             !path.isNullOrBlank() &&
             !host.isNullOrBlank()
         ) {
 
-            return "https://$host" +
-                path
+            return "https://$host$path"
         }
 
-
-        /*
-         * Some responses can contain a normal video URL
-         * instead of /sora/.
-         */
+        // --------------------------------------------------------
+        // Fallback normal MP4 / M3U8 URL
+        // --------------------------------------------------------
 
         val videoUrl =
             Regex(
@@ -1131,7 +1002,6 @@ class AnimeKhorProvider : MainAPI() {
                 .find(cleaned)
                 ?.value
 
-
         if (
             !videoUrl.isNullOrBlank()
         ) {
@@ -1139,10 +1009,8 @@ class AnimeKhorProvider : MainAPI() {
             return videoUrl
         }
 
-
         return null
     }
-
 
     // ============================================================
     // LOAD LINKS
@@ -1162,17 +1030,14 @@ class AnimeKhorProvider : MainAPI() {
         val document =
             app.get(data).document
 
-
         var found =
             false
-
 
         val embedLinks =
             mutableListOf<Pair<String, String>>()
 
-
         // --------------------------------------------------------
-        // Add embed helper
+        // Embed helper
         // --------------------------------------------------------
 
         fun addEmbed(
@@ -1186,7 +1051,6 @@ class AnimeKhorProvider : MainAPI() {
                 return
             }
 
-
             var url =
                 rawUrl
                     .trim()
@@ -1195,7 +1059,6 @@ class AnimeKhorProvider : MainAPI() {
                         "/"
                     )
 
-
             if (
                 url.startsWith("//")
             ) {
@@ -1203,7 +1066,6 @@ class AnimeKhorProvider : MainAPI() {
                 url =
                     "https:$url"
             }
-
 
             if (
                 url.startsWith("http")
@@ -1225,7 +1087,6 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-
         // ========================================================
         // MIRROR OPTIONS
         // ========================================================
@@ -1234,7 +1095,6 @@ class AnimeKhorProvider : MainAPI() {
             document.select(
                 "select.mirror option[value]"
             )
-
 
         for (
             element in mirrorOptions
@@ -1245,7 +1105,6 @@ class AnimeKhorProvider : MainAPI() {
                     .attr("value")
                     .trim()
 
-
             val label =
                 element
                     .text()
@@ -1254,18 +1113,13 @@ class AnimeKhorProvider : MainAPI() {
                         "Server"
                     }
 
-
             if (
                 value.isNotBlank()
             ) {
 
                 if (
-                    value.startsWith(
-                        "http"
-                    ) ||
-                    value.startsWith(
-                        "//"
-                    )
+                    value.startsWith("http") ||
+                    value.startsWith("//")
                 ) {
 
                     addEmbed(
@@ -1287,7 +1141,6 @@ class AnimeKhorProvider : MainAPI() {
                             )
                                 .trim()
 
-
                         val iframeSrc =
                             Jsoup
                                 .parse(
@@ -1307,7 +1160,6 @@ class AnimeKhorProvider : MainAPI() {
                                         ?.groupValues
                                         ?.get(1)
                                 }
-
 
                         if (
                             !iframeSrc.isNullOrBlank()
@@ -1329,7 +1181,6 @@ class AnimeKhorProvider : MainAPI() {
                                     )
                                     ?.value
 
-
                             if (
                                 directUrl != null
                             ) {
@@ -1349,7 +1200,6 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-
         // ========================================================
         // IFRAMES
         // ========================================================
@@ -1361,7 +1211,6 @@ class AnimeKhorProvider : MainAPI() {
                     "#pembed iframe, " +
                     "iframe"
             )
-
 
         for (
             iframe in iframes
@@ -1381,16 +1230,14 @@ class AnimeKhorProvider : MainAPI() {
                         )
                     }
 
-
             addEmbed(
                 src,
                 "Default Player"
             )
         }
 
-
         // ========================================================
-        // PROCESS ALL EMBEDS
+        // PROCESS EMBEDS
         // ========================================================
 
         for (
@@ -1415,26 +1262,14 @@ class AnimeKhorProvider : MainAPI() {
                     )
                 ) {
 
-                    val mp4Url =
+                    val videoUrl =
                         extractAbyssVideoUrl(
                             embedUrl
                         )
 
-
                     if (
-                        !mp4Url.isNullOrBlank()
+                        !videoUrl.isNullOrBlank()
                     ) {
-
-                        /*
-                         * These headers match what your
-                         * screenshots show AbyssPlayer using.
-                         *
-                         * Origin:
-                         * https://abyssplayer.com
-                         *
-                         * Referer:
-                         * https://abyssplayer.com/
-                         */
 
                         val abyssVideoHeaders =
                             mapOf(
@@ -1443,7 +1278,6 @@ class AnimeKhorProvider : MainAPI() {
                                 "Origin" to ABYSS_ORIGIN,
                                 "Accept" to "*/*",
                             )
-
 
                         callback(
                             ExtractorLink(
@@ -1480,7 +1314,7 @@ class AnimeKhorProvider : MainAPI() {
                                     },
 
                                 url =
-                                    mp4Url,
+                                    videoUrl,
 
                                 referer =
                                     ABYSS_REFERER,
@@ -1499,15 +1333,12 @@ class AnimeKhorProvider : MainAPI() {
                             )
                         )
 
-
                         found =
                             true
-
 
                         continue
                     }
                 }
-
 
                 // ==================================================
                 // B. DAILYMOTION
@@ -1542,7 +1373,6 @@ class AnimeKhorProvider : MainAPI() {
                                 ?.groupValues
                                 ?.get(1)
 
-
                     if (
                         vidId != null
                     ) {
@@ -1550,14 +1380,12 @@ class AnimeKhorProvider : MainAPI() {
                         val tempLinks =
                             mutableListOf<ExtractorLink>()
 
-
                         if (
                             loadExtractor(
                                 "https://www.dailymotion.com/video/$vidId",
                                 data,
                                 subtitleCallback
                             ) {
-
                                 tempLinks.add(it)
                             }
                         ) {
@@ -1614,17 +1442,14 @@ class AnimeKhorProvider : MainAPI() {
                                 )
                             }
 
-
                             found =
                                 true
-
 
                             continue
                         }
 
-
                         // --------------------------------------------------
-                        // Direct M3U8 fallback
+                        // Dailymotion M3U8 fallback
                         // --------------------------------------------------
 
                         try {
@@ -1633,7 +1458,6 @@ class AnimeKhorProvider : MainAPI() {
                                 app.get(
                                     "https://www.dailymotion.com/player/metadata/video/$vidId"
                                 ).text
-
 
                             val m3u8Url =
                                 Regex(
@@ -1644,7 +1468,6 @@ class AnimeKhorProvider : MainAPI() {
                                     )
                                     ?.value
 
-
                             if (
                                 !m3u8Url.isNullOrBlank()
                             ) {
@@ -1654,26 +1477,17 @@ class AnimeKhorProvider : MainAPI() {
                                         if (
                                             serverLabel.isNotBlank()
                                         ) {
-
                                             serverLabel
-
                                         } else {
-
                                             "VidPlayer"
                                         },
-
                                         m3u8Url,
-
                                         "https://www.dailymotion.com/"
                                     )
                                     .forEach {
-
                                         callback(it)
-
-                                        found =
-                                            true
+                                        found = true
                                     }
-
 
                                 continue
                             }
@@ -1684,7 +1498,6 @@ class AnimeKhorProvider : MainAPI() {
                         }
                     }
                 }
-
 
                 // ==================================================
                 // C. RUMBLE
@@ -1702,7 +1515,6 @@ class AnimeKhorProvider : MainAPI() {
                             embedUrl
                         ).text
 
-
                     val m3u8 =
                         Regex(
                             """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""
@@ -1711,7 +1523,6 @@ class AnimeKhorProvider : MainAPI() {
                                 html
                             )
                             ?.value
-
 
                     if (
                         m3u8 != null
@@ -1731,11 +1542,9 @@ class AnimeKhorProvider : MainAPI() {
                                     true
                             }
 
-
                         continue
                     }
                 }
-
 
                 // ==================================================
                 // D. D.TUBE
@@ -1765,7 +1574,6 @@ class AnimeKhorProvider : MainAPI() {
                                     "/"
                                 )
 
-
                     if (
                         vidId.isNotBlank()
                     ) {
@@ -1773,7 +1581,6 @@ class AnimeKhorProvider : MainAPI() {
                         val m3u8 =
                             "https://nas2.d.tube/videos/" +
                                 "$vidId/master.m3u8"
-
 
                         M3u8Helper
                             .generateM3u8(
@@ -1789,11 +1596,9 @@ class AnimeKhorProvider : MainAPI() {
                                     true
                             }
 
-
                         continue
                     }
                 }
-
 
                 // ==================================================
                 // E. NATIVE EXTRACTORS
@@ -1802,14 +1607,12 @@ class AnimeKhorProvider : MainAPI() {
                 val tempLinks =
                     mutableListOf<ExtractorLink>()
 
-
                 if (
                     loadExtractor(
                         embedUrl,
                         data,
                         subtitleCallback
                     ) {
-
                         tempLinks.add(it)
                     }
                 ) {
@@ -1872,14 +1675,11 @@ class AnimeKhorProvider : MainAPI() {
                         )
                     }
 
-
                     found =
                         true
 
-
                     continue
                 }
-
 
                 // ==================================================
                 // F. CUSTOM PROXY SERVERS
@@ -1901,12 +1701,10 @@ class AnimeKhorProvider : MainAPI() {
                             embedUrl
                         ).host
 
-
                     val id =
                         embedUrl
                             .substringAfter("#")
                             .substringAfterLast("/")
-
 
                     val apiCall =
                         "https://$host/api/v1/video" +
@@ -1914,7 +1712,6 @@ class AnimeKhorProvider : MainAPI() {
                             "&w=1280" +
                             "&h=800" +
                             "&r=animekhor.org"
-
 
                     try {
 
@@ -1930,7 +1727,6 @@ class AnimeKhorProvider : MainAPI() {
                                 )
                             ).text
 
-
                         val m3u8 =
                             Regex(
                                 """https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*"""
@@ -1939,7 +1735,6 @@ class AnimeKhorProvider : MainAPI() {
                                     apiRes
                                 )
                                 ?.value
-
 
                         if (
                             m3u8 != null
@@ -1973,7 +1768,6 @@ class AnimeKhorProvider : MainAPI() {
                 e.printStackTrace()
             }
         }
-
 
         return found
     }
