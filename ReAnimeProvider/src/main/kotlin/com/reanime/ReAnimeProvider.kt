@@ -27,23 +27,11 @@ class ReAnimeProvider : MainAPI() {
 
         private const val FLIX = "https://flixcloud.cc"
 
-        private val UUID_REGEX =
-            Regex("""[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}""")
-
-        private val JWT_REGEX =
-            Regex("""eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}""")
-
-        private val M3U8_REGEX =
-            Regex("""https?://[^\s"'\\<>()\[\]]+\.m3u8[^\s"'\\<>()\[\]]*""")
-
         private val SUB_REGEX =
             Regex("""https?://[^\s"'\\<>()\[\]]+\.(?:vtt|srt|ass)[^\s"'\\<>()\[\]]*""")
 
         private val EMBED_ID_REGEX =
             Regex("""flixcloud\.cc/(?:embed|e|v|watch|player)/([A-Za-z0-9_-]{6,})""")
-
-        private val FETCH_HOST_REGEX =
-            Regex("""https?://fetch\d*\.flixcloud\.cc""")
     }
 
     private fun String.unesc(): String = this
@@ -384,6 +372,25 @@ class ReAnimeProvider : MainAPI() {
         return String(cipher.doFinal(Base64.decode(blobB64, Base64.DEFAULT)), Charsets.UTF_8)
     }
 
+    // Confirms a decrypted stream URL really serves an HLS manifest before it is
+    // handed to the player (tokens are single-use, so never push a dead URL).
+    private suspend fun verifyManifest(url: String): Boolean {
+        return try {
+            val res = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Referer" to "$FLIX/",
+                    "Origin" to FLIX,
+                    "Accept" to "*/*"
+                )
+            )
+            res.code in 200..299 && res.text.trimStart().startsWith("#EXTM3U")
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun extractSectionArray(html: String, key: String): List<SearchResponse> {
         val match = Regex("""["']?$key["']?\s*:\s*\[""").find(html) ?: return emptyList()
         val startIdx = html.indexOf('[', match.range.first)
@@ -626,54 +633,54 @@ class ReAnimeProvider : MainAPI() {
         // ---------------------------------------------------------------
         // 3) Resolve each FlixCloud embed
         // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // 3) Resolve each FlixCloud embed — our v2 path first (the old v1
+        //    scheme is dead), with the m3u8 verified before pushing.
+        // ---------------------------------------------------------------
         for ((serverName, rawLink) in servers) {
-            var link = rawLink
-            if (wantDub) link = if (link.contains("?")) "$link&a=1" else "$link?a=1"
+            // keep the exact embed URL — flixcloud rejects extra query params (500)
+            val link = rawLink.trim()
 
-            // a) let installed extractors try first
-            try {
-                if (loadExtractor(link, cleanData, subtitleCallback, callback)) { found = true; continue }
-            } catch (e: Exception) { }
+            var ok = false
 
-            val embedId = EMBED_ID_REGEX.find(link)?.groupValues?.get(1) ?: continue
-
-            // b) fetch the embed page and scan it
-            val page = try {
-                app.get(link, headers = mapOf("User-Agent" to UA, "Referer" to "$mainUrl/", "Accept" to "*/*")).text
-            } catch (e: Exception) { "" }.unesc()
-
-            for (m in M3U8_REGEX.findAll(page)) {
-                if (push(m.value, serverName, true, "$FLIX/")) found = true
-            }
-
-            val jwt = JWT_REGEX.find(page)?.value
-            if (!found && jwt != null) {
-                val host = FETCH_HOST_REGEX.find(page)?.value ?: "https://fetch7.flixcloud.cc"
-                val vid = UUID_REGEX.find(page)?.value ?: embedId
-                if (push("$host/_v7/$vid/master.m3u8?token=$jwt", serverName, true, "$FLIX/")) found = true
-                if (!found && push("$host/_v7/$vid/video.m3u8?token=$jwt", serverName, true, "$FLIX/")) found = true
-            }
-
-            // c) flixcloud v2: the embed page's fields are obfuscated via a seed;
-            //    derive them, mint a playback token, run the wasm key-derivation
-            //    (ported above) then PBKDF2/AES to reveal the m3u8 URL.
-            if (!found) {
+            // a) flixcloud v2: fetch the embed page fresh, derive the obfuscated
+            //    fields, mint a playback token, run the wasm key-derivation then
+            //    PBKDF2/AES to reveal the m3u8 URL, and verify it serves a real
+            //    manifest before pushing it (tokens are single-use).
+            if (EMBED_ID_REGEX.find(link) != null) {
                 try {
+                    val page = app.get(
+                        link,
+                        headers = mapOf(
+                            "User-Agent" to UA,
+                            "Referer" to "$mainUrl/",
+                            "Accept" to "*/*",
+                            "Cache-Control" to "no-cache, no-store",
+                            "Pragma" to "no-cache"
+                        )
+                    ).text.unesc()
+
                     val m3u8 = decryptFlixV2(page, link)
-                    if (m3u8.startsWith("http")) {
-                        if (push(m3u8, serverName, true, "$FLIX/")) found = true
+                    if (m3u8.startsWith("http") && verifyManifest(m3u8)) {
+                        if (push(m3u8, serverName, true, "$FLIX/")) ok = true
+                    }
+
+                    for (m in SUB_REGEX.findAll(page)) {
+                        subtitleCallback(newSubtitleFile("Subtitles", m.value.unesc()))
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
 
-            // e) subtitles from embed page
-            for (m in SUB_REGEX.findAll(page)) {
-                subtitleCallback(newSubtitleFile("Subtitles", m.value.unesc()))
+            // b) fallback: let installed extractors handle non-flixcloud embeds
+            if (!ok) {
+                try {
+                    if (loadExtractor(link, cleanData, subtitleCallback, callback)) ok = true
+                } catch (e: Exception) { }
             }
 
-            if (found) break
+            if (ok) found = true
         }
 
         return found
