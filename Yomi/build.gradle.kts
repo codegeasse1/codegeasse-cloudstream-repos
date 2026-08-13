@@ -1,10 +1,12 @@
+version = 2
+
 cloudstream {
     description = "Watch Anime Free from Yomi"
     authors = listOf("Codegeasse")
     
     status = 1
     
-    tvTypes = listOf("Anime")
+    tvTypes = listOf("Anime", "Movie", "OVA")
     
     iconUrl = "https://www.google.com/s2/favicons?domain=yomi.to&sz=%size%"
 }
