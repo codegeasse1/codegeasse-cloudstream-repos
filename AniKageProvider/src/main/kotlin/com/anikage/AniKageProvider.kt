@@ -16,42 +16,42 @@ class AniKageProvider : MainAPI() {
         val startStr = "$key:["
         val startIndex = scriptData.indexOf(startStr)
         if (startIndex == -1) return emptyList()
-
+        
         var bracketCount = 1
         var endIndex = -1
-
+        
         for (i in (startIndex + startStr.length) until scriptData.length) {
             if (scriptData[i] == '[') bracketCount++
             else if (scriptData[i] == ']') bracketCount--
-
+            
             if (bracketCount == 0) {
                 endIndex = i
                 break
             }
         }
-
+        
         if (endIndex == -1) return emptyList()
-
+        
         val arrayStr = scriptData.substring(startIndex, endIndex)
         val parts = arrayStr.split("slug:\"")
         val items = mutableListOf<SearchResponse>()
-
+        
         for (i in 1 until parts.size) {
             val part = parts[i]
             val slug = part.substringBefore("\"")
             if (slug.isBlank() || slug.length > 200) continue
-
+            
             val titleBlock = part.substringAfter("title:{", "").substringBefore("}")
             var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
             if (title.isBlank() || title == titleBlock) title = slug
-
+            
             val coverBlock = part.substringAfter("coverImage:{", "").substringBefore("}")
             var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
             if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
             if (poster == coverBlock) poster = ""
-
+            
             val url = "$mainUrl/anime/info/$slug"
             if (items.none { it.url == url }) {
                 items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
@@ -65,7 +65,7 @@ class AniKageProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val html = app.get(mainUrl).text
         val scriptData = Jsoup.parse(html).select("script").html()
-
+        
         val homeItems = mutableListOf<HomePageList>()
         val sections = listOf(
             "trendinganime" to "Trending",
@@ -74,14 +74,14 @@ class AniKageProvider : MainAPI() {
             "popularmovies" to "Popular Movies",
             "upcominganime" to "Coming Soon"
         )
-
+        
         for ((key, title) in sections) {
             val items = extractSectionArray(scriptData, key)
             if (items.isNotEmpty()) {
                 homeItems.add(HomePageList(title, items))
             }
         }
-
+        
         return newHomePageResponse(homeItems)
     }
 
@@ -91,7 +91,7 @@ class AniKageProvider : MainAPI() {
 
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-
+            
             val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
@@ -150,24 +150,24 @@ class AniKageProvider : MainAPI() {
                 val html = app.get("$mainUrl/browse?search=$query").text
                 val scriptData = Jsoup.parse(html).select("script").html()
                 val parts = scriptData.split("slug:\"")
-
+                
                 for (i in 1 until parts.size) {
                     val part = parts[i]
                     val slug = part.substringBefore("\"")
                     if (slug.isBlank() || slug.length > 200) continue
-
+                    
                     val window = part.take(1500)
                     val titleBlock = window.substringAfter("title:{", "").substringBefore("}")
                     var title = titleBlock.substringAfter("english:\"", "").substringBefore("\"")
                     if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("userPreferred:\"", "").substringBefore("\"")
                     if (title.isBlank() || title == titleBlock) title = titleBlock.substringAfter("romaji:\"", "").substringBefore("\"")
                     if (title.isBlank() || title == titleBlock) title = slug.replace("-", " ").replaceFirstChar { it.uppercase() }
-
+                    
                     val coverBlock = window.substringAfter("coverImage:{", "").substringBefore("}")
                     var poster = coverBlock.substringAfter("extraLarge:\"", "").substringBefore("\"")
                     if (poster.isBlank() || poster == coverBlock) poster = coverBlock.substringAfter("large:\"", "").substringBefore("\"")
                     if (poster == coverBlock) poster = ""
-
+                    
                     val url = "$mainUrl/anime/info/$slug"
                     if (items.none { it.url == url }) {
                         items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
@@ -179,7 +179,7 @@ class AniKageProvider : MainAPI() {
                 e.printStackTrace()
             }
         }
-
+        
         return items
     }
 
@@ -187,44 +187,35 @@ class AniKageProvider : MainAPI() {
         val slug = url.substringAfterLast("/")
         val html = app.get(url).text
         val document = Jsoup.parse(html)
-
+        
         val title = document.selectFirst("h1")?.text()?.trim() ?: "Unknown"
-        val poster = document.selectFirst("img[src*='anilistcdn']")?.attr("src")
+        val poster = document.selectFirst("img[src*='anilistcdn']")?.attr("src") 
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")
-
+        
         val scriptData = document.select("script").html()
         var plot = scriptData.substringAfter("description:\"", "").substringBefore("\",")
             .replace("\\u003C", "<").replace("\\n", "\n")
-
+        
         if (plot.isBlank() || plot.length > 5000) {
             plot = document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
         } else {
             plot = Jsoup.parse(plot).text()
         }
 
-        // EXACT FIX: Removed the DOM scraping entirely. Only relies on AniList data in the script.
-        var limit = 0
-        val nextAiring = Regex("""(?i)nextAiringEpisode[^}]*?episode["']?\s*:\s*(\d+)""").find(scriptData)?.groupValues?.get(1)?.toIntOrNull()
-        
-        if (nextAiring != null) {
-            limit = nextAiring - 1
-        } else {
-            val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
-            val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
-            limit = if (currentEps > 0) currentEps else totalEps
-        }
-
-        if (limit <= 0) limit = 1
+        val currentEps = scriptData.substringAfter("currentEpisode:", "").substringBefore(",").toIntOrNull() ?: 0
+        val totalEps = scriptData.substringAfter("totalEpisodes:", "").substringBefore(",").toIntOrNull() ?: 0
+        val availableEpisodes = if (currentEps > 0) currentEps else totalEps
 
         val episodes = mutableListOf<Episode>()
-
+        
+        val limit = if (availableEpisodes > 0) availableEpisodes else 1
         for (i in 1..limit) {
             episodes.add(newEpisode("$mainUrl/anime/watch/$slug?ep=$i") {
                 this.name = "Episode $i"
                 this.episode = i
             })
         }
-
+        
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
@@ -249,12 +240,12 @@ class AniKageProvider : MainAPI() {
         val cleanHtml = html.replace("\\/", "/")
 
         val knownProviders = listOf(
-            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko",
+            "dib", "vibeube", "vidtube", "megatube", "megaplay", "koto", "e-koto", "wave", "miko", 
             "neko", "ken", "megg", "vibe", "kwik", "aniyt", "e-neko", "e-ken", "e-wish"
         )
-
+        
         val activeProviders = knownProviders.filter { provider ->
-            cleanHtml.contains("\"$provider\"", ignoreCase = true) ||
+            cleanHtml.contains("\"$provider\"", ignoreCase = true) || 
             cleanHtml.contains("provider=$provider", ignoreCase = true) ||
             cleanHtml.contains("-$provider", ignoreCase = true) ||
             cleanHtml.contains(">$provider<", ignoreCase = true)
@@ -265,10 +256,7 @@ class AniKageProvider : MainAPI() {
             if (!activeProviders.contains(it)) activeProviders.add(it)
         }
 
-        // Restored from the confirmed-working version: Vidtube first, Megaplay last,
-        // everything else in between. The regression version moved megaplay ahead of
-        // "other" providers, which isn't itself fatal, but is reverted here to match
-        // the last known-good ordering exactly.
+        // Sort so Vidtube is queried first, Megaplay last
         activeProviders.sortBy { provider ->
             when {
                 provider == "vibeube" || provider == "vidtube" -> 0
@@ -286,7 +274,7 @@ class AniKageProvider : MainAPI() {
             "Referer" to "$mainUrl/",
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-
+        
         val exclusions = listOf("jquery", "fonts", "anilist", "thetvdb", "jsdelivr", "w3.org")
 
         for (lang in langs) {
@@ -294,34 +282,21 @@ class AniKageProvider : MainAPI() {
                 val apiUrl = "$mainUrl/api/media/anime/$slug/episodes/$ep/sources?provider=$provider&lang=$lang"
 
                 try {
-                    var responseText = ""
-                    var retries = 0
-
-                    while (retries < 3) {
-                        try {
-                            responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
-                            break
-                        } catch (e: Exception) {
-                            retries++
-                        }
-                    }
-
-                    if (responseText.isBlank()) continue
-
+                    val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
                     val matches = Regex("""https?://[^\s"'<>\\]+""").findAll(responseText).toList()
-
+                    
                     for (match in matches) {
                         val cleanUrl = match.value.replace("\\/", "/")
                         if (exclusions.any { cleanUrl.contains(it) }) continue
-
+                        
                         val isDirectM3u8 = cleanUrl.contains(".m3u8") || cleanUrl.contains("/m3u8/") || cleanUrl.contains("master.m3u8")
                         val isDirectMp4 = cleanUrl.contains(".mp4")
                         val isKnownHost = cleanUrl.contains("prox.anicore") || cleanUrl.contains("prox.anikage") || cleanUrl.contains("workers.dev")
-
+                        
                         if (isDirectM3u8 || isDirectMp4 || isKnownHost) {
                             val isVidtube = provider.contains("vibeube", true) || provider.contains("vidtube", true)
                             val isMegaPlay = provider.contains("megatube", true) || provider.contains("megaplay", true)
-
+                            
                             val displayProviderName = when {
                                 isVidtube -> "Vidtube"
                                 isMegaPlay -> "MegaPlay"
@@ -333,9 +308,9 @@ class AniKageProvider : MainAPI() {
                                 isMegaPlay -> "3. MegaPlay"
                                 else -> "2. $displayProviderName"
                             }
-
+                            
                             val isM3u8Link = isDirectM3u8 || cleanUrl.contains("m3u8") || isKnownHost
-
+                            
                             callback(
                                 newExtractorLink(
                                     source = sourceGroup,
@@ -343,24 +318,24 @@ class AniKageProvider : MainAPI() {
                                     url = cleanUrl,
                                     type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.quality = Qualities.Unknown.value
+                                    this.quality = Qualities.Unknown.value 
                                     this.headers = videoHeaders
                                 }
                             )
                             found = true
                         } else if (cleanUrl.startsWith("http")) {
                             val extractedLinks = mutableListOf<ExtractorLink>()
-
+                            
                             if (loadExtractor(cleanUrl, data, subtitleCallback) { link ->
                                 extractedLinks.add(link)
                             }) {
                                 found = true
                             }
-
+                            
                             for (link in extractedLinks) {
                                 val isVidtube = link.name.contains("Vidtube", ignoreCase = true) || provider.contains("vibeube", ignoreCase = true) || provider.contains("vidtube", ignoreCase = true)
                                 val isMegaPlay = link.name.contains("MegaPlay", ignoreCase = true) || provider.contains("megatube", ignoreCase = true) || provider.contains("megaplay", ignoreCase = true)
-
+                                
                                 val sourceGroup = when {
                                     isVidtube -> "1. Vidtube"
                                     isMegaPlay -> "3. MegaPlay"
@@ -392,11 +367,11 @@ class AniKageProvider : MainAPI() {
         if (!found) {
             try {
                 val matches = Regex("""https?://(?:prox\.anicore\.tv|prox\.anikage\.cc|morning-credit-[^\s"'<>\\]+\.workers\.dev)/[^\s"'<>\\]+""").findAll(cleanHtml).toList()
-
+                
                 for (match in matches) {
                     val extractedUrl = match.value
                     val isM3u8 = extractedUrl.contains(".m3u8") || extractedUrl.contains("/m3u8/") || extractedUrl.contains("prox.anicore")
-
+                    
                     callback(
                         newExtractorLink(
                             source = "2. Direct Stream",
