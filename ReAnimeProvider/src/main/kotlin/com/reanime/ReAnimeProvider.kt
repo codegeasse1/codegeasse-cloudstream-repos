@@ -93,41 +93,11 @@ class ReAnimeProvider : MainAPI() {
         return out.copyOf(dkLen)
     }
 
-    private fun readULEB(bytes: ByteArray, start: Int): Pair<Int, Int> {
-        var result = 0
-        var shift = 0
-        var pos = start
-        while (true) {
-            val b = bytes[pos].toInt() and 0xFF
-            pos++
-            result = result or ((b and 0x7F) shl shift)
-            if (b and 0x80 == 0) break
-            shift += 7
-        }
-        return result to pos
-    }
-
-    private fun readSLEB(bytes: ByteArray, start: Int): Pair<Int, Int> {
-        var result = 0
-        var shift = 0
-        var pos = start
-        var b = 0
-        while (true) {
-            b = bytes[pos].toInt() and 0xFF
-            pos++
-            result = result or ((b and 0x7F) shl shift)
-            shift += 7
-            if (b and 0x80 == 0) break
-        }
-        if (shift < 32 && b and 0x40 != 0) result = result or (-1 shl shift)
-        return result to pos
-    }
-
     // Minimal WebAssembly interpreter that understands just the instruction subset
     // used by flixcloud's per-page "secure pipeline" module (i32 ops, memory access,
     // block/loop/br control flow). The module's byte transform is minted per page
     // load with random constants, so it must be interpreted at runtime.
-    private inner class WasmRunner(private val bytes: ByteArray) {
+    private class WasmRunner(private val bytes: ByteArray) {
         private data class WasmFunc(val nlocals: Int, val instrs: List<IntArray>)
 
         private val globals = mutableListOf<Int>()
@@ -135,6 +105,36 @@ class ReAnimeProvider : MainAPI() {
         private val exports = mutableMapOf<String, Int>()
         private val typeParams = mutableListOf<Int>()
         private val funcToType = mutableListOf<Int>()
+
+        private fun readULEB(bytes: ByteArray, start: Int): Pair<Int, Int> {
+            var result = 0
+            var shift = 0
+            var pos = start
+            while (true) {
+                val b = bytes[pos].toInt() and 0xFF
+                pos++
+                result = result or ((b and 0x7F) shl shift)
+                if (b and 0x80 == 0) break
+                shift += 7
+            }
+            return result to pos
+        }
+
+        private fun readSLEB(bytes: ByteArray, start: Int): Pair<Int, Int> {
+            var result = 0
+            var shift = 0
+            var pos = start
+            var b = 0
+            while (true) {
+                b = bytes[pos].toInt() and 0xFF
+                pos++
+                result = result or ((b and 0x7F) shl shift)
+                shift += 7
+                if (b and 0x80 == 0) break
+            }
+            if (shift < 32 && b and 0x40 != 0) result = result or (-1 shl shift)
+            return result to pos
+        }
 
         init {
             var pos = 8
