@@ -202,10 +202,12 @@ class AnimeXProvider : MainAPI() {
 
                 val thumbnail = epObj.optString("img", "")
 
+                // The real slug (e.g. "one-piece-p8k27") is needed by the pp.animex.one
+                // API but is not present in the /watch/ URL, so carry it in a fragment.
                 val epUrl = if (anilistId != null)
-                    "$mainUrl/watch/$slugBase-$anilistId-episode-$epNum"
+                    "$mainUrl/watch/$slugBase-$anilistId-episode-$epNum#slug=$slug"
                 else
-                    "$mainUrl/anime/$slug?epNum=$epNum"
+                    "$mainUrl/anime/$slug?epNum=$epNum#slug=$slug"
 
                 episodes.add(
                     newEpisode(epUrl) {
@@ -247,12 +249,14 @@ class AnimeXProvider : MainAPI() {
 
 // ---------------------------------------------------------------
     // LOAD LINKS
-    // Confirmed: https://pp.animex.one/rest/api/servers?id=...&epNum=...
-    //   → {"subProviders":[{"id":"beep","default":true,...}],"dubProviders":[...]}
-    // Sources: https://pp.animex.one/rest/api/sources?id=...&epNum=...&type=...&providerId=...
-    //   → {"sources":[{"url":"...m3u8",...}],"tracks":null or [...],"headers":{"Referer":"..."}}
-    // Fallback: embedded player_url in the watch page's resolve() block,
-    // then any iframe found directly in the DOM.
+    // The watch page's embedded player_urls point to flixcloud.cc embeds, which
+    // CloudStream has no built-in extractor for. The pp.animex.one API is the
+    // reliable path:
+    //   servers: /rest/api/servers?id=<real-slug>&epNum=... -> {"subProviders":[{"id":"beep",...}],"dubProviders":[...]}
+    //   sources: /rest/api/sources?id=...&epNum=...&type=...&providerId=...
+    //            -> {"sources":[{"url":"...m3u8",...}],"tracks":[...],"headers":{"Referer":"..."}}
+    // NOTE: the API requires the real slug (e.g. "one-piece-p8k27"), which is not
+    // present in the /watch/ URL, so load() embeds it in the URL fragment.
     // ---------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -263,67 +267,27 @@ class AnimeXProvider : MainAPI() {
         var found = false
         val cleanData = data.substringBefore("#")
 
-        // 1. PRIMARY METHOD: Scrape the embedded SvelteKit JSON data from the HTML
-        // The site uses SvelteKit which embeds episode data directly in the page.
-        // The API (pp.animex.one) is currently returning 404, so we must rely on the HTML.
-        try {
-            val html = app.get(cleanData).text
-            
-            // SvelteKit often serializes JSON keys without quotes (e.g., player_url:"...")
-            // This regex handles both quoted and unquoted keys/values.
-            val playerUrls = Regex("""["']?player_url["']?\s*:\s*["']([^"']+)["']""")
-                .findAll(html)
-                .map { it.groupValues[1].replace("\\/", "/") }
-                .distinct()
-                .toList()
-
-            for (playerUrl in playerUrls) {
-                if (playerUrl.isNotBlank()) {
-                    try {
-                        if (loadExtractor(playerUrl, cleanData, subtitleCallback, callback)) {
-                            found = true
-                        }
-                    } catch (_: Exception) { }
-                }
-            }
-            
-            // Also check for any iframes that might be rendered in the HTML
-            if (!found) {
-                val document = Jsoup.parse(html)
-                document.select("iframe").forEach { iframe ->
-                    val src = iframe.attr("src")
-                    if (src.isNotBlank() && src.startsWith("http")) {
-                        try {
-                            if (loadExtractor(src, cleanData, subtitleCallback, callback)) {
-                                found = true
-                            }
-                        } catch (_: Exception) { }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // 2. FALLBACK METHOD: The old API (kept in case it comes back online)
-        if (!found) {
-            val slug = cleanData.substringAfter("/watch/").substringBeforeLast("-episode-")
+        // The real slug (e.g. "one-piece-p8k27") is required by the API but is not
+        // present in the /watch/ URL, so load() embeds it in the URL fragment.
+        val slug = Regex("""#slug=([^#]+)""").find(data)?.groupValues?.get(1)
+            ?: cleanData.substringAfter("/watch/").substringBeforeLast("-episode-")
                 .let { if (it.isNotBlank()) it else cleanData.substringAfter("/anime/").substringBefore("?") }
-            val epNum = Regex("""-episode-(\d+)""").find(cleanData)?.groupValues?.get(1)
-                ?: Regex("""[?&]epNum=(\d+)""").find(cleanData)?.groupValues?.get(1)
-                ?: "1"
+        val epNum = Regex("""-episode-(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: Regex("""[?&]epNum=(\d+)""").find(cleanData)?.groupValues?.get(1)
+            ?: "1"
 
-            val apiHeaders = mapOf(
-                "Accept" to "application/json",
-                "Origin" to mainUrl,
-                "Referer" to "$mainUrl/"
-            )
+        val apiHeaders = mapOf(
+            "Accept" to "application/json",
+            "Origin" to mainUrl,
+            "Referer" to "$mainUrl/"
+        )
 
+        // 1. PRIMARY METHOD: pp.animex.one API returns direct m3u8 URLs.
+        if (slug.isNotBlank()) {
             try {
                 val serversUrl = "https://pp.animex.one/rest/api/servers?id=$slug&epNum=$epNum"
                 val serversResponse = app.get(serversUrl, headers = apiHeaders)
-                
-                // Only proceed if the API is actually responding
+
                 if (serversResponse.code == 200) {
                     val serversJson = JSONObject(serversResponse.text)
 
@@ -393,6 +357,48 @@ class AnimeXProvider : MainAPI() {
                             if (p.optBoolean("default", false)) {
                                 fetchSources("dub", p.optString("id"))
                             }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // 2. FALLBACK: scrape embedded player_urls / iframes from the watch page.
+        // (The site currently embeds flixcloud.cc players, which CloudStream has no
+        // built-in extractor for, so this only helps if the API is down or a fork
+        // of CloudStream registers one.)
+        if (!found) {
+            try {
+                val html = app.get(cleanData).text
+
+                val playerUrls = Regex("""["']?player_url["']?\s*:\s*["']([^"']+)["']""")
+                    .findAll(html)
+                    .map { it.groupValues[1].replace("\\/", "/") }
+                    .distinct()
+                    .toList()
+
+                for (playerUrl in playerUrls) {
+                    if (playerUrl.isNotBlank()) {
+                        try {
+                            if (loadExtractor(playerUrl, cleanData, subtitleCallback, callback)) {
+                                found = true
+                            }
+                        } catch (_: Exception) { }
+                    }
+                }
+
+                if (!found) {
+                    val document = Jsoup.parse(html)
+                    document.select("iframe").forEach { iframe ->
+                        val src = iframe.attr("src")
+                        if (src.isNotBlank() && src.startsWith("http")) {
+                            try {
+                                if (loadExtractor(src, cleanData, subtitleCallback, callback)) {
+                                    found = true
+                                }
+                            } catch (_: Exception) { }
                         }
                     }
                 }
