@@ -122,7 +122,7 @@ class AniKageProvider : MainAPI() {
         try {
             val responseText = app.get(apiUrl, headers = mapOf("Referer" to "$mainUrl/")).text
             
-            val parts = responseText.split(Regex("""\"slug\"\s*:\s*\"\"\""))
+            val parts = responseText.split(Regex(""""slug"\s*:\s*""""))
             for (i in 1 until parts.size) {
                 val part = parts[i]
                 val slug = part.substringBefore("\"").replace("\\", "")
