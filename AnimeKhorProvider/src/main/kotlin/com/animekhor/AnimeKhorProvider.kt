@@ -33,7 +33,7 @@ class AnimeKhorProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page == 1) request.data else request.data.replace("?", "page/$page/?")
         val document = app.get(url).document
-
+        
         val homeItems = mutableListOf<SearchResponse>()
         for (element in document.select("article.bs > div.bsx")) {
             val item = element.toSearchResult()
@@ -46,7 +46,7 @@ class AnimeKhorProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("a") ?: return null
         val rawHref = fixUrlNull(linkEl.attr("href"))?.trimEnd('/') ?: return null
-
+        
         val href = rawHref.replace(Regex("-(episode|ep)-\\d+.*$"), "")
             .let { if (it.contains("/anime/")) it else "$mainUrl/anime/${it.substringAfterLast("/")}/" }
 
@@ -90,7 +90,7 @@ class AnimeKhorProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim()?.replace(Regex("(?i)(episode|ep)\\s*\\d+.*"), "") ?: ""
-
+        
         val posterElement = document.selectFirst(".bigcontent .thumb img, .bixbox .thumb img, article .thumb img, .infox .imgbox img, .ts-post-image")
         val rawPoster = posterElement?.attr("data-lazy-src")?.ifBlank { null } ?: posterElement?.attr("data-src")?.ifBlank { null } ?: posterElement?.attr("src")
         var poster = fixUrlNull(rawPoster?.substringBefore("?")?.replace(Regex("https?://i\\d+\\.wp\\.com/"), "https://"))
@@ -101,7 +101,7 @@ class AnimeKhorProvider : MainAPI() {
                 poster = fixUrlNull(ogImage)
             }
         }
-
+        
         val synopsis = document.selectFirst(".entry-content, .synp .entry-content, #synopsis, .desc")?.text()
         val genres = document.select("a[href*=/genres/], .genxed a").map { it.text() }
 
@@ -112,11 +112,11 @@ class AnimeKhorProvider : MainAPI() {
                 val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) 
                              else if (li.hasClass("selected") || li.hasAttr("selected") || li.select("div.playinfo").isNotEmpty()) currentUrl 
                              else continue
-
+                             
                 if (epHref == null) continue
                 val epTitle = (epLink?.attr("title")?.ifBlank { epLink.text() } ?: li.text()).trim()
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
-
+                
                 val epNum = Regex("(?i)episode\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("(?i)ep\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
@@ -135,7 +135,7 @@ class AnimeKhorProvider : MainAPI() {
             val anyEpLink = document.select("a[href]").firstOrNull { 
                 (it.attr("href").contains("-episode-") || it.attr("href").contains("-ep-")) && it.attr("href").contains(mainUrl)
             }?.attr("href")
-
+            
             val fallbackHref = fixUrlNull(firstEpLink ?: anyEpLink)
             if (fallbackHref != null) {
                 val epDocument = app.get(fallbackHref).document
@@ -187,7 +187,7 @@ class AnimeKhorProvider : MainAPI() {
             if (rawUrl.isNullOrBlank()) return
             var url = rawUrl.trim().replace("\\/", "/")
             if (url.startsWith("//")) url = "https:$url"
-
+            
             if (url.startsWith("http")) {
                 if (embedLinks.none { it.first == url }) {
                     embedLinks.add(Pair(url, name))
