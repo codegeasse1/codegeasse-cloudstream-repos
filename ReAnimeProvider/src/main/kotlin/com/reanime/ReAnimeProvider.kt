@@ -127,7 +127,7 @@ class ReAnimeProvider : MainAPI() {
     // used by flixcloud's per-page "secure pipeline" module (i32 ops, memory access,
     // block/loop/br control flow). The module's byte transform is minted per page
     // load with random constants, so it must be interpreted at runtime.
-    private class WasmRunner(private val bytes: ByteArray) {
+    private inner class WasmRunner(private val bytes: ByteArray) {
         private data class WasmFunc(val nlocals: Int, val instrs: List<IntArray>)
 
         private val globals = mutableListOf<Int>()
@@ -324,7 +324,7 @@ class ReAnimeProvider : MainAPI() {
     // and AES fragments whose field names are derived from the seed via repeated
     // SHA-256. A token API call plus the per-page wasm key-derivation (interpreted
     // above) plus PBKDF2/AES reveal the final m3u8 URL.
-    private fun decryptFlixV2(page: String, referer: String): String {
+    private suspend fun decryptFlixV2(page: String, referer: String): String {
         fun field(name: String): String =
             Regex("""["']?$name["']?\s*:\s*["']([^"']+)""").find(page)?.groupValues?.get(1) ?: ""
 
