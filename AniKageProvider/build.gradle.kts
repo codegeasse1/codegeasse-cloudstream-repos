@@ -4,7 +4,7 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
-version = 1
+version = 2
 
 cloudstream {
     description = "AniKage Extension"
@@ -20,4 +20,8 @@ android {
     defaultConfig {
         minSdk = 21
     }
+}
+
+dependencies {
+    implementation("org.json:json:20230227")
 }
