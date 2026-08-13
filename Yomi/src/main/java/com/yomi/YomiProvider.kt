@@ -162,27 +162,25 @@ class YomiProvider : MainAPI() {
         }
 
         if (type == TvType.Movie) {
-            return newMovieLoadResponse(title, url, type, "$animeId|1|sub") {
+            return newMovieLoadResponse(title, url, type, "$mainUrl/watch/$animeId/1?audio=sub") {
                 this.posterUrl = poster
                 this.plot = plot
                 this.tags = genres
             }
         }
 
-        // Episode data = "animeId|episodeNumber|audio" (fix=false so CloudStream does NOT
-        // rewrite the data string - that was mangling the old malId|ep format).
+        // Episode data = watch URL (yomi's own URL format). CloudStream's URL-fixer leaves
+        // absolute URLs untouched, and loadLinks() parses the animeId / episode / audio out of it.
         val subEps = mutableListOf<Episode>()
         val dubEps = mutableListOf<Episode>()
         for (i in 1..maxEp) {
-            subEps.add(newEpisode("$animeId|$i|sub", fix = false) {
+            subEps.add(newEpisode("$mainUrl/watch/$animeId/$i?audio=sub") {
                 this.name = "Episode $i"
                 this.episode = i
-                this.season = 1
             })
-            dubEps.add(newEpisode("$animeId|$i|dub", fix = false) {
+            dubEps.add(newEpisode("$mainUrl/watch/$animeId/$i?audio=dub") {
                 this.name = "Episode $i"
                 this.episode = i
-                this.season = 1
             })
         }
 
@@ -201,12 +199,10 @@ class YomiProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
-        if (parts.size < 2) return false
-
-        val animeId = parts[0].toIntOrNull() ?: return false
-        val episode = parts[1].toIntOrNull() ?: return false
-        val requestedAudio = parts.getOrNull(2) ?: "sub"
+        val watchMatch = Regex("""/watch/(\d+)/(\d+)""").find(data) ?: return false
+        val animeId = watchMatch.groupValues[1].toIntOrNull() ?: return false
+        val episode = watchMatch.groupValues[2].toIntOrNull() ?: return false
+        val requestedAudio = Regex("""audio=(\w+)""").find(data)?.groupValues?.get(1) ?: "sub"
 
         // try the requested audio first, then the other one as a fallback
         val audioOrder = listOf(requestedAudio) + listOf(if (requestedAudio == "dub") "sub" else "dub")
