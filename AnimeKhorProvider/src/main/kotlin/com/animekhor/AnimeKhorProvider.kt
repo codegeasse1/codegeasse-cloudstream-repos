@@ -18,6 +18,7 @@ class AnimeKhorProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
+
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.AnimeMovie
@@ -25,20 +26,8 @@ class AnimeKhorProvider : MainAPI() {
 
     companion object {
         private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/120.0.0.0 Safari/537.36"
-
-        private const val ABYSS_ORIGIN =
-            "https://abyssplayer.com"
-
-        private const val ABYSS_REFERER =
-            "https://abyssplayer.com/"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-
-    // ============================================================
-    // MAIN PAGE
-    // ============================================================
 
     override val mainPage = mainPageOf(
         "$mainUrl/anime/?status=&type=&order=update" to "Latest Release",
@@ -46,34 +35,27 @@ class AnimeKhorProvider : MainAPI() {
         "$mainUrl/anime/?status=completed&type=&order=update" to "Completed",
     )
 
+    // ============================================================
+    // MAIN PAGE
+    // ============================================================
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
 
-        val url =
-            if (page == 1) {
-                request.data
-            } else {
-                request.data.replace(
-                    "?",
-                    "page/$page/?"
-                )
-            }
+        val url = if (page == 1) {
+            request.data
+        } else {
+            request.data.replace("?", "page/$page/?")
+        }
 
-        val document =
-            app.get(url).document
+        val document = app.get(url).document
 
-        val homeItems =
-            mutableListOf<SearchResponse>()
+        val homeItems = mutableListOf<SearchResponse>()
 
-        for (
-            element in document.select(
-                "article.bs > div.bsx"
-            )
-        ) {
-            val item =
-                element.toSearchResult()
+        for (element in document.select("article.bs > div.bsx")) {
+            val item = element.toSearchResult()
 
             if (item != null) {
                 homeItems.add(item)
@@ -82,88 +64,61 @@ class AnimeKhorProvider : MainAPI() {
 
         return newHomePageResponse(
             request.name,
-            homeItems.distinctBy {
-                it.url
-            }
+            homeItems.distinctBy { it.url }
         )
     }
 
     // ============================================================
-    // SEARCH RESULT
+    // SEARCH RESULT PARSER
     // ============================================================
 
-    private fun Element.toSearchResult():
-        SearchResponse? {
+    private fun Element.toSearchResult(): SearchResponse? {
 
-        val linkEl =
-            this.selectFirst("a")
-                ?: return null
+        val linkEl = this.selectFirst("a") ?: return null
 
         val rawHref =
-            fixUrlNull(
-                linkEl.attr("href")
-            )
+            fixUrlNull(linkEl.attr("href"))
                 ?.trimEnd('/')
                 ?: return null
 
         val href =
             rawHref
                 .replace(
-                    Regex(
-                        "-(episode|ep)-\\d+.*$"
-                    ),
+                    Regex("-(episode|ep)-\\d+.*$"),
                     ""
                 )
                 .let {
-                    if (
-                        it.contains(
-                            "/anime/"
-                        )
-                    ) {
+                    if (it.contains("/anime/")) {
                         it
                     } else {
-                        "$mainUrl/anime/" +
-                            it.substringAfterLast("/") +
-                            "/"
+                        "$mainUrl/anime/${it.substringAfterLast("/")}/"
                     }
                 }
 
         val title =
-            linkEl
-                .attr("title")
+            linkEl.attr("title")
                 .ifBlank {
-                    this
-                        .selectFirst("div.tt")
-                        ?.text()
+                    this.selectFirst("div.tt")?.text()
                 }
                 ?.trim()
                 ?: return null
 
+        val image =
+            this.selectFirst("img")
+
         val rawPoster =
-            this
-                .selectFirst("img")
-                ?.attr("data-lazy-src")
-                ?.ifBlank {
-                    null
-                }
-                ?: this
-                    .selectFirst("img")
-                    ?.attr("data-src")
-                    ?.ifBlank {
-                        null
-                    }
-                ?: this
-                    .selectFirst("img")
-                    ?.attr("src")
+            image?.attr("data-lazy-src")
+                ?.ifBlank { null }
+                ?: image?.attr("data-src")
+                    ?.ifBlank { null }
+                ?: image?.attr("src")
 
         val posterUrl =
             fixUrlNull(
                 rawPoster
                     ?.substringBefore("?")
                     ?.replace(
-                        Regex(
-                            "https?://i\\d+\\.wp\\.com/"
-                        ),
+                        Regex("https?://i\\d+\\.wp\\.com/"),
                         "https://"
                     )
             )
@@ -173,8 +128,7 @@ class AnimeKhorProvider : MainAPI() {
             href,
             TvType.Anime
         ) {
-            this.posterUrl =
-                posterUrl
+            this.posterUrl = posterUrl
         }
     }
 
@@ -189,16 +143,10 @@ class AnimeKhorProvider : MainAPI() {
         val searchResults =
             mutableListOf<SearchResponse>()
 
-        val targetLimit =
-            100
+        val targetLimit = 100
+        var page = 1
 
-        var page =
-            1
-
-        while (
-            searchResults.size <
-            targetLimit
-        ) {
+        while (searchResults.size < targetLimit) {
 
             val url =
                 if (page == 1) {
@@ -213,19 +161,13 @@ class AnimeKhorProvider : MainAPI() {
                     app.get(url).document
 
                 val elements =
-                    document.select(
-                        "article.bs > div.bsx"
-                    )
+                    document.select("article.bs > div.bsx")
 
-                if (
-                    elements.isEmpty()
-                ) {
+                if (elements.isEmpty()) {
                     break
                 }
 
-                for (
-                    element in elements
-                ) {
+                for (element in elements) {
 
                     val item =
                         element.toSearchResult()
@@ -237,24 +179,18 @@ class AnimeKhorProvider : MainAPI() {
 
                 page++
 
-            } catch (
-                e: Exception
-            ) {
+            } catch (e: Exception) {
                 break
             }
         }
 
         return searchResults
-            .distinctBy {
-                it.url
-            }
-            .take(
-                targetLimit
-            )
+            .distinctBy { it.url }
+            .take(targetLimit)
     }
 
     // ============================================================
-    // LOAD
+    // LOAD ANIME
     // ============================================================
 
     override suspend fun load(
@@ -266,39 +202,35 @@ class AnimeKhorProvider : MainAPI() {
 
         val title =
             document
-                .selectFirst(
-                    "h1.entry-title, h1"
-                )
+                .selectFirst("h1.entry-title, h1")
                 ?.text()
                 ?.trim()
                 ?.replace(
-                    Regex(
-                        "(?i)(episode|ep)\\s*\\d+.*"
-                    ),
+                    Regex("(?i)(episode|ep)\\s*\\d+.*"),
                     ""
                 )
                 ?: ""
 
+        // --------------------------------------------------------
+        // POSTER
+        // --------------------------------------------------------
+
         val posterElement =
             document.selectFirst(
                 ".bigcontent .thumb img, " +
-                    ".bixbox .thumb img, " +
-                    "article .thumb img, " +
-                    ".infox .imgbox img, " +
-                    ".ts-post-image"
+                ".bixbox .thumb img, " +
+                "article .thumb img, " +
+                ".infox .imgbox img, " +
+                ".ts-post-image"
             )
 
         val rawPoster =
             posterElement
                 ?.attr("data-lazy-src")
-                ?.ifBlank {
-                    null
-                }
+                ?.ifBlank { null }
                 ?: posterElement
                     ?.attr("data-src")
-                    ?.ifBlank {
-                        null
-                    }
+                    ?.ifBlank { null }
                 ?: posterElement
                     ?.attr("src")
 
@@ -307,16 +239,12 @@ class AnimeKhorProvider : MainAPI() {
                 rawPoster
                     ?.substringBefore("?")
                     ?.replace(
-                        Regex(
-                            "https?://i\\d+\\.wp\\.com/"
-                        ),
+                        Regex("https?://i\\d+\\.wp\\.com/"),
                         "https://"
                     )
             )
 
-        if (
-            poster.isNullOrBlank()
-        ) {
+        if (poster.isNullOrBlank()) {
 
             val ogImage =
                 document
@@ -327,32 +255,30 @@ class AnimeKhorProvider : MainAPI() {
 
             if (
                 ogImage != null &&
-                !ogImage.contains(
-                    "logo",
-                    true
-                ) &&
-                !ogImage.contains(
-                    "banner",
-                    true
-                )
+                !ogImage.contains("logo", true) &&
+                !ogImage.contains("banner", true)
             ) {
-
-                poster =
-                    fixUrlNull(
-                        ogImage
-                    )
+                poster = fixUrlNull(ogImage)
             }
         }
+
+        // --------------------------------------------------------
+        // DESCRIPTION
+        // --------------------------------------------------------
 
         val synopsis =
             document
                 .selectFirst(
                     ".entry-content, " +
-                        ".synp .entry-content, " +
-                        "#synopsis, " +
-                        ".desc"
+                    ".synp .entry-content, " +
+                    "#synopsis, " +
+                    ".desc"
                 )
                 ?.text()
+
+        // --------------------------------------------------------
+        // GENRES
+        // --------------------------------------------------------
 
         val genres =
             document
@@ -364,7 +290,7 @@ class AnimeKhorProvider : MainAPI() {
                 }
 
         // --------------------------------------------------------
-        // Episode parser
+        // EPISODE PARSER
         // --------------------------------------------------------
 
         fun parseEpisodeGrid(
@@ -375,15 +301,14 @@ class AnimeKhorProvider : MainAPI() {
             val epList =
                 mutableListOf<Episode>()
 
-            for (
-                li in doc.select(
-                    "div.eplister ul li, " +
-                        "div.episodelist ul li, " +
-                        "ul.episodelist li, " +
-                        "div.ep_list ul li, " +
-                        ".bixbox.bxcl ul li"
-                )
-            ) {
+            val selectors =
+                "div.eplister ul li, " +
+                "div.episodelist ul li, " +
+                "ul.episodelist li, " +
+                "div.ep_list ul li, " +
+                ".bixbox.bxcl ul li"
+
+            for (li in doc.select(selectors)) {
 
                 val epLink =
                     li.selectFirst("a")
@@ -401,21 +326,16 @@ class AnimeKhorProvider : MainAPI() {
                     } else if (
                         li.hasClass("selected") ||
                         li.hasAttr("selected") ||
-                        li.select(
-                            "div.playinfo"
-                        ).isNotEmpty()
+                        li.select("div.playinfo").isNotEmpty()
                     ) {
 
                         currentUrl
 
                     } else {
-
                         continue
                     }
 
-                if (
-                    epHref == null
-                ) {
+                if (epHref == null) {
                     continue
                 }
 
@@ -427,12 +347,10 @@ class AnimeKhorProvider : MainAPI() {
                                 epLink.text()
                             }
                             ?: li.text()
-                        )
-                        .trim()
+                    ).trim()
 
                 val epNumText =
-                    li
-                        .selectFirst(".epl-num")
+                    li.selectFirst(".epl-num")
                         ?.text()
                         ?: epTitle
 
@@ -451,33 +369,26 @@ class AnimeKhorProvider : MainAPI() {
                             ?.groupValues
                             ?.get(1)
                             ?.toIntOrNull()
-                        ?: Regex(
-                            "\\d+"
-                        )
+                        ?: Regex("\\d+")
                             .find(epNumText)
                             ?.value
                             ?.toIntOrNull()
 
                 epList.add(
-                    newEpisode(
-                        epHref
-                    ) {
+                    newEpisode(epHref) {
 
                         this.name =
                             epTitle.ifBlank {
                                 "Episode $epNum"
                             }
 
-                        this.episode =
-                            epNum
+                        this.episode = epNum
                     }
                 )
             }
 
             return epList
-                .distinctBy {
-                    it.data
-                }
+                .distinctBy { it.data }
                 .reversed()
         }
 
@@ -487,18 +398,20 @@ class AnimeKhorProvider : MainAPI() {
                 url
             )
 
-        if (
-            episodes.isEmpty()
-        ) {
+        // --------------------------------------------------------
+        // FALLBACK EPISODE
+        // --------------------------------------------------------
+
+        if (episodes.isEmpty()) {
 
             val firstEpLink =
                 document
                     .selectFirst(
                         ".epcurfirst a, " +
-                            ".epcurlast a, " +
-                            ".inepcx a, " +
-                            ".bxcl a, " +
-                            "a:matchesOwn((?i)watch)"
+                        ".epcurlast a, " +
+                        ".inepcx a, " +
+                        ".bxcl a, " +
+                        "a:matchesOwn((?i)watch)"
                     )
                     ?.attr("href")
 
@@ -508,41 +421,27 @@ class AnimeKhorProvider : MainAPI() {
                     .firstOrNull {
 
                         (
-                            it
-                                .attr("href")
-                                .contains(
-                                    "-episode-"
-                                ) ||
-                                it
-                                    .attr("href")
-                                    .contains(
-                                        "-ep-"
-                                    )
-                            ) &&
-                            it
-                                .attr("href")
-                                .contains(
-                                    mainUrl
-                                )
+                            it.attr("href")
+                                .contains("-episode-")
+                            ||
+                            it.attr("href")
+                                .contains("-ep-")
+                        )
+                        &&
+                        it.attr("href")
+                            .contains(mainUrl)
                     }
                     ?.attr("href")
 
             val fallbackHref =
                 fixUrlNull(
-                    firstEpLink
-                        ?: anyEpLink
+                    firstEpLink ?: anyEpLink
                 )
 
-            if (
-                fallbackHref != null
-            ) {
+            if (fallbackHref != null) {
 
                 val epDocument =
-                    app
-                        .get(
-                            fallbackHref
-                        )
-                        .document
+                    app.get(fallbackHref).document
 
                 episodes =
                     parseEpisodeGrid(
@@ -558,14 +457,9 @@ class AnimeKhorProvider : MainAPI() {
             TvType.Anime
         ) {
 
-            this.posterUrl =
-                poster
-
-            this.plot =
-                synopsis
-
-            this.tags =
-                genres
+            this.posterUrl = poster
+            this.plot = synopsis
+            this.tags = genres
 
             addEpisodes(
                 DubStatus.Subbed,
@@ -575,7 +469,7 @@ class AnimeKhorProvider : MainAPI() {
     }
 
     // ============================================================
-    // URL HELPER
+    // URL FIXER
     // ============================================================
 
     private fun fixRelativeUrl(
@@ -583,9 +477,7 @@ class AnimeKhorProvider : MainAPI() {
         baseUrl: String
     ): String? {
 
-        if (
-            url.isNullOrBlank()
-        ) {
+        if (url.isNullOrBlank()) {
             return null
         }
 
@@ -594,26 +486,16 @@ class AnimeKhorProvider : MainAPI() {
 
         return when {
 
-            trimmed.startsWith(
-                "http://"
-            ) ||
-                trimmed.startsWith(
-                    "https://"
-                ) -> {
-
+            trimmed.startsWith("http://") ||
+            trimmed.startsWith("https://") -> {
                 trimmed
             }
 
-            trimmed.startsWith(
-                "//"
-            ) -> {
-
+            trimmed.startsWith("//") -> {
                 "https:$trimmed"
             }
 
-            trimmed.startsWith(
-                "/"
-            ) -> {
+            trimmed.startsWith("/") -> {
 
                 runCatching {
 
@@ -634,14 +516,10 @@ class AnimeKhorProvider : MainAPI() {
                         URI(baseUrl)
 
                     val path =
-                        uri.path.substringBeforeLast(
-                            "/",
-                            ""
-                        )
+                        uri.path
+                            .substringBeforeLast("/", "")
 
-                    "${uri.scheme}://${uri.host}" +
-                        "$path/" +
-                        trimmed.removePrefix("./")
+                    "${uri.scheme}://${uri.host}$path/${trimmed.removePrefix("./")}"
 
                 }.getOrNull()
                     ?: trimmed
@@ -650,363 +528,200 @@ class AnimeKhorProvider : MainAPI() {
     }
 
     // ============================================================
-    // ABYSSPLAYER
+    // BASE64 DECODER
     // ============================================================
 
-    /*
-     * IMPORTANT:
-     *
-     * This function MUST be suspend because CloudStream's
-     * app.get() is a suspend function.
-     *
-     * This fixes the compilation errors you received at
-     * lines 758, 869 and 959.
-     */
-    private suspend fun extractAbyssVideoUrl(
-        embedUrl: String
+    private fun decodeBase64(
+        value: String
+    ): String? {
+
+        return try {
+
+            val cleaned =
+                value
+                    .trim()
+                    .replace("\\/", "/")
+
+            String(
+                Base64.decode(
+                    cleaned,
+                    Base64.DEFAULT
+                ),
+                Charsets.UTF_8
+            ).trim()
+
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ============================================================
+    // EXTRACT URL FROM HTML
+    // ============================================================
+
+    private fun extractIframeUrl(
+        html: String
     ): String? {
 
         try {
 
-            val abyssHeaders =
-                mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to ABYSS_REFERER,
-                    "Origin" to ABYSS_ORIGIN,
-                    "Accept" to "*/*",
-                )
+            val parsed =
+                Jsoup.parse(html)
 
-            // ----------------------------------------------------
-            // Load AbyssPlayer page
-            // ----------------------------------------------------
+            val iframe =
+                parsed
+                    .selectFirst("iframe[src]")
 
-            val html =
-                app.get(
-                    embedUrl,
-                    headers = mapOf(
-                        "User-Agent" to USER_AGENT,
-                        "Referer" to "$mainUrl/",
-                        "Accept" to
-                            "text/html,application/xhtml+xml"
-                    )
-                ).text
+            if (iframe != null) {
 
-            // ----------------------------------------------------
-            // Direct MP4 / storage URLs
-            // ----------------------------------------------------
+                val src =
+                    iframe
+                        .attr("src")
+                        .trim()
 
-            val directPatterns =
-                listOf(
-
-                    Regex(
-                        """<source[^>]+src=["']([^"']+)["']""",
-                        RegexOption.IGNORE_CASE
-                    ),
-
-                    Regex(
-                        """file\s*:\s*["']([^"']+)["']""",
-                        RegexOption.IGNORE_CASE
-                    ),
-
-                    Regex(
-                        """https?://[^\s"'<>]+\.mp4(?:\?[^\s"'<>]*)?""",
-                        RegexOption.IGNORE_CASE
-                    ),
-
-                    Regex(
-                        """https?://storage\.googleapis\.com/[^\s"'<>]+""",
-                        RegexOption.IGNORE_CASE
-                    )
-                )
-
-            for (
-                pattern in directPatterns
-            ) {
-
-                val match =
-                    pattern
-                        .find(html)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                        ?.replace(
-                            "\\/",
-                            "/"
-                        )
-
-                if (
-                    !match.isNullOrBlank()
-                ) {
-
-                    return match
+                if (src.isNotBlank()) {
+                    return src
                 }
             }
 
-            // ----------------------------------------------------
-            // Find sssr / sssrr API URL
-            //
-            // Example from your screenshot:
-            //
-            // https://wbtqi2taq32.sssr.org/
-            // ?timestamp=...
-            // &sid=...
-            // ----------------------------------------------------
-
-            val apiRequestRegex =
-                Regex(
-                    """https?://([a-zA-Z0-9.-]+\.(?:sssr|sssrr)\.org)/\?[^"'<>\\\s]+""",
-                    RegexOption.IGNORE_CASE
-                )
-
-            val apiMatch =
-                apiRequestRegex.find(html)
-
-            if (
-                apiMatch != null
-            ) {
-
-                val apiUrl =
-                    apiMatch
-                        .value
-                        .replace(
-                            "\\/",
-                            "/"
-                        )
-
-                val jsonText =
-                    runCatching {
-
-                        app.get(
-                            apiUrl,
-                            headers = abyssHeaders
-                        ).text
-
-                    }.getOrNull()
-
-                if (
-                    !jsonText.isNullOrBlank()
-                ) {
-
-                    val result =
-                        extractAbyssSoraUrl(
-                            jsonText,
-                            apiMatch
-                                .groupValues
-                                .getOrNull(1)
-                        )
-
-                    if (
-                        result != null
-                    ) {
-
-                        return result
-                    }
-                }
-            }
-
-            // ----------------------------------------------------
-            // Find host/timestamp/sid separately
-            // ----------------------------------------------------
-
-            val hostMatch =
-                Regex(
-                    """https?://([a-zA-Z0-9.-]+\.(?:sssr|sssrr)\.org)""",
-                    RegexOption.IGNORE_CASE
-                )
-                    .find(html)
-
-            val host =
-                hostMatch
-                    ?.groupValues
-                    ?.getOrNull(1)
-
-            val timestamp =
-                Regex(
-                    """["']?timestamp["']?\s*[:=]\s*["']?(\d{10,})""",
-                    RegexOption.IGNORE_CASE
-                )
-                    .find(html)
-                    ?.groupValues
-                    ?.getOrNull(1)
-
-            val sid =
-                Regex(
-                    """["']?sid["']?\s*[:=]\s*["']?([a-zA-Z0-9_-]+)""",
-                    RegexOption.IGNORE_CASE
-                )
-                    .find(html)
-                    ?.groupValues
-                    ?.getOrNull(1)
-
-            if (
-                !host.isNullOrBlank() &&
-                !timestamp.isNullOrBlank() &&
-                !sid.isNullOrBlank()
-            ) {
-
-                val apiUrl =
-                    "https://$host/" +
-                        "?timestamp=$timestamp" +
-                        "&sid=$sid"
-
-                val jsonText =
-                    runCatching {
-
-                        app.get(
-                            apiUrl,
-                            headers = abyssHeaders
-                        ).text
-
-                    }.getOrNull()
-
-                if (
-                    !jsonText.isNullOrBlank()
-                ) {
-
-                    val result =
-                        extractAbyssSoraUrl(
-                            jsonText,
-                            host
-                        )
-
-                    if (
-                        result != null
-                    ) {
-
-                        return result
-                    }
-                }
-            }
-
-            // ----------------------------------------------------
-            // Search directly for /sora/ URL
-            // ----------------------------------------------------
-
-            val soraRegex =
-                Regex(
-                    """(?:(?:https?:)?//[a-zA-Z0-9.-]+\.(?:sssr|sssrr)\.org)?/sora/[^\s"'<>\\]+""",
-                    RegexOption.IGNORE_CASE
-                )
-
-            val soraMatch =
-                soraRegex
-                    .find(html)
-                    ?.value
-                    ?.replace(
-                        "\\/",
-                        "/"
-                    )
-
-            if (
-                !soraMatch.isNullOrBlank()
-            ) {
-
-                if (
-                    soraMatch.startsWith(
-                        "http"
-                    )
-                ) {
-
-                    return soraMatch
-
-                } else if (
-                    !host.isNullOrBlank()
-                ) {
-
-                    return "https://$host$soraMatch"
-                }
-            }
-
-        } catch (
-            e: Exception
-        ) {
-
-            e.printStackTrace()
+        } catch (e: Exception) {
         }
 
-        return null
+        return Regex(
+            """(?i)<iframe[^>]+src\s*=\s*["']([^"']+)["']"""
+        )
+            .find(html)
+            ?.groupValues
+            ?.getOrNull(1)
     }
 
     // ============================================================
-    // ABYSS JSON PARSER
+    // ABYSS URL EXTRACTION
     // ============================================================
 
-    private fun extractAbyssSoraUrl(
-        jsonText: String,
-        host: String?
+    private fun extractAbyssVideoUrl(
+        html: String
     ): String? {
 
-        val cleaned =
-            jsonText
-                .replace(
-                    "\\/",
-                    "/"
-                )
-                .replace(
-                    "\\u002F",
-                    "/"
-                )
-
         // --------------------------------------------------------
-        // Full URL
+        // Direct MP4
         // --------------------------------------------------------
 
-        val fullUrl =
+        val directMp4 =
             Regex(
-                """https?://[a-zA-Z0-9.-]+\.(?:sssr|sssrr)\.org/sora/[^\s"'<>\\]+""",
-                RegexOption.IGNORE_CASE
+                """https?://[^\s"'<>\\]+\.mp4(?:\?[^\s"'<>\\]*)?"""
             )
-                .find(cleaned)
+                .find(html)
                 ?.value
 
-        if (
-            !fullUrl.isNullOrBlank()
-        ) {
-
-            return fullUrl
+        if (!directMp4.isNullOrBlank()) {
+            return directMp4
         }
 
         // --------------------------------------------------------
-        // Path only
-        //
-        // Example:
-        //
-        // /sora/667504469/WVNxQW...
+        // M3U8
         // --------------------------------------------------------
 
-        val path =
+        val directM3u8 =
             Regex(
-                """(/sora/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+)""",
-                RegexOption.IGNORE_CASE
+                """https?://[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?"""
             )
-                .find(cleaned)
-                ?.groupValues
-                ?.getOrNull(1)
+                .find(html)
+                ?.value
 
-        if (
-            !path.isNullOrBlank() &&
-            !host.isNullOrBlank()
-        ) {
-
-            return "https://$host$path"
+        if (!directM3u8.isNullOrBlank()) {
+            return directM3u8
         }
 
         // --------------------------------------------------------
-        // Fallback normal MP4 / M3U8 URL
+        // Common video configuration formats
         // --------------------------------------------------------
 
-        val videoUrl =
-            Regex(
-                """https?://[^\s"'<>\\]+(?:\.mp4|\.m3u8)(?:\?[^\s"'<>\\]*)?""",
-                RegexOption.IGNORE_CASE
+        val patterns =
+            listOf(
+
+                Regex(
+                    """(?i)(?:file|source|src|video|url)\s*[:=]\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)(?:file|source|src|video|url)\s*[:=]\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']"""
+                ),
+
+                Regex(
+                    """(?i)file\s*:\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)source\s*:\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)src\s*:\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)videoUrl\s*[:=]\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)video_url\s*[:=]\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)streamUrl\s*[:=]\s*["']([^"']+)["']"""
+                ),
+
+                Regex(
+                    """(?i)stream_url\s*[:=]\s*["']([^"']+)["']"""
+                )
             )
-                .find(cleaned)
+
+        for (pattern in patterns) {
+
+            val match =
+                pattern.find(html)
+
+            if (match != null) {
+
+                var found =
+                    match.groupValues
+                        .getOrNull(1)
+                        ?.trim()
+
+                if (!found.isNullOrBlank()) {
+
+                    found =
+                        found
+                            .replace("\\/", "/")
+                            .replace("\\u0026", "&")
+
+                    if (
+                        found.startsWith("http://") ||
+                        found.startsWith("https://")
+                    ) {
+                        return found
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------------
+        // JSON-style escaped URL
+        // --------------------------------------------------------
+
+        val escaped =
+            Regex(
+                """https?:\\?/\\?/[^"'\\\s]+?\.(?:mp4|m3u8)[^"'\\\s]*"""
+            )
+                .find(html)
                 ?.value
 
-        if (
-            !videoUrl.isNullOrBlank()
-        ) {
+        if (!escaped.isNullOrBlank()) {
 
-            return videoUrl
+            return escaped
+                .replace("\\/", "/")
+                .replace("\\u0026", "&")
         }
 
         return null
@@ -1019,25 +734,26 @@ class AnimeKhorProvider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (
-            SubtitleFile
-        ) -> Unit,
-        callback: (
-            ExtractorLink
-        ) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
 
         val document =
-            app.get(data).document
+            app.get(
+                data,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to "$mainUrl/"
+                )
+            ).document
 
-        var found =
-            false
+        var found = false
 
         val embedLinks =
             mutableListOf<Pair<String, String>>()
 
         // --------------------------------------------------------
-        // Embed helper
+        // ADD EMBED
         // --------------------------------------------------------
 
         fun addEmbed(
@@ -1045,30 +761,23 @@ class AnimeKhorProvider : MainAPI() {
             name: String
         ) {
 
-            if (
-                rawUrl.isNullOrBlank()
-            ) {
+            if (rawUrl.isNullOrBlank()) {
                 return
             }
 
             var url =
                 rawUrl
                     .trim()
-                    .replace(
-                        "\\/",
-                        "/"
-                    )
+                    .replace("\\/", "/")
+                    .replace("&amp;", "&")
 
-            if (
-                url.startsWith("//")
-            ) {
-
-                url =
-                    "https:$url"
+            if (url.startsWith("//")) {
+                url = "https:$url"
             }
 
             if (
-                url.startsWith("http")
+                url.startsWith("http://") ||
+                url.startsWith("https://")
             ) {
 
                 if (
@@ -1088,7 +797,7 @@ class AnimeKhorProvider : MainAPI() {
         }
 
         // ========================================================
-        // MIRROR OPTIONS
+        // MIRROR SELECTOR
         // ========================================================
 
         val mirrorOptions =
@@ -1096,9 +805,7 @@ class AnimeKhorProvider : MainAPI() {
                 "select.mirror option[value]"
             )
 
-        for (
-            element in mirrorOptions
-        ) {
+        for (element in mirrorOptions) {
 
             val value =
                 element
@@ -1113,121 +820,91 @@ class AnimeKhorProvider : MainAPI() {
                         "Server"
                     }
 
+            if (value.isBlank()) {
+                continue
+            }
+
+            // ----------------------------------------------------
+            // Direct URL
+            // ----------------------------------------------------
+
             if (
-                value.isNotBlank()
+                value.startsWith("http://") ||
+                value.startsWith("https://") ||
+                value.startsWith("//")
             ) {
 
-                if (
-                    value.startsWith("http") ||
-                    value.startsWith("//")
-                ) {
+                addEmbed(
+                    value,
+                    label
+                )
+
+                continue
+            }
+
+            // ----------------------------------------------------
+            // Base64 iframe
+            // ----------------------------------------------------
+
+            val decoded =
+                decodeBase64(value)
+
+            if (!decoded.isNullOrBlank()) {
+
+                // Find iframe
+                val iframeSrc =
+                    extractIframeUrl(decoded)
+
+                if (!iframeSrc.isNullOrBlank()) {
 
                     addEmbed(
-                        value,
+                        iframeSrc,
                         label
                     )
 
                 } else {
 
-                    try {
+                    // Find direct URL
+                    val directUrl =
+                        Regex(
+                            """https?://[^\s"'<>]+"""
+                        )
+                            .find(decoded)
+                            ?.value
 
-                        val decoded =
-                            String(
-                                Base64.decode(
-                                    value,
-                                    Base64.DEFAULT
-                                ),
-                                Charsets.UTF_8
-                            )
-                                .trim()
+                    if (!directUrl.isNullOrBlank()) {
 
-                        val iframeSrc =
-                            Jsoup
-                                .parse(
-                                    decoded
-                                )
-                                .select("iframe")
-                                .attr("src")
-                                .ifBlank {
-
-                                    Regex(
-                                        """src\s*=\s*["']([^"']+)["']""",
-                                        RegexOption.IGNORE_CASE
-                                    )
-                                        .find(
-                                            decoded
-                                        )
-                                        ?.groupValues
-                                        ?.get(1)
-                                }
-
-                        if (
-                            !iframeSrc.isNullOrBlank()
-                        ) {
-
-                            addEmbed(
-                                iframeSrc,
-                                label
-                            )
-
-                        } else {
-
-                            val directUrl =
-                                Regex(
-                                    """https?://[^\s"'<>]+"""
-                                )
-                                    .find(
-                                        decoded
-                                    )
-                                    ?.value
-
-                            if (
-                                directUrl != null
-                            ) {
-
-                                addEmbed(
-                                    directUrl,
-                                    label
-                                )
-                            }
-                        }
-
-                    } catch (
-                        e: Exception
-                    ) {
+                        addEmbed(
+                            directUrl,
+                            label
+                        )
                     }
                 }
             }
         }
 
         // ========================================================
-        // IFRAMES
+        // NORMAL PAGE IFRAMES
         // ========================================================
 
         val iframes =
             document.select(
                 ".player-embed iframe, " +
-                    "#embed_holder iframe, " +
-                    "#pembed iframe, " +
-                    "iframe"
+                "#embed_holder iframe, " +
+                "#pembed iframe, " +
+                "iframe"
             )
 
-        for (
-            iframe in iframes
-        ) {
+        for (iframe in iframes) {
 
             val src =
                 iframe
                     .attr("src")
                     .ifBlank {
-                        iframe.attr(
-                            "data-src"
-                        )
+                        iframe.attr("data-src")
                     }
                     .ifBlank {
-                        iframe.attr(
-                            "data-lazy-src"
-                        )
+                        iframe.attr("data-lazy-src")
                     }
 
             addEmbed(
@@ -1237,112 +914,217 @@ class AnimeKhorProvider : MainAPI() {
         }
 
         // ========================================================
-        // PROCESS EMBEDS
+        // PROCESS ALL SERVERS
         // ========================================================
 
-        for (
-            (embedUrl, serverLabel)
-            in embedLinks
-        ) {
+        for ((embedUrl, serverLabel) in embedLinks) {
 
             try {
 
-                // ==================================================
-                // A. ABYSSPLAYER
-                // ==================================================
+                // =================================================
+                // A. ABYSS PLAYER
+                // =================================================
 
                 if (
                     embedUrl.contains(
                         "abyssplayer.com",
                         true
                     ) ||
-                    embedUrl.contains(
+                    serverLabel.contains(
                         "abyss",
                         true
                     )
                 ) {
 
-                    val videoUrl =
-                        extractAbyssVideoUrl(
-                            embedUrl
+                    val abyssHeaders =
+                        mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer" to "$mainUrl/"
                         )
 
-                    if (
-                        !videoUrl.isNullOrBlank()
-                    ) {
+                    try {
 
-                        val abyssVideoHeaders =
-                            mapOf(
-                                "User-Agent" to USER_AGENT,
-                                "Referer" to ABYSS_REFERER,
-                                "Origin" to ABYSS_ORIGIN,
-                                "Accept" to "*/*",
+                        val abyssResponse =
+                            app.get(
+                                embedUrl,
+                                headers = abyssHeaders,
+                                allowRedirects = true
                             )
 
-                        callback(
-                            ExtractorLink(
-                                source =
-                                    if (
-                                        serverLabel.isNotBlank() &&
-                                        !serverLabel.equals(
-                                            "Default Player",
-                                            true
-                                        )
-                                    ) {
+                        val abyssHtml =
+                            abyssResponse.text
 
-                                        serverLabel
+                        // -----------------------------------------
+                        // Try direct video extraction
+                        // -----------------------------------------
 
-                                    } else {
-
-                                        "AbyssPlayer"
-                                    },
-
-                                name =
-                                    if (
-                                        serverLabel.isNotBlank() &&
-                                        !serverLabel.equals(
-                                            "Default Player",
-                                            true
-                                        )
-                                    ) {
-
-                                        "$serverLabel (Abyss)"
-
-                                    } else {
-
-                                        "AbyssPlayer"
-                                    },
-
-                                url =
-                                    videoUrl,
-
-                                referer =
-                                    ABYSS_REFERER,
-
-                                quality =
-                                    Qualities.Unknown.value,
-
-                                type =
-                                    ExtractorLinkType.VIDEO,
-
-                                headers =
-                                    abyssVideoHeaders,
-
-                                extractorData =
-                                    ""
+                        var videoUrl =
+                            extractAbyssVideoUrl(
+                                abyssHtml
                             )
-                        )
 
-                        found =
-                            true
+                        if (!videoUrl.isNullOrBlank()) {
 
-                        continue
+                            videoUrl =
+                                videoUrl
+                                    .replace(
+                                        "\\/",
+                                        "/"
+                                    )
+                                    .replace(
+                                        "\\u0026",
+                                        "&"
+                                    )
+
+                            if (
+                                videoUrl.contains(
+                                    ".m3u8",
+                                    true
+                                )
+                            ) {
+
+                                M3u8Helper
+                                    .generateM3u8(
+                                        "AbyssPlayer",
+                                        videoUrl,
+                                        embedUrl,
+                                        headers = abyssHeaders
+                                    )
+                                    .forEach { link ->
+
+                                        callback(link)
+                                        found = true
+                                    }
+
+                            } else {
+
+                                callback(
+                                    ExtractorLink(
+                                        source = "AbyssPlayer",
+                                        name = "AbyssPlayer",
+                                        url = videoUrl,
+                                        referer = embedUrl,
+                                        quality = Qualities.Unknown.value,
+                                        type = ExtractorLinkType.VIDEO,
+                                        headers = abyssHeaders,
+                                        extractorData = ""
+                                    )
+                                )
+
+                                found = true
+                            }
+                        }
+
+                        // -----------------------------------------
+                        // Look for packed/embedded iframe
+                        // -----------------------------------------
+
+                        if (!found) {
+
+                            val nestedIframe =
+                                extractIframeUrl(
+                                    abyssHtml
+                                )
+
+                            if (
+                                !nestedIframe.isNullOrBlank() &&
+                                nestedIframe != embedUrl
+                            ) {
+
+                                val nestedLinks =
+                                    mutableListOf<ExtractorLink>()
+
+                                if (
+                                    loadExtractor(
+                                        nestedIframe,
+                                        embedUrl,
+                                        subtitleCallback
+                                    ) {
+                                        nestedLinks.add(it)
+                                    }
+                                ) {
+
+                                    for (link in nestedLinks) {
+
+                                        callback(
+                                            ExtractorLink(
+                                                source = "AbyssPlayer",
+                                                name =
+                                                    "AbyssPlayer (${link.name})",
+                                                url = link.url,
+                                                referer = link.referer,
+                                                quality = link.quality,
+                                                type = link.type,
+                                                headers = link.headers,
+                                                extractorData =
+                                                    link.extractorData
+                                            )
+                                        )
+
+                                        found = true
+                                    }
+                                }
+                            }
+                        }
+
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
+
+                    // ---------------------------------------------
+                    // Also try CloudStream's registered extractors
+                    // ---------------------------------------------
+
+                    if (!found) {
+
+                        try {
+
+                            val abyssLinks =
+                                mutableListOf<ExtractorLink>()
+
+                            if (
+                                loadExtractor(
+                                    embedUrl,
+                                    data,
+                                    subtitleCallback
+                                ) {
+                                    abyssLinks.add(it)
+                                }
+                            ) {
+
+                                for (link in abyssLinks) {
+
+                                    callback(
+                                        ExtractorLink(
+                                            source = "AbyssPlayer",
+                                            name =
+                                                "AbyssPlayer (${link.name})",
+                                            url = link.url,
+                                            referer = link.referer,
+                                            quality = link.quality,
+                                            type = link.type,
+                                            headers = link.headers,
+                                            extractorData =
+                                                link.extractorData
+                                        )
+                                    )
+
+                                    found = true
+                                }
+                            }
+
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    // Don't let the generic extractor process Abyss again
+                    continue
                 }
 
-                // ==================================================
+                // =================================================
                 // B. DAILYMOTION
-                // ==================================================
+                // =================================================
 
                 if (
                     embedUrl.contains(
@@ -1359,23 +1141,17 @@ class AnimeKhorProvider : MainAPI() {
                         Regex(
                             """video/([a-zA-Z0-9_]+)"""
                         )
-                            .find(
-                                embedUrl
-                            )
+                            .find(embedUrl)
                             ?.groupValues
                             ?.get(1)
                             ?: Regex(
                                 """video=([a-zA-Z0-9_]+)"""
                             )
-                                .find(
-                                    embedUrl
-                                )
+                                .find(embedUrl)
                                 ?.groupValues
                                 ?.get(1)
 
-                    if (
-                        vidId != null
-                    ) {
+                    if (vidId != null) {
 
                         val tempLinks =
                             mutableListOf<ExtractorLink>()
@@ -1390,118 +1166,85 @@ class AnimeKhorProvider : MainAPI() {
                             }
                         ) {
 
-                            for (
-                                link in tempLinks
-                            ) {
+                            for (link in tempLinks) {
 
                                 callback(
                                     ExtractorLink(
-
                                         source =
-                                            if (
-                                                serverLabel.isNotBlank()
-                                            ) {
-
+                                            if (serverLabel.isNotBlank())
                                                 serverLabel
-
-                                            } else {
-
-                                                "VidPlayer"
-                                            },
+                                            else
+                                                "VidPlayer",
 
                                         name =
-                                            if (
-                                                serverLabel.isNotBlank()
-                                            ) {
-
+                                            if (serverLabel.isNotBlank())
                                                 "$serverLabel (${link.name})"
+                                            else
+                                                link.name,
 
-                                            } else {
-
-                                                link.name
-                                            },
-
-                                        url =
-                                            link.url,
-
-                                        referer =
-                                            link.referer,
-
-                                        quality =
-                                            link.quality,
-
-                                        type =
-                                            link.type,
-
-                                        headers =
-                                            link.headers,
-
+                                        url = link.url,
+                                        referer = link.referer,
+                                        quality = link.quality,
+                                        type = link.type,
+                                        headers = link.headers,
                                         extractorData =
                                             link.extractorData
                                     )
                                 )
                             }
 
-                            found =
-                                true
-
+                            found = true
                             continue
                         }
 
-                        // --------------------------------------------------
-                        // Dailymotion M3U8 fallback
-                        // --------------------------------------------------
-
+                        // Direct Dailymotion M3U8 fallback
                         try {
 
                             val metaJson =
                                 app.get(
-                                    "https://www.dailymotion.com/player/metadata/video/$vidId"
+                                    "https://www.dailymotion.com/player/metadata/video/$vidId",
+                                    headers = mapOf(
+                                        "User-Agent" to USER_AGENT
+                                    )
                                 ).text
 
                             val m3u8Url =
                                 Regex(
                                     """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""
                                 )
-                                    .find(
-                                        metaJson
-                                    )
+                                    .find(metaJson)
                                     ?.value
 
-                            if (
-                                !m3u8Url.isNullOrBlank()
-                            ) {
+                            if (!m3u8Url.isNullOrBlank()) {
 
                                 M3u8Helper
                                     .generateM3u8(
-                                        if (
-                                            serverLabel.isNotBlank()
-                                        ) {
+                                        if (serverLabel.isNotBlank())
                                             serverLabel
-                                        } else {
-                                            "VidPlayer"
-                                        },
+                                        else
+                                            "VidPlayer",
+
                                         m3u8Url,
+
                                         "https://www.dailymotion.com/"
                                     )
-                                    .forEach {
-                                        callback(it)
+                                    .forEach { link ->
+
+                                        callback(link)
                                         found = true
                                     }
 
                                 continue
                             }
 
-                        } catch (
-                            e: Exception
-                        ) {
+                        } catch (e: Exception) {
                         }
                     }
                 }
 
-                // ==================================================
+                // =================================================
                 // C. RUMBLE
-                // ==================================================
+                // =================================================
 
                 if (
                     embedUrl.contains(
@@ -1510,45 +1253,48 @@ class AnimeKhorProvider : MainAPI() {
                     )
                 ) {
 
-                    val html =
-                        app.get(
-                            embedUrl
-                        ).text
+                    try {
 
-                    val m3u8 =
-                        Regex(
-                            """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""
-                        )
-                            .find(
-                                html
+                        val html =
+                            app.get(
+                                embedUrl,
+                                headers = mapOf(
+                                    "User-Agent" to USER_AGENT,
+                                    "Referer" to data
+                                )
+                            ).text
+
+                        val m3u8 =
+                            Regex(
+                                """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"""
                             )
-                            ?.value
+                                .find(html)
+                                ?.value
 
-                    if (
-                        m3u8 != null
-                    ) {
+                        if (!m3u8.isNullOrBlank()) {
 
-                        M3u8Helper
-                            .generateM3u8(
-                                "Rumble",
-                                m3u8,
-                                embedUrl
-                            )
-                            .forEach {
+                            M3u8Helper
+                                .generateM3u8(
+                                    "Rumble",
+                                    m3u8,
+                                    embedUrl
+                                )
+                                .forEach { link ->
 
-                                callback(it)
+                                    callback(link)
+                                    found = true
+                                }
 
-                                found =
-                                    true
-                            }
+                            continue
+                        }
 
-                        continue
+                    } catch (e: Exception) {
                     }
                 }
 
-                // ==================================================
+                // =================================================
                 // D. D.TUBE
-                // ==================================================
+                // =================================================
 
                 if (
                     embedUrl.contains(
@@ -1561,48 +1307,44 @@ class AnimeKhorProvider : MainAPI() {
                         Regex(
                             """v=([a-zA-Z0-9-]+)"""
                         )
-                            .find(
-                                embedUrl
-                            )
+                            .find(embedUrl)
                             ?.groupValues
                             ?.get(1)
                             ?: embedUrl
                                 .substringAfter(
                                     "/videos/"
                                 )
-                                .substringBefore(
-                                    "/"
+                                .substringBefore("/")
+
+                    if (vidId.isNotBlank()) {
+
+                        try {
+
+                            val m3u8 =
+                                "https://nas2.d.tube/videos/$vidId/master.m3u8"
+
+                            M3u8Helper
+                                .generateM3u8(
+                                    "DPlayer",
+                                    m3u8,
+                                    embedUrl
                                 )
+                                .forEach { link ->
 
-                    if (
-                        vidId.isNotBlank()
-                    ) {
+                                    callback(link)
+                                    found = true
+                                }
 
-                        val m3u8 =
-                            "https://nas2.d.tube/videos/" +
-                                "$vidId/master.m3u8"
+                            continue
 
-                        M3u8Helper
-                            .generateM3u8(
-                                "DPlayer",
-                                m3u8,
-                                embedUrl
-                            )
-                            .forEach {
-
-                                callback(it)
-
-                                found =
-                                    true
-                            }
-
-                        continue
+                        } catch (e: Exception) {
+                        }
                     }
                 }
 
-                // ==================================================
-                // E. NATIVE EXTRACTORS
-                // ==================================================
+                // =================================================
+                // E. NATIVE CLOUDSTREAM EXTRACTORS
+                // =================================================
 
                 val tempLinks =
                     mutableListOf<ExtractorLink>()
@@ -1617,73 +1359,48 @@ class AnimeKhorProvider : MainAPI() {
                     }
                 ) {
 
-                    for (
-                        link in tempLinks
-                    ) {
+                    for (link in tempLinks) {
+
+                        val useServerName =
+                            serverLabel.isNotBlank() &&
+                            !serverLabel.contains(
+                                "Default",
+                                true
+                            )
 
                         callback(
                             ExtractorLink(
 
                                 source =
-                                    if (
-                                        serverLabel.isNotBlank() &&
-                                        !serverLabel.contains(
-                                            "Default"
-                                        )
-                                    ) {
-
+                                    if (useServerName)
                                         serverLabel
-
-                                    } else {
-
-                                        link.source
-                                    },
+                                    else
+                                        link.source,
 
                                 name =
-                                    if (
-                                        serverLabel.isNotBlank() &&
-                                        !serverLabel.contains(
-                                            "Default"
-                                        )
-                                    ) {
-
+                                    if (useServerName)
                                         "$serverLabel (${link.name})"
+                                    else
+                                        link.name,
 
-                                    } else {
-
-                                        link.name
-                                    },
-
-                                url =
-                                    link.url,
-
-                                referer =
-                                    link.referer,
-
-                                quality =
-                                    link.quality,
-
-                                type =
-                                    link.type,
-
-                                headers =
-                                    link.headers,
-
+                                url = link.url,
+                                referer = link.referer,
+                                quality = link.quality,
+                                type = link.type,
+                                headers = link.headers,
                                 extractorData =
                                     link.extractorData
                             )
                         )
                     }
 
-                    found =
-                        true
-
+                    found = true
                     continue
                 }
 
-                // ==================================================
-                // F. CUSTOM PROXY SERVERS
-                // ==================================================
+                // =================================================
+                // F. UPNS / P2PSTREAM
+                // =================================================
 
                 if (
                     embedUrl.contains(
@@ -1696,75 +1413,61 @@ class AnimeKhorProvider : MainAPI() {
                     )
                 ) {
 
-                    val host =
-                        URI(
-                            embedUrl
-                        ).host
-
-                    val id =
-                        embedUrl
-                            .substringAfter("#")
-                            .substringAfterLast("/")
-
-                    val apiCall =
-                        "https://$host/api/v1/video" +
-                            "?id=$id" +
-                            "&w=1280" +
-                            "&h=800" +
-                            "&r=animekhor.org"
-
                     try {
 
-                        val apiRes =
-                            app.get(
-                                apiCall,
-                                headers = mapOf(
-                                    "Referer" to
-                                        "$mainUrl/",
+                        val host =
+                            URI(embedUrl).host
 
-                                    "User-Agent" to
-                                        USER_AGENT
+                        if (!host.isNullOrBlank()) {
+
+                            val id =
+                                embedUrl
+                                    .substringAfter("#")
+                                    .substringAfterLast("/")
+
+                            val apiCall =
+                                "https://$host/api/v1/video?id=$id&w=1280&h=800&r=animekhor.org"
+
+                            val apiRes =
+                                app.get(
+                                    apiCall,
+                                    headers = mapOf(
+                                        "Referer" to "$mainUrl/",
+                                        "User-Agent" to USER_AGENT
+                                    )
+                                ).text
+
+                            val m3u8 =
+                                Regex(
+                                    """https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*"""
                                 )
-                            ).text
+                                    .find(apiRes)
+                                    ?.value
 
-                        val m3u8 =
-                            Regex(
-                                """https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*"""
-                            )
-                                .find(
-                                    apiRes
-                                )
-                                ?.value
+                            if (!m3u8.isNullOrBlank()) {
 
-                        if (
-                            m3u8 != null
-                        ) {
+                                M3u8Helper
+                                    .generateM3u8(
+                                        serverLabel.ifBlank {
+                                            "UPNS"
+                                        },
+                                        m3u8,
+                                        "https://$host/"
+                                    )
+                                    .forEach { link ->
 
-                            M3u8Helper
-                                .generateM3u8(
-                                    serverLabel,
-                                    m3u8,
-                                    "https://$host/"
-                                )
-                                .forEach {
-
-                                    callback(it)
-
-                                    found =
-                                        true
-                                }
+                                        callback(link)
+                                        found = true
+                                    }
+                            }
                         }
 
-                    } catch (
-                        e: Exception
-                    ) {
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
                 }
 
-            } catch (
-                e: Exception
-            ) {
-
+            } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
