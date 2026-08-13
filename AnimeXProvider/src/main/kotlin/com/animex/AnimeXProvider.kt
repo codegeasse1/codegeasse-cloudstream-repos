@@ -162,12 +162,12 @@ class AnimeXProvider : MainAPI() {
         // The anime detail URL is now /anime/{slugBase}-{anilistId} (e.g. "one-piece-21").
         // The site embeds its SvelteKit data with UNQUOTED keys (titleEnglish:"..."),
         // so every regex below tolerates optional quotes on keys and values.
+        val html = app.get(url).text
+        val document = Jsoup.parse(html)
         val slug = url.substringAfter("/anime/").substringBefore("?")
         val anilistId = slug.substringAfterLast("-").toIntOrNull()?.toString()
             ?: Regex("""["']?anilistId["']?\s*:\s*(\d+)""").find(html)?.groupValues?.get(1)
         val slugBase = slug.substringBeforeLast("-")
-        val html = app.get(url).text
-        val document = Jsoup.parse(html)
 
         val title = Regex("""["']?titleEnglish["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
             ?: Regex("""["']?romajiTitle["']?\s*:\s*["']([^"']+)""").find(html)?.groupValues?.get(1)
