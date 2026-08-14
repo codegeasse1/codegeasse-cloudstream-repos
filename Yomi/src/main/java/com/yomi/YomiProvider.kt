@@ -14,10 +14,13 @@ class YomiProvider : MainAPI() {
 
     private val anilistApi = "https://graphql.anilist.co"
 
-    // yomi's "VidNest" embed server (server 4 of the yomi player) - the only one of
-    // yomi's 5 servers that is directly resolvable without a browser iframe session.
+    // yomi's embed servers:
+    // server 4 = VidNest  (directly resolvable JSON API)
+    // server 5 = Yenime   (flikHub API - returns the same megaplay library behind a proxy)
     private val vidnestApi = "https://animex.animanga.fun"
     private val vidnestUrl = "https://vidnest.fun"
+    private val flikhubApi = "https://api.flikhub.net"
+    private val yenimeUrl = "https://api.yenime.net"
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -152,6 +155,9 @@ class YomiProvider : MainAPI() {
             for (i in 0 until genresArr.length()) genres.add(genresArr.getString(i))
         }
 
+        val idMal = response.optInt("idMal", 0)
+        val malParam = if (idMal > 0) "&mal=$idMal" else ""
+
         // Ongoing shows have no episode count yet - default to 12.
         val maxEp = response.optInt("episodes", 12).coerceAtLeast(1)
 
@@ -162,7 +168,7 @@ class YomiProvider : MainAPI() {
         }
 
         if (type == TvType.Movie) {
-            return newMovieLoadResponse(title, url, type, "$mainUrl/watch/$animeId/1?audio=sub") {
+            return newMovieLoadResponse(title, url, type, "$mainUrl/watch/$animeId/1?audio=sub$malParam") {
                 this.posterUrl = poster
                 this.plot = plot
                 this.tags = genres
@@ -170,15 +176,15 @@ class YomiProvider : MainAPI() {
         }
 
         // Episode data = watch URL (yomi's own URL format). CloudStream's URL-fixer leaves
-        // absolute URLs untouched, and loadLinks() parses the animeId / episode / audio out of it.
+        // absolute URLs untouched, and loadLinks() parses the animeId / episode / audio / mal out of it.
         val subEps = mutableListOf<Episode>()
         val dubEps = mutableListOf<Episode>()
         for (i in 1..maxEp) {
-            subEps.add(newEpisode("$mainUrl/watch/$animeId/$i?audio=sub") {
+            subEps.add(newEpisode("$mainUrl/watch/$animeId/$i?audio=sub$malParam") {
                 this.name = "Episode $i"
                 this.episode = i
             })
-            dubEps.add(newEpisode("$mainUrl/watch/$animeId/$i?audio=dub") {
+            dubEps.add(newEpisode("$mainUrl/watch/$animeId/$i?audio=dub$malParam") {
                 this.name = "Episode $i"
                 this.episode = i
             })
@@ -203,11 +209,15 @@ class YomiProvider : MainAPI() {
         val animeId = watchMatch.groupValues[1].toIntOrNull() ?: return false
         val episode = watchMatch.groupValues[2].toIntOrNull() ?: return false
         val requestedAudio = Regex("""audio=(\w+)""").find(data)?.groupValues?.get(1) ?: "sub"
+        val malId = Regex("""mal=(\d+)""").find(data)?.groupValues?.get(1)?.toIntOrNull()
 
         // try the requested audio first, then the other one as a fallback
         val audioOrder = listOf(requestedAudio) + listOf(if (requestedAudio == "dub") "sub" else "dub")
 
+        var emitted = false
+
         for (audio in audioOrder) {
+            // ---- server 4: VidNest ----
             try {
                 val res = app.get(
                     "$vidnestApi/anime/$animeId/$episode/$audio",
@@ -260,11 +270,70 @@ class YomiProvider : MainAPI() {
                         )
                     }
                 )
-                return true
+                emitted = true
             } catch (e: Exception) {
-                // try the other audio, or give up
+                // try the next source / audio
             }
+
+            // ---- server 5: Yenime (flikHub - megaplay library via their proxy) ----
+            if (malId != null) {
+                try {
+                    val res = app.get(
+                        "$flikhubApi/megaplay?mal=$malId&ep=$episode&type=$audio",
+                        headers = mapOf(
+                            "User-Agent" to userAgent,
+                            "Accept" to "application/json",
+                            "Referer" to yenimeUrl
+                        )
+                    )
+                    if (res.isSuccessful) {
+                        val json = JSONObject(res.text)
+                        val streamUrl = json.optString("proxiedUrl").ifBlank { json.optString("m3u8") }
+                        if (streamUrl.isNotBlank() && !streamUrl.startsWith("blob:")) {
+                            // subtitles
+                            val tracks = json.optJSONArray("tracks")
+                            if (tracks != null) {
+                                for (i in 0 until tracks.length()) {
+                                    val track = tracks.optJSONObject(i) ?: continue
+                                    val subUrl = track.optString("file")
+                                    if (subUrl.isBlank() || subUrl.startsWith("blob:")) continue
+                                    val label = track.optString("label", "English")
+                                    subtitleCallback(
+                                        newSubtitleFile(label, subUrl.replace("\\/", "/")) {
+                                            this.headers = mapOf(
+                                                "Referer" to "https://megaplay.buzz/",
+                                                "User-Agent" to userAgent
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+
+                            callback(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "Yenime ${audio.uppercase()}",
+                                    url = streamUrl.replace("\\/", "/"),
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = yenimeUrl
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf(
+                                        "Referer" to yenimeUrl,
+                                        "User-Agent" to userAgent
+                                    )
+                                }
+                            )
+                            emitted = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    // try the next source / audio
+                }
+            }
+
+            if (emitted) break
         }
-        return false
+        return emitted
     }
 }
