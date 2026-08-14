@@ -322,9 +322,9 @@ class AnimeKhorProvider : MainAPI() {
     }
 
     // ok.ru serves several page formats depending on the video (escaped JSON with
-    // ondemandHls, entity-escaped JSON with hlsManifestUrl, or a legacy "videos" array).
-    // Browser-like headers matter: ok.ru bot-detects bare okhttp requests, so send
-    // Accept/Accept-Language/Sec-Fetch like a real embed.
+    // ondemandHls, entity-escaped JSON with hlsManifestUrl, or a legacy "videos" array),
+    // and blocks non-browser HTTP clients. Fast path first; when it yields no stream,
+    // render the embed page in a real browser engine (WebView) that ok.ru treats normally.
     private suspend fun resolveOkru(
         embedUrl: String,
         label: String,
@@ -332,7 +332,7 @@ class AnimeKhorProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val clean = embedUrl.replace("\\/", "/")
+        val clean = embedUrl.replace("\\\\/", "/")
         val headers = mapOf(
             "User-Agent" to USER_AGENT,
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -346,13 +346,18 @@ class AnimeKhorProvider : MainAPI() {
         val html = try { app.get(clean, headers = headers).text } catch (e: Exception) { null }
         if (html != null) {
             if (emitOkruStream(html, label, clean, callback)) return true
-            // page fetched fine but no stream -> video deleted/unavailable, don't spin up a WebView
-            return false
+            // a fetched page that looks like a "video deleted" page has no stream to find
+            // in a WebView either, so skip the browser fallback
+            if (looksLikeDeletedOkru(html)) return false
         }
-
-        // ok.ru refuses non-browser HTTP clients (TLS fingerprint / cookies), so as a
-        // fallback render the embed page in a real browser engine and grab the stream.
         return resolveOkruWebView(clean, label, referer, callback)
+    }
+
+    // ok.ru's "video no longer exists" page has a generic title (no video name in quotes)
+    private fun looksLikeDeletedOkru(html: String): Boolean {
+        if (html.contains("data-options")) return false
+        val title = Regex("""<title>([^<]*)</title>""").find(html)?.groupValues?.get(1) ?: return false
+        return title.contains("See video") && !title.contains("&quot;")
     }
 
     // parse whatever format ok.ru served and emit the stream (returns true if emitted)
@@ -365,6 +370,7 @@ class AnimeKhorProvider : MainAPI() {
         val unescaped = html.replace("\\&quot;", "\"")
             .replace("&quot;", "\"")
             .replace("\\\\", "\\")
+            .replace("\\\"", "\"")
             .replace(Regex("""\\u([0-9A-Fa-f]{4})""")) { it.groupValues[1].toInt(16).toChar().toString() }
 
         // 1) modern formats: hlsManifestUrl / ondemandHls m3u8
@@ -429,7 +435,8 @@ class AnimeKhorProvider : MainAPI() {
 
     // load the ok.ru embed in an in-app browser (WebView) - a real Chrome engine with
     // proper TLS/cookies, so it gets the same page a browser does even when ok.ru
-    // blocks the okhttp client. The script grabs the data-options JSON from the DOM.
+    // blocks the okhttp client. The script grabs the data-options JSON from the DOM and
+    // signals deleted videos so the resolver can exit early.
     private suspend fun resolveOkruWebView(
         embedUrl: String,
         label: String,
@@ -438,19 +445,26 @@ class AnimeKhorProvider : MainAPI() {
     ): Boolean {
         var captured: String? = null
         val resolver = WebViewResolver(
-            interceptUrl = Regex("""\.m3u8"""),
+            interceptUrl = Regex("""\.m3u8|x-deleted"""),
             additionalUrls = listOf(Regex("""\.m3u8"""), Regex("""videoPreview""")),
             useOkhttp = false,
-            script = "(function(){var el=document.querySelector('[data-options]'); return el ? el.getAttribute('data-options') : '';})()",
-            scriptCallback = { s -> if (s.contains("m3u8") || s.contains("expires=")) captured = s },
-            timeout = 20_000L
+            script = "(function(){var el=document.querySelector('[data-options]');" +
+                "if(el)return 'STREAM:'+el.getAttribute('data-options');" +
+                "var t=document.title||'';" +
+                "if(t.indexOf('See video')===0&&t.indexOf('\"')===-1){location.replace('https://ok.ru/x-deleted');return 'DELETED';}" +
+                "return '';})()",
+            scriptCallback = { s ->
+                val v = s.trim().trim('"')
+                if (v.startsWith("STREAM:")) captured = v.removePrefix("STREAM:")
+            },
+            timeout = 12_000L
         )
         val (fixedRequest, extraRequests) = resolver.resolveUsingWebView(
             embedUrl,
             referer = referer,
             requestCallBack = { req ->
                 val u = req.url.toString()
-                u.contains(".m3u8") || (u.contains("videoPreview") && captured != null)
+                u.contains(".m3u8") || (u.contains("videoPreview") && captured != null) || u.contains("x-deleted")
             }
         )
 
