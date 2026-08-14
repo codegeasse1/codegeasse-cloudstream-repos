@@ -3,7 +3,9 @@ package com.reanime
 import android.util.Base64
 import android.util.Log
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import okhttp3.Interceptor
 import org.jsoup.Jsoup
 import org.json.JSONArray
 import org.json.JSONObject
@@ -704,4 +706,22 @@ class ReAnimeProvider : MainAPI() {
 
         return found
     }
+
+    // The flixcloud CDN (fetch7.flixcloud.cc) serves a Cloudflare JS challenge to
+    // bot-like requests (plain okhttp gets a 403 block page → "manifest malformed"
+    // in the player). Returning a CloudflareKiller interceptor makes CloudStream run
+    // the challenge inside a WebView and retry with the cf_clearance cookie.
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        return try {
+            if (extractorLink.url.contains("flixcloud.cc") || extractorLink.referer.contains("flixcloud.cc")) {
+                cloudflareKiller
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private val cloudflareKiller: CloudflareKiller by lazy { CloudflareKiller() }
 }
