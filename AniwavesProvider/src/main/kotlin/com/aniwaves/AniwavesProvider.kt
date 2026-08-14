@@ -368,14 +368,23 @@ class AniwavesProvider : MainAPI() {
             val serverHtml = serverJson?.optString("result")?.ifBlank { serverJson.optString("html") } ?: serverRes
             val serverDoc = Jsoup.parse(serverHtml)
 
-            // Collect ids AND their visible labels (Vidplay / BYFMS / DGHG)
+            // Collect servers grouped by type (SUB / SSUB / DUB) so both sub and dub are extracted
             val serverIds = mutableListOf<String>()
             val serverLabels = mutableMapOf<String, String>()
-            for (el in serverDoc.select("li, a, div, span")) {
-                val id = el.attr("data-link").ifBlank { el.attr("data-id") }.ifBlank { el.attr("data-server") }
-                if (id.isNotBlank() && !serverIds.contains(id)) {
-                    serverIds.add(id)
-                    serverLabels[id] = el.text().trim()
+            for (typeEl in serverDoc.select("div.type")) {
+                val typeLabel = when (typeEl.attr("data-type").lowercase()) {
+                    "sub" -> "Sub"
+                    "ssub" -> "S-Sub"
+                    "dub" -> "Dub"
+                    else -> ""
+                }
+                for (li in typeEl.select("li")) {
+                    val id = li.attr("data-link-id").ifBlank { li.attr("data-id") }.ifBlank { li.attr("data-link") }
+                    if (id.isNotBlank() && !serverIds.contains(id)) {
+                        serverIds.add(id)
+                        val base = li.text().trim().ifBlank { "Server ${serverIds.size}" }
+                        serverLabels[id] = if (typeLabel.isNotBlank()) "$base ($typeLabel)" else base
+                    }
                 }
             }
             if (serverIds.isEmpty()) {
@@ -417,11 +426,13 @@ class AniwavesProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        if (!found && pendingLinks.isNotEmpty()) {
+        // Always surface every server we managed to resolve, even ones that failed the
+        // pre-validation probe (those get re-validated by the player). Without this, once a
+        // sub server succeeds, dub links that landed in pendingLinks were silently dropped.
+        if (pendingLinks.isNotEmpty()) {
             for (p in pendingLinks.distinctBy { it.url }) {
-                emitRaw(p)
+                try { emitRaw(p); found = true } catch (e: Exception) { }
             }
-            found = pendingLinks.isNotEmpty()
         }
 
         return found
