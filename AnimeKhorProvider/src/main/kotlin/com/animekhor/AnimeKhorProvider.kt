@@ -2,6 +2,7 @@ package com.animekhor
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -320,10 +321,10 @@ class AnimeKhorProvider : MainAPI() {
         return false
     }
 
-    // ok.ru's modern pages put the stream info in a data-options attribute as escaped JSON.
-    // The built-in Odnoklassniki extractor's "videos" array format no longer exists, so parse
-    // the ondemandHls m3u8 directly. Browser-like headers matter: ok.ru bot-detects bare
-    // okhttp requests, so send Accept/Accept-Language/Sec-Fetch like a real embed.
+    // ok.ru serves several page formats depending on the video (escaped JSON with
+    // ondemandHls, entity-escaped JSON with hlsManifestUrl, or a legacy "videos" array).
+    // Browser-like headers matter: ok.ru bot-detects bare okhttp requests, so send
+    // Accept/Accept-Language/Sec-Fetch like a real embed.
     private suspend fun resolveOkru(
         embedUrl: String,
         label: String,
@@ -342,20 +343,34 @@ class AnimeKhorProvider : MainAPI() {
             "Sec-Fetch-Site" to "cross-site",
             "Sec-Fetch-User" to "?1",
         )
-        val html = try {
-            app.get(clean, headers = headers).text
-        } catch (e: Exception) { return false }
+        val html = try { app.get(clean, headers = headers).text } catch (e: Exception) { null }
+        if (html != null) {
+            if (emitOkruStream(html, label, clean, callback)) return true
+            // page fetched fine but no stream -> video deleted/unavailable, don't spin up a WebView
+            return false
+        }
 
-        // normalize the escaped HTML (same dance the built-in extractor does) so any
-        // escaping variant of the data-options JSON can be parsed
+        // ok.ru refuses non-browser HTTP clients (TLS fingerprint / cookies), so as a
+        // fallback render the embed page in a real browser engine and grab the stream.
+        return resolveOkruWebView(clean, label, referer, callback)
+    }
+
+    // parse whatever format ok.ru served and emit the stream (returns true if emitted)
+    private fun emitOkruStream(
+        html: String,
+        label: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val unescaped = html.replace("\\&quot;", "\"")
+            .replace("&quot;", "\"")
             .replace("\\\\", "\\")
             .replace(Regex("""\\u([0-9A-Fa-f]{4})""")) { it.groupValues[1].toInt(16).toChar().toString() }
 
-        // 1) modern format: ondemandHls m3u8 inside the data-options JSON
-        val hls = Regex("""ondemandHls"\s*:\s*"([^"]+\.m3u8[^"]*)""").find(unescaped)?.groupValues?.get(1)?.trim()
+        // 1) modern formats: hlsManifestUrl / ondemandHls m3u8
+        val hls = Regex("""(?:hlsManifestUrl|ondemandHls)"\s*:\s*"([^"]+\.m3u8[^"]*)""").find(unescaped)?.groupValues?.get(1)?.trim()
         if (hls != null && hls.startsWith("http")) {
-            val links = M3u8Helper.generateM3u8(label, hls, clean)
+            val links = M3u8Helper.generateM3u8(label, hls, referer)
             if (links.isNotEmpty()) {
                 links.forEach { callback(it) }
                 return true
@@ -363,7 +378,7 @@ class AnimeKhorProvider : MainAPI() {
         }
 
         // 2) legacy format: "videos":[{"name":"...","url":"..."}]
-        val videosStr = Regex(""""videos":(\[[^]]*])""").find(unescaped)?.groupValues?.get(1)
+        val videosStr = Regex(""""videos":(\[[^]]*\])""").find(unescaped)?.groupValues?.get(1)
         if (videosStr != null) {
             val videos = try { JSONArray(videosStr) } catch (e: Exception) { null }
             if (videos != null && videos.length() > 0) {
@@ -383,7 +398,7 @@ class AnimeKhorProvider : MainAPI() {
                         ) {
                             this.referer = "https://ok.ru/"
                             this.quality = okruQuality(v.optString("name"))
-                            this.headers = headers
+                            this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "https://ok.ru/")
                         }
                     )
                 }
@@ -391,7 +406,7 @@ class AnimeKhorProvider : MainAPI() {
             }
         }
 
-        // 3) fallback: direct signed .okcdn.ru stream URL in the data-options JSON
+        // 3) fallback: direct signed .okcdn.ru stream URL
         val direct = Regex(""""url"\s*:\s*"(https?://[^"]*\?expires=[^"]*)""").find(unescaped)?.groupValues?.get(1)
         if (direct != null && direct.startsWith("http")) {
             callback(
@@ -403,13 +418,55 @@ class AnimeKhorProvider : MainAPI() {
                 ) {
                     this.referer = "https://ok.ru/"
                     this.quality = Qualities.Unknown.value
-                    this.headers = headers
+                    this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "https://ok.ru/")
                 }
             )
             return true
         }
 
         return false
+    }
+
+    // load the ok.ru embed in an in-app browser (WebView) - a real Chrome engine with
+    // proper TLS/cookies, so it gets the same page a browser does even when ok.ru
+    // blocks the okhttp client. The script grabs the data-options JSON from the DOM.
+    private suspend fun resolveOkruWebView(
+        embedUrl: String,
+        label: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var captured: String? = null
+        val resolver = WebViewResolver(
+            interceptUrl = Regex("""\.m3u8"""),
+            additionalUrls = listOf(Regex("""\.m3u8"""), Regex("""videoPreview""")),
+            useOkhttp = false,
+            script = "(function(){var el=document.querySelector('[data-options]'); return el ? el.getAttribute('data-options') : '';})()",
+            scriptCallback = { s -> if (s.contains("m3u8") || s.contains("expires=")) captured = s },
+            timeout = 20_000L
+        )
+        val (fixedRequest, extraRequests) = resolver.resolveUsingWebView(
+            embedUrl,
+            referer = referer,
+            requestCallBack = { req ->
+                val u = req.url.toString()
+                u.contains(".m3u8") || (u.contains("videoPreview") && captured != null)
+            }
+        )
+
+        // if the player itself requested an m3u8, use that directly
+        val m3u8Request = (listOfNotNull(fixedRequest?.url?.toString()) + extraRequests.map { it.url.toString() })
+            .firstOrNull { it.contains(".m3u8") }
+        if (m3u8Request != null) {
+            val links = M3u8Helper.generateM3u8(label, m3u8Request, embedUrl)
+            if (links.isNotEmpty()) {
+                links.forEach { callback(it) }
+                return true
+            }
+        }
+
+        val html = captured ?: return false
+        return emitOkruStream(html, label, embedUrl, callback)
     }
 
     private fun okruQuality(name: String): Int {
