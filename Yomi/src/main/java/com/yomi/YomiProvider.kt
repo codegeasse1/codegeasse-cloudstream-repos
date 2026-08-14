@@ -134,6 +134,7 @@ class YomiProvider : MainAPI() {
                     description
                     coverImage { extraLarge large }
                     episodes
+                    nextAiringEpisode { episode }
                     format
                     genres
                 }
@@ -158,8 +159,11 @@ class YomiProvider : MainAPI() {
         val idMal = response.optInt("idMal", 0)
         val malParam = if (idMal > 0) "&mal=$idMal" else ""
 
-        // Ongoing shows have no episode count yet - default to 12.
-        val maxEp = response.optInt("episodes", 12).coerceAtLeast(1)
+        // Use the released episode count: for ongoing shows AniList's `episodes` field is the
+        // planned TOTAL, while nextAiringEpisode.episode is the number of the NEXT unreleased
+        // episode, so released = next - 1. Fall back to the total (or 12 for unknowns).
+        val nextAiring = response.optJSONObject("nextAiringEpisode")?.optInt("episode")
+        val maxEp = (nextAiring?.minus(1) ?: response.optInt("episodes", 12)).coerceAtLeast(1)
 
         val type = when (response.optString("format")) {
             "MOVIE" -> TvType.Movie
