@@ -242,42 +242,57 @@ class AnimeKhorProvider : MainAPI() {
             return true
         }
 
+        // track whether any extractor link was actually emitted, so a native extractor
+        // that matches the domain but yields nothing doesn't swallow the server silently
+        var emitted = false
+        val trackedCallback: (ExtractorLink) -> Unit = { link ->
+            emitted = true
+            callback(link)
+        }
+
         if (host.contains("dailymotion.com") || host.contains("dai.ly")) {
-            val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(clean)?.groupValues?.get(1)
-            if (vidId != null && loadExtractor("https://www.dailymotion.com/video/$vidId", referer, subtitleCallback, callback)) return true
+            try {
+                loadExtractor(clean, referer, subtitleCallback, trackedCallback)
+                if (emitted) return true
+            } catch (e: Exception) { }
         }
 
         if (host.contains("ok.ru") || host.contains("odnoklassniki")) {
-            if (loadExtractor(clean, referer, subtitleCallback, callback)) return true
+            if (resolveOkru(clean, label, referer, subtitleCallback, trackedCallback)) return true
+            try {
+                loadExtractor(clean, referer, subtitleCallback, trackedCallback)
+                if (emitted) return true
+            } catch (e: Exception) { }
         }
 
         if (host.contains("rumble.com")) {
-            if (resolveRumble(clean, label, subtitleCallback, callback)) return true
+            if (resolveRumble(clean, label, subtitleCallback, trackedCallback)) return true
         }
 
         if (host.contains("d.tube")) {
-            if (resolveDtube(clean, label, subtitleCallback, callback)) return true
+            if (resolveDtube(clean, label, subtitleCallback, trackedCallback)) return true
         }
 
         if (host.contains("turbovid") || host.contains("emturbovid") || host.contains("turboviplay")) {
-            if (resolveTurbovid(clean, label, referer, subtitleCallback, callback)) return true
+            if (resolveTurbovid(clean, label, referer, subtitleCallback, trackedCallback)) return true
         }
 
         if (host.contains("upns.live") || host.contains("p2pstream.vip")) {
-            if (resolveUpns(clean, label, subtitleCallback, callback)) return true
+            if (resolveUpns(clean, label, subtitleCallback, trackedCallback)) return true
         }
 
         if (host.contains("bysekoze") || host.contains("byse")) {
-            if (resolveByse(clean, label, subtitleCallback, callback)) return true
+            if (resolveByse(clean, label, subtitleCallback, trackedCallback)) return true
         }
 
         if (host.contains("abyssplayer") || host.contains("abyss")) {
-            if (resolveAbyss(clean, label, referer, subtitleCallback, callback)) return true
+            if (resolveAbyss(clean, label, referer, subtitleCallback, trackedCallback)) return true
         }
 
         // generic: native cloudstream extractors (turbovid, vidhide, streamwish, ...)
         try {
-            if (loadExtractor(clean, referer, subtitleCallback, callback)) return true
+            loadExtractor(clean, referer, subtitleCallback, trackedCallback)
+            if (emitted) return true
         } catch (e: Exception) { }
 
         // generic: scrape the embed page for a direct stream
@@ -302,6 +317,30 @@ class AnimeKhorProvider : MainAPI() {
         } catch (e: Exception) { }
 
         return false
+    }
+
+    // ok.ru's modern pages put the stream info in a data-options attribute as escaped JSON;
+    // extract the ondemandHls m3u8 directly (the built-in Odnoklassniki extractor no longer matches)
+    private suspend fun resolveOkru(
+        embedUrl: String,
+        label: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val html = try {
+            app.get(clean, headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)).text
+        } catch (e: Exception) { return false }
+        val hls = Regex("""ondemandHls\\&quot;:\\&quot;(.*?)\\&quot;""").find(html)?.groupValues?.get(1)
+            ?.replace("""\u0026""", "&")
+            ?.replace("""\/""", "/")
+            ?.trim()
+        if (hls == null || !hls.startsWith("http")) return false
+        val links = M3u8Helper.generateM3u8(label, hls, clean)
+        if (links.isEmpty()) return false
+        links.forEach { callback(it) }
+        return true
     }
 
     private suspend fun resolveRumble(
