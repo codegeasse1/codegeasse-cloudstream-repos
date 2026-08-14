@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.newSubtitleFile
+import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
@@ -319,8 +320,10 @@ class AnimeKhorProvider : MainAPI() {
         return false
     }
 
-    // ok.ru's modern pages put the stream info in a data-options attribute as escaped JSON;
-    // extract the ondemandHls m3u8 directly (the built-in Odnoklassniki extractor no longer matches)
+    // ok.ru's modern pages put the stream info in a data-options attribute as escaped JSON.
+    // The built-in Odnoklassniki extractor's "videos" array format no longer exists, so parse
+    // the ondemandHls m3u8 directly. Browser-like headers matter: ok.ru bot-detects bare
+    // okhttp requests, so send Accept/Accept-Language/Sec-Fetch like a real embed.
     private suspend fun resolveOkru(
         embedUrl: String,
         label: String,
@@ -329,19 +332,101 @@ class AnimeKhorProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val clean = embedUrl.replace("\\/", "/")
+        val headers = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9",
+            "Referer" to referer,
+            "Sec-Fetch-Dest" to "iframe",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "cross-site",
+            "Sec-Fetch-User" to "?1",
+        )
         val html = try {
-            app.get(clean, headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)).text
+            app.get(clean, headers = headers).text
         } catch (e: Exception) { return false }
-        val hls = Regex("""ondemandHls\\&quot;:\\&quot;(.*?)\\&quot;""").find(html)?.groupValues?.get(1)
-            ?.replace("""\u0026""", "&")
-            ?.replace("""\/""", "/")
-            ?.trim()
-        if (hls == null || !hls.startsWith("http")) return false
-        val links = M3u8Helper.generateM3u8(label, hls, clean)
-        if (links.isEmpty()) return false
-        links.forEach { callback(it) }
-        return true
+
+        // normalize the escaped HTML (same dance the built-in extractor does) so any
+        // escaping variant of the data-options JSON can be parsed
+        val unescaped = html.replace("\\&quot;", "\"")
+            .replace("\\\\", "\\")
+            .replace(Regex("""\\u([0-9A-Fa-f]{4})""")) { it.groupValues[1].toInt(16).toChar().toString() }
+
+        // 1) modern format: ondemandHls m3u8 inside the data-options JSON
+        val hls = Regex("""ondemandHls"\s*:\s*"([^"]+\.m3u8[^"]*)""").find(unescaped)?.groupValues?.get(1)?.trim()
+        if (hls != null && hls.startsWith("http")) {
+            val links = M3u8Helper.generateM3u8(label, hls, clean)
+            if (links.isNotEmpty()) {
+                links.forEach { callback(it) }
+                return true
+            }
+        }
+
+        // 2) legacy format: "videos":[{"name":"...","url":"..."}]
+        val videosStr = Regex(""""videos":(\[[^]]*])""").find(unescaped)?.groupValues?.get(1)
+        if (videosStr != null) {
+            val videos = try { JSONArray(videosStr) } catch (e: Exception) { null }
+            if (videos != null && videos.length() > 0) {
+                var emitted = false
+                for (i in 0 until videos.length()) {
+                    val v = videos.optJSONObject(i) ?: continue
+                    val u = v.optString("url").ifBlank { continue }
+                    val url = if (u.startsWith("//")) "https:$u" else u
+                    if (!url.startsWith("http")) continue
+                    emitted = true
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = label,
+                            url = url,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "https://ok.ru/"
+                            this.quality = okruQuality(v.optString("name"))
+                            this.headers = headers
+                        }
+                    )
+                }
+                if (emitted) return true
+            }
+        }
+
+        // 3) fallback: direct signed .okcdn.ru stream URL in the data-options JSON
+        val direct = Regex(""""url"\s*:\s*"(https?://[^"]*\?expires=[^"]*)""").find(unescaped)?.groupValues?.get(1)
+        if (direct != null && direct.startsWith("http")) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = label,
+                    url = direct,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "https://ok.ru/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = headers
+                }
+            )
+            return true
+        }
+
+        return false
     }
+
+    private fun okruQuality(name: String): Int {
+        val n = name.uppercase()
+        return when {
+            n.contains("4K") || n.contains("ULTRA") -> Qualities.P2160.value
+            n.contains("1440") || n.contains("QUAD") -> Qualities.P1440.value
+            n.contains("1080") || n.contains("FULL") -> Qualities.P1080.value
+            n.contains("720") || n.contains("HD") -> Qualities.P720.value
+            n.contains("480") || n.contains("SD") -> Qualities.P480.value
+            n.contains("360") || n.contains("LOW") -> Qualities.P360.value
+            n.contains("240") || n.contains("LOWEST") -> Qualities.P240.value
+            n.contains("144") || n.contains("MOBILE") -> Qualities.P144.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
 
     private suspend fun resolveRumble(
         embedUrl: String,
