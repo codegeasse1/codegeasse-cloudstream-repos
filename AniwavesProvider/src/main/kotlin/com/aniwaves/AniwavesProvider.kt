@@ -6,6 +6,10 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class AniwavesProvider : MainAPI() {
     override var mainUrl = "https://aniwaves.ru"
@@ -259,6 +263,82 @@ class AniwavesProvider : MainAPI() {
             return false
         }
 
+        // Byse / VidPlay-family SPA embeds (gn1r5n.org, myvidplay.com, vidplay.*, byse*).
+        // The CloudStream core only registers a handful of byse hosts, so these need to be
+        // extracted here: /api/videos/<code>/embed/details -> embed_frame_url ->
+        // /api/videos/<code>/embed/playback -> AES-GCM encrypted payload with the m3u8.
+        fun b64UrlDecode(s: String): ByteArray {
+            val fixed = s.replace('-', '+').replace('_', '/')
+            val pad = (4 - fixed.length % 4) % 4
+            return android.util.Base64.decode(fixed + "=".repeat(pad), android.util.Base64.DEFAULT)
+        }
+
+        suspend fun extractByse(embedUrl: String, tag: String): Boolean {
+            return try {
+                val origin = originOf(embedUrl)
+                val code = embedUrl.substringBefore("?").trimEnd('/').substringAfterLast('/')
+                if (code.isBlank()) return false
+
+                val parentRef = "$mainUrl/"
+                val parentHdr = mapOf(
+                    "User-Agent" to ua,
+                    "Accept" to "*/*",
+                    "Referer" to embedUrl,
+                    "X-Embed-Origin" to mainUrl,
+                    "X-Embed-Referer" to parentRef,
+                    "X-Embed-Parent" to parentRef
+                )
+
+                val detailsRes = app.get("$origin/api/videos/$code/embed/details", headers = parentHdr).text
+                if (!detailsRes.trim().startsWith("{")) return false
+                val details = JSONObject(detailsRes)
+                var frameUrl = details.optString("embed_frame_url", "").replace("\\/", "/")
+                if (frameUrl.startsWith("//")) frameUrl = "https:$frameUrl"
+                if (frameUrl.isBlank()) frameUrl = embedUrl
+
+                val frameOrigin = originOf(frameUrl)
+                val frameCode = frameUrl.substringBefore("?").trimEnd('/').substringAfterLast('/')
+                if (frameCode.isBlank()) return false
+
+                val playbackRes = app.get(
+                    "$frameOrigin/api/videos/$frameCode/embed/playback",
+                    headers = mapOf(
+                        "User-Agent" to ua,
+                        "Accept" to "*/*",
+                        "Referer" to frameUrl,
+                        "X-Embed-Origin" to mainUrl,
+                        "X-Embed-Referer" to parentRef,
+                        "X-Embed-Parent" to parentRef
+                    )
+                ).text
+                if (!playbackRes.trim().startsWith("{")) return false
+                val pb = JSONObject(playbackRes).optJSONObject("playback") ?: return false
+
+                val keyParts = pb.optJSONArray("key_parts") ?: return false
+                val keyBytes = ByteArrayOutputStream().also { out ->
+                    for (i in 0 until keyParts.length()) out.write(b64UrlDecode(keyParts.getString(i)))
+                }.toByteArray()
+                val iv = b64UrlDecode(pb.optString("iv", ""))
+                val payload = b64UrlDecode(pb.optString("payload", ""))
+                if (keyBytes.size !in intArrayOf(16, 24, 32) || iv.isEmpty() || payload.isEmpty()) return false
+
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(128, iv))
+                var jsonStr = String(cipher.doFinal(payload), Charsets.UTF_8)
+                if (jsonStr.startsWith("\uFEFF")) jsonStr = jsonStr.substring(1)
+
+                val sources = JSONObject(jsonStr).optJSONArray("sources") ?: return false
+                var streamUrl = ""
+                for (i in 0 until sources.length()) {
+                    val u = sources.optJSONObject(i)?.optString("url", "") ?: ""
+                    if (u.startsWith("http")) { streamUrl = u.replace("\\/", "/"); break }
+                }
+                if (streamUrl.isBlank()) return false
+
+                tryLink(streamUrl, origin, tag, mapOf("Referer" to origin), streamUrl.contains("m3u8", true))
+            } catch (e: Exception) { false }
+        }
+
         // Probe MegaCloud/EchoVideo-style getSources APIs on ANY embed host
         suspend fun probeGetSources(embedUrl: String, tag: String): Boolean {
             val origin = originOf(embedUrl)
@@ -312,6 +392,7 @@ class AniwavesProvider : MainAPI() {
 
             if (extractingLoadExtractor(embedUrl, tag)) return true
             if (probeGetSources(embedUrl, tag)) return true
+            if (embedUrl.contains("/e/") && extractByse(embedUrl, tag)) return true
             if (tryKnownRewrites(embedUrl, tag)) return true
 
             try {
