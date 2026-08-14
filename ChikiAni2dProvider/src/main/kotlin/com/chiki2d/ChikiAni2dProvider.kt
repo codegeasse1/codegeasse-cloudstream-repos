@@ -93,7 +93,7 @@ class ChikiAni2dProvider : MainAPI() {
                 val epLink = li.selectFirst("a")
                 val epHref = if (epLink != null && epLink.hasAttr("href")) fixUrlNull(epLink.attr("href")) else null
                 if (epHref == null) return@mapNotNull null
-                val epTitle = (epLink.attr("title").ifBlank { epLink.text() } ?: li.text()).trim()
+                val epTitle = (epLink?.attr("title")?.ifBlank { epLink?.text() ?: "" } ?: li.text()).trim()
                 val epNumText = li.selectFirst(".epl-num")?.text() ?: epTitle
                 val epNum = Regex("(?i)(?:episode|ep)\\s*(\\d+)").find(epNumText)?.groupValues?.get(1)?.toIntOrNull()
                     ?: Regex("\\d+").find(epNumText)?.value?.toIntOrNull()
