@@ -4,7 +4,7 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
-version = 3
+version = 4
 
 cloudstream {
     description = "Re:Anime Extension"
