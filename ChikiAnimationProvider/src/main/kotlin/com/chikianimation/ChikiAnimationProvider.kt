@@ -10,6 +10,8 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.URI
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -257,6 +259,77 @@ class ChikiAnimationProvider : MainAPI() {
                 val referer = "$RPM/"
                 val hdr = mapOf("User-Agent" to UA, "Referer" to referer, "X-Requested-With" to "XMLHttpRequest")
 
+                // The RPM API returns the video config AES-CBC encrypted as a hex blob.
+                // Key/IV are static in the SPA (verified against multiple episodes).
+                val rpmKey = "kiemtienmua911ca".toByteArray(Charsets.UTF_8)
+                val rpmIv = "1234567890oiuytr".toByteArray(Charsets.UTF_8)
+
+                // Parse a decrypted video config and emit the real playable M3U8 + subtitles
+                suspend fun addRpmLinks(videoJson: String): Boolean {
+                    return try {
+                        val obj = JSONObject(videoJson)
+                        val hlsPath = obj.optString("hlsVideoTiktok").ifBlank {
+                            obj.optString("hlsVideo").ifBlank { obj.optString("hls") }
+                        }
+                        if (hlsPath.isBlank() || !hlsPath.startsWith("/hls/")) return false
+
+                        // streamingConfig -> adjust.<server> -> domain + params (respect order/disabled)
+                        var domain = ""
+                        val params = StringBuilder()
+                        try {
+                            val sc = JSONObject(obj.getString("streamingConfig"))
+                            val adjust = sc.getJSONObject("adjust")
+                            val order = sc.optJSONArray("order") ?: JSONArray()
+                            for (i in 0 until order.length()) {
+                                val prov = order.getString(i)
+                                val cfg = adjust.optJSONObject(prov) ?: continue
+                                if (cfg.optBoolean("disabled", false)) continue
+                                val d = cfg.optString("domain", "")
+                                if (d.isBlank()) continue
+                                domain = d
+                                val p = cfg.optJSONObject("params")
+                                if (p != null) {
+                                    val it = p.keys()
+                                    var first = true
+                                    while (it.hasNext()) {
+                                        val k = it.next()
+                                        if (first) { params.append("?"); first = false } else params.append("&")
+                                        params.append(k).append("=").append(p.optString(k))
+                                    }
+                                }
+                                break
+                            }
+                        } catch (e: Exception) {}
+
+                        // Fresh per-response token; required by some streams
+                        val pk = obj.optJSONObject("pk")
+                        val k = pk?.optString("k", "") ?: ""
+                        val kx = pk?.optString("kx", "") ?: ""
+                        val full = buildString {
+                            append("$RPM/hlsmod/$domain/${hlsPath.removePrefix("/hls/")}")
+                            append(params)
+                            if (k.isNotBlank()) { append(if (params.isEmpty()) "?" else "&"); append("k=").append(k) }
+                            if (kx.isNotBlank()) { append("&kx=").append(kx) }
+                        }
+
+                        if (addM3u8(full, referer, "Multi Player")) {
+                            try {
+                                val subs = obj.getJSONObject("subtitle")
+                                val sit = subs.keys()
+                                while (sit.hasNext()) {
+                                    val lang = sit.next()
+                                    val path = subs.optString(lang)
+                                    if (path.isNotBlank()) {
+                                        subtitleCallback(SubtitleFile(lang, "$RPM${path.substringBefore("#")}"))
+                                    }
+                                }
+                            } catch (e: Exception) {}
+                            return true
+                        }
+                        false
+                    } catch (e: Exception) { false }
+                }
+
                 // The JS uses fetch('/api/...?id=' + hash) to get the video config as JSON
                 val endpoints = listOf(
                     "$RPM/api/v1/video?id=$id",
@@ -268,7 +341,14 @@ class ChikiAnimationProvider : MainAPI() {
                 for (ep in endpoints) {
                     val res = try { app.get(ep, headers = hdr).text } catch (e: Exception) { continue }
                     if (res.isBlank()) continue
-                    
+
+                    // RPM API response is AES-CBC encrypted hex — decrypt it first
+                    val bytes = hexToBytes(res.trim())
+                    if (bytes != null) {
+                        val decrypted = aesDecrypt(bytes, rpmKey, rpmIv)
+                        if (decrypted != null && addRpmLinks(decrypted)) return true
+                    }
+
                     // Direct M3U8 response
                     if (res.trim().startsWith("#EXTM3U")) { 
                         if (addM3u8(ep, referer, "Multi Player")) return true 
