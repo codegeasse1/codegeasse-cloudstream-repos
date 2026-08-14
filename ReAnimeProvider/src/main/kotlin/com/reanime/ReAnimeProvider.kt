@@ -1,6 +1,7 @@
 package com.reanime
 
 import android.util.Base64
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
@@ -21,6 +22,8 @@ class ReAnimeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
     companion object {
+        private const val TAG = "ReAnime"
+
         private const val UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -312,12 +315,19 @@ class ReAnimeProvider : MainAPI() {
     // and AES fragments whose field names are derived from the seed via repeated
     // SHA-256. A token API call plus the per-page wasm key-derivation (interpreted
     // above) plus PBKDF2/AES reveal the final m3u8 URL.
-    private suspend fun decryptFlixV2(page: String, referer: String): String {
+    private suspend fun decryptFlixV2(
+        page: String,
+        referer: String,
+        cookieCollector: MutableMap<String, String>
+    ): String {
         fun field(name: String): String =
             Regex("""["']?$name["']?\s*:\s*["']([^"']+)""").find(page)?.groupValues?.get(1) ?: ""
 
         val seed = field("obfuscation_seed")
-        if (seed.isBlank()) return ""
+        if (seed.isBlank()) {
+            Log.e(TAG, "flixcloud v2: no seed in embed page (len=${page.length}) snippet=${page.take(160).replace("\n", " ")}")
+            return ""
+        }
 
         val eHex = sha3Hex(seed)
         val nHex = sha3Hex(eHex)
@@ -326,22 +336,38 @@ class ReAnimeProvider : MainAPI() {
         val keyFrag2 = field("${nHex.substring(0, 16)}_${nHex.substring(16, 24)}")
         val tokenRef = field("${eHex.substring(48, 64)}_${eHex.substring(56, 64)}")
         val wasmB64 = field("w_payload")
-        if (frag1.isBlank() || ivB64.isBlank() || keyFrag2.isBlank() || tokenRef.isBlank() || wasmB64.isBlank()) return ""
+        if (frag1.isBlank() || ivB64.isBlank() || keyFrag2.isBlank() || tokenRef.isBlank() || wasmB64.isBlank()) {
+            Log.e(TAG, "flixcloud v2: missing fields seed=$seed kf=$frag1 iv=$ivB64 k2=$keyFrag2 tok=$tokenRef wasm=${wasmB64.isNotBlank()}")
+            return ""
+        }
 
-        val apiJson = JSONObject(
-            app.get("$FLIX/api/m3u8/$tokenRef", headers = mapOf(
-                "User-Agent" to UA,
-                "Referer" to referer,
-                "Origin" to FLIX,
-                "Accept" to "application/json, text/plain, */*",
-                "X-Requested-With" to "XMLHttpRequest"
-            )).text
-        )
+        val tokenRes = app.get("$FLIX/api/m3u8/$tokenRef", headers = mapOf(
+            "User-Agent" to UA,
+            "Referer" to referer,
+            "Origin" to FLIX,
+            "Accept" to "application/json, text/plain, */*",
+            "X-Requested-With" to "XMLHttpRequest"
+        ))
+        val tokenText = tokenRes.text
+        cookieCollector.putAll(tokenRes.cookies)
+        if (tokenRes.code != 200) {
+            Log.e(TAG, "flixcloud v2: token api http ${tokenRes.code} body=${tokenText.take(120)}")
+            return ""
+        }
+        val apiJson = try {
+            JSONObject(tokenText)
+        } catch (e: Exception) {
+            Log.e(TAG, "flixcloud v2: token api not json", e)
+            return ""
+        }
         val vidKey = sha256Hex(tokenRef + "vid").substring(0, 10)
         val keyKey = sha256Hex(tokenRef + "key").substring(0, 10)
         val blobB64 = apiJson.optString(vidKey, "")
         val frag3B64 = apiJson.optString(keyKey, "")
-        if (blobB64.isBlank() || frag3B64.isBlank()) return ""
+        if (blobB64.isBlank() || frag3B64.isBlank()) {
+            Log.e(TAG, "flixcloud v2: token api missing keys have=${apiJson.keys().asSequence().take(8).toList()} want=$vidKey/$keyKey")
+            return ""
+        }
 
         val q = seed.substring(0, 8).toLong(16).toInt()
 
@@ -541,15 +567,28 @@ class ReAnimeProvider : MainAPI() {
 
         val seenLinks = hashSetOf<String>()
 
-        suspend fun push(url: String, label: String, isM3u8: Boolean, referer: String): Boolean {
+        suspend fun push(
+            url: String,
+            label: String,
+            isM3u8: Boolean,
+            referer: String,
+            cookieHeader: String = ""
+        ): Boolean {
             val u = url.unesc().trim().trimEnd(',', ';', ')')
             if (u.isBlank() || u.startsWith("blob:") || !seenLinks.add(u)) return false
+            val headers = mutableMapOf<String, String>(
+                "User-Agent" to UA,
+                "Referer" to referer,
+                "Origin" to FLIX,
+                "Accept" to "*/*"
+            )
+            if (cookieHeader.isNotBlank()) headers["Cookie"] = cookieHeader
             callback(
                 newExtractorLink(source = name, name = label, url = u,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                     this.referer = referer
                     this.quality = Qualities.Unknown.value
-                    this.headers = mapOf("User-Agent" to UA, "Referer" to referer, "Origin" to FLIX, "Accept" to "*/*")
+                    this.headers = headers
                 }
             )
             return true
@@ -614,10 +653,7 @@ class ReAnimeProvider : MainAPI() {
         // ---------------------------------------------------------------
         // 3) Resolve each FlixCloud embed
         // ---------------------------------------------------------------
-        // ---------------------------------------------------------------
-        // 3) Resolve each FlixCloud embed — our v2 path first (the old v1
-        //    scheme is dead), with the m3u8 verified before pushing.
-        // ---------------------------------------------------------------
+        val cookieCollector = mutableMapOf<String, String>()
         for ((serverName, rawLink) in servers) {
             // keep the exact embed URL — flixcloud rejects extra query params (500)
             val link = rawLink.trim()
@@ -629,7 +665,7 @@ class ReAnimeProvider : MainAPI() {
             //    PBKDF2/AES to reveal the m3u8 URL.
             if (EMBED_ID_REGEX.find(link) != null) {
                 try {
-                    val page = app.get(
+                    val pageRes = app.get(
                         link,
                         headers = mapOf(
                             "User-Agent" to UA,
@@ -638,11 +674,14 @@ class ReAnimeProvider : MainAPI() {
                             "Cache-Control" to "no-cache, no-store",
                             "Pragma" to "no-cache"
                         )
-                    ).text.unesc()
+                    )
+                    cookieCollector.putAll(pageRes.cookies)
+                    val page = pageRes.text.unesc()
 
-                    val m3u8 = decryptFlixV2(page, link)
+                    val m3u8 = decryptFlixV2(page, link, cookieCollector)
                     if (m3u8.startsWith("http")) {
-                        if (push(m3u8, serverName, true, "$FLIX/")) ok = true
+                        val cookieHeader = cookieCollector.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                        if (push(m3u8, serverName, true, "$FLIX/", cookieHeader)) ok = true
                     }
 
                     for (m in SUB_REGEX.findAll(page)) {
