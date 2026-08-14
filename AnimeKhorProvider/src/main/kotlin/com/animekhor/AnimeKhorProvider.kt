@@ -7,9 +7,16 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.newSubtitleFile
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class AnimeKhorProvider : MainAPI() {
     override var mainUrl = "https://animekhor.org"
@@ -22,6 +29,10 @@ class AnimeKhorProvider : MainAPI() {
     companion object {
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+        // AES-CBC key/IV used by the upns.live / p2pstream.vip player to encrypt its video API response
+        private val UPN_KEY = "kiemtienmua911ca".toByteArray(Charsets.UTF_8)
+        private val UPN_IV = "1234567890oiuytr".toByteArray(Charsets.UTF_8)
     }
 
     override val mainPage = mainPageOf(
@@ -158,136 +169,378 @@ class AnimeKhorProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val document = try { app.get(data).document } catch (e: Exception) { return false }
         var found = false
-        val embedLinks = mutableSetOf<String>()
+        val seen = mutableSetOf<String>()
 
-        // 1. Fully Decode All Dropdown Mirrors
-        val mirrorOptions = document.select("select.mirror option[value]")
-        for (element in mirrorOptions) {
-            val value = element.attr("value").trim()
-            if (value.isNotBlank()) {
-                if (value.startsWith("http") || value.startsWith("//")) {
-                    embedLinks.add(if (value.startsWith("//")) "https:$value" else value)
-                } else {
-                    try {
-                        val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8).trim()
-                        val iframeSrc = Jsoup.parse(decoded).select("iframe").attr("src")
-                        if (iframeSrc.isNotBlank()) {
-                            embedLinks.add(iframeSrc)
-                        } else {
-                            val directUrl = Regex("""https?://[^\s"'<>]+""").find(decoded)?.value
-                            if (directUrl != null) embedLinks.add(directUrl)
-                        }
-                    } catch (e: Exception) {}
-                }
-            }
+        // mirrors from the "Select Video Server" dropdown (base64-encoded iframes, label = server name)
+        val mirrors = mutableListOf<Pair<String, String>>()
+        for (option in document.select("select.mirror option[value]")) {
+            val label = option.text().trim().ifBlank { "Server" }
+            val value = option.attr("value").trim()
+            if (value.isBlank()) continue
+            val url = decodeMirrorValue(value)
+            if (url != null && url.isNotBlank()) mirrors.add(label to url)
         }
 
-        // 2. Extract Visible Iframes
-        val iframes = document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe")
-        for (iframe in iframes) {
+        // the default/visible player iframe
+        for (iframe in document.select(".player-embed iframe, #embed_holder iframe, #pembed iframe, iframe")) {
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") }
             if (src.isNotBlank()) {
-                embedLinks.add(if (src.startsWith("//")) "https:$src" else src)
+                val clean = (if (src.startsWith("//")) "https:$src" else src).trim().replace("\\/", "/")
+                if (seen.add(clean)) {
+                    if (resolveEmbed(clean, "Server", data, subtitleCallback, callback)) found = true
+                }
             }
         }
 
-        // 3. Process every unique link found
-        for (url in embedLinks) {
-            val cleanUrl = url.trim().replace("\\/", "/")
-
-            try {
-                // A. Try Cloudstream Native Extractors First (OK.ru, VidHide, StreamWish, Turbovid)
-                // We pass EXACTLY what the extractor returns to avoid breaking OK.ru with forced headers
-                val tempLinks = mutableListOf<ExtractorLink>()
-                if (loadExtractor(cleanUrl, data, subtitleCallback) { tempLinks.add(it) }) {
-                    for (link in tempLinks) {
-                        callback(link)
-                    }
-                    found = true
-                    continue
-                }
-
-                // B. Custom Handlers for Unsupported/Embedded Servers
-                
-                // AbyssPlayer Handler (Strip Referer to fix infinite buffering)
-                if (cleanUrl.contains("abyssplayer.com", true) || cleanUrl.contains("abyss", true)) {
-                    val html = app.get(cleanUrl).text
-                    val mp4 = Regex("""<source[^>]+src=["']([^"']+\.mp4[^\s"'<>]*)["']""").find(html)?.groupValues?.get(1)
-                        ?: Regex("""(?:file|src):\s*["']([^"']+\.mp4[^\s"'<>]*)["']""").find(html)?.groupValues?.get(1)
-                    if (mp4 != null) {
-                        callback(
-                            ExtractorLink(
-                                source = "AbyssPlayer",
-                                name = "AbyssPlayer",
-                                url = mp4,
-                                referer = "", // Left blank intentionally to prevent Google/Cloudflare 403 blocks
-                                quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.VIDEO,
-                                headers = emptyMap(),
-                                extractorData = ""
-                            )
-                        )
-                        found = true
-                    }
-                } 
-                // Dailymotion Handler
-                else if (cleanUrl.contains("dailymotion.com", true) || cleanUrl.contains("geo.dailymotion", true)) {
-                    val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(cleanUrl)?.groupValues?.get(1)
-                    if (vidId != null) {
-                        if (loadExtractor("https://www.dailymotion.com/video/$vidId", data, subtitleCallback, callback)) {
-                            found = true
-                        }
-                    }
-                } 
-                // Rumble Handler
-                else if (cleanUrl.contains("rumble", true)) {
-                    val html = app.get(cleanUrl).text
-                    val m3u8 = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
-                    if (m3u8 != null) {
-                        val links = M3u8Helper.generateM3u8("Rumble", m3u8, cleanUrl)
-                        for (link in links) {
-                            callback(link)
-                            found = true
-                        }
-                    }
-                } 
-                // D.Tube Handler
-                else if (cleanUrl.contains("d.tube", true)) {
-                    val vidId = Regex("""v=([a-zA-Z0-9-]+)""").find(cleanUrl)?.groupValues?.get(1) ?: cleanUrl.substringAfter("/videos/").substringBefore("/")
-                    if (vidId.isNotBlank()) {
-                        val m3u8 = "https://nas2.d.tube/videos/$vidId/master.m3u8"
-                        val links = M3u8Helper.generateM3u8("DPlayer", m3u8, cleanUrl)
-                        for (link in links) {
-                            callback(link)
-                            found = true
-                        }
-                    }
-                } 
-                // UPNS / CloudPlayer & P2PStream / FilePlayer Handlers
-                else if (cleanUrl.contains("upns.live", true) || cleanUrl.contains("p2pstream.vip", true)) {
-                    val host = URI(cleanUrl).host
-                    val id = cleanUrl.substringAfterLast("/").substringBefore("?")
-                    val apiCall = "https://$host/api/v1/video?id=$id&w=1280&h=800&r=animekhor.org"
-                    try {
-                        val apiRes = app.get(apiCall, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to USER_AGENT)).text
-                        val m3u8 = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(apiRes)?.value
-                        if (m3u8 != null) {
-                            val links = M3u8Helper.generateM3u8("CloudPlayer", m3u8, "https://$host/")
-                            for (link in links) {
-                                callback(link)
-                                found = true
-                            }
-                        }
-                    } catch (e: Exception) {}
-                }
-
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+        for ((label, url) in mirrors) {
+            val clean = url.trim().replace("\\/", "/")
+            if (!seen.add(clean)) continue
+            if (resolveEmbed(clean, label, data, subtitleCallback, callback)) found = true
         }
 
         return found
+    }
+
+    private fun decodeMirrorValue(value: String): String? {
+        if (value.startsWith("http") || value.startsWith("//")) {
+            return if (value.startsWith("//")) "https:$value" else value
+        }
+        return try {
+            val decoded = String(Base64.decode(value, Base64.DEFAULT), Charsets.UTF_8).trim()
+            val iframeSrc = Jsoup.parse(decoded).select("iframe").attr("src")
+            if (iframeSrc.isNotBlank()) iframeSrc else Regex("""https?://[^\s"'<>]+""").find(decoded)?.value
+        } catch (e: Exception) { null }
+    }
+
+    private suspend fun resolveEmbed(
+        url: String,
+        label: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = url.replace("\\/", "/")
+        val host = try { URI(clean).host } catch (e: Exception) { null }
+        if (host.isNullOrBlank()) return false
+
+        // direct media link
+        if (Regex("""\.(m3u8|mp4|webm)($|\?)""", RegexOption.IGNORE_CASE).containsMatchIn(clean)) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = label,
+                    url = clean,
+                    type = if (clean.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = referer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)
+                }
+            )
+            return true
+        }
+
+        if (host.contains("dailymotion.com") || host.contains("dai.ly")) {
+            val vidId = Regex("""(?:video/|video=|embed/|/video/)([a-zA-Z0-9_]+)""").find(clean)?.groupValues?.get(1)
+            if (vidId != null && loadExtractor("https://www.dailymotion.com/video/$vidId", referer, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("ok.ru") || host.contains("odnoklassniki")) {
+            if (loadExtractor(clean, referer, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("rumble.com")) {
+            if (resolveRumble(clean, label, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("d.tube")) {
+            if (resolveDtube(clean, label, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("turbovid") || host.contains("emturbovid") || host.contains("turboviplay")) {
+            if (resolveTurbovid(clean, label, referer, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("upns.live") || host.contains("p2pstream.vip")) {
+            if (resolveUpns(clean, label, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("bysekoze") || host.contains("byse")) {
+            if (resolveByse(clean, label, subtitleCallback, callback)) return true
+        }
+
+        if (host.contains("abyssplayer") || host.contains("abyss")) {
+            if (resolveAbyss(clean, label, referer, subtitleCallback, callback)) return true
+        }
+
+        // generic: native cloudstream extractors (turbovid, vidhide, streamwish, ...)
+        try {
+            if (loadExtractor(clean, referer, subtitleCallback, callback)) return true
+        } catch (e: Exception) { }
+
+        // generic: scrape the embed page for a direct stream
+        try {
+            val html = app.get(clean, headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)).text.replace("\\/", "/")
+            val stream = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""").find(html)?.value
+            if (stream != null) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = label,
+                        url = stream,
+                        type = if (stream.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = clean
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)
+                    }
+                )
+                return true
+            }
+        } catch (e: Exception) { }
+
+        return false
+    }
+
+    private suspend fun resolveRumble(
+        embedUrl: String,
+        label: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val html = try { app.get(clean).text } catch (e: Exception) { return false }
+        val m3u8 = Regex(""""hls"\s*:\s*\{[^}]*"url"\s*:\s*"([^"]+\.m3u8[^"]*)""").find(html)?.groupValues?.get(1)
+            ?: Regex("""https?://rumble\.com/hls-vod/[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
+            ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
+        if (m3u8 == null) return false
+        val links = M3u8Helper.generateM3u8(label, m3u8, clean)
+        if (links.isEmpty()) return false
+        links.forEach { callback(it) }
+        return true
+    }
+
+    private suspend fun resolveDtube(
+        embedUrl: String,
+        label: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val vidId = Regex("""[?&]v=([a-zA-Z0-9-]+)""").find(clean)?.groupValues?.get(1)
+            ?: clean.substringAfter("/videos/").substringBefore("/").substringBefore("?").ifBlank { return false }
+        val m3u8 = "https://nas2.d.tube/videos/$vidId/master.m3u8"
+        val links = M3u8Helper.generateM3u8(label, m3u8, clean)
+        if (links.isEmpty()) return false
+        links.forEach { callback(it) }
+        return true
+    }
+
+    private suspend fun resolveTurbovid(
+        embedUrl: String,
+        label: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val html = try { app.get(clean).text } catch (e: Exception) { return false }
+        val m3u8 = Regex("""var urlPlay\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
+            ?: Regex("""data-hash=["']([^"']+\.m3u8[^"']*)["']""").find(html)?.groupValues?.get(1)
+            ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
+        if (m3u8 == null) return false
+        try {
+            val subJson = Regex("""var urlSub\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
+            if (subJson != null) {
+                val subText = app.get(subJson).text
+                for (m in Regex("\"file\"\\s*:\\s*\"([^\"]+\\.(?:vtt|srt)[^\"]*)\"").findAll(subText)) {
+                    subtitleCallback(
+                        newSubtitleFile("English", m.groupValues[1]) {
+                            this.headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)
+                        }
+                    )
+                }
+            }
+        } catch (e: Exception) { }
+        callback(
+            newExtractorLink(
+                source = name,
+                name = label,
+                url = m3u8,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = clean
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)
+            }
+        )
+        return true
+    }
+
+    private suspend fun resolveAbyss(
+        embedUrl: String,
+        label: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val html = try {
+            app.get(clean, headers = mapOf("Referer" to referer, "User-Agent" to USER_AGENT)).text
+        } catch (e: Exception) { return false }
+        val url = Regex("""<source[^>]+src=["']([^"']+\.mp4[^"'\s<>]*)["']""").find(html)?.groupValues?.get(1)
+            ?: Regex("""(?:file|src|url)\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"'\s<>]*)["']""").find(html)?.groupValues?.get(1)
+            ?: Regex("""https?://[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*""").find(html)?.value
+        if (url == null) return false
+        callback(
+            newExtractorLink(
+                source = name,
+                name = label,
+                url = url,
+                type = if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = ""
+                this.quality = Qualities.Unknown.value
+                this.headers = emptyMap()
+            }
+        )
+        return true
+    }
+
+    // CloudPlayer (upns.live) / FilePlayer (p2pstream.vip): fetch the encrypted video payload,
+    // AES-CBC decrypt it, then play the returned m3u8.
+    private suspend fun resolveUpns(
+        embedUrl: String,
+        label: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val host = try { URI(clean).host } catch (e: Exception) { null } ?: return false
+        val id = clean.substringAfterLast("#").substringBefore("&").ifBlank { return false }
+        val refererHost = try { URI(mainUrl).host } catch (e: Exception) { null } ?: "animekhor.org"
+        val api = "https://$host/api/v1/video?id=$id&w=1280&h=800&r=$refererHost"
+        val resText = try {
+            app.get(api, headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)).text
+        } catch (e: Exception) { return false }
+        val jsonText = aesCbcDecrypt(resText.trim()) ?: return false
+        val json = try { JSONObject(jsonText) } catch (e: Exception) { return false }
+        val streamUrl = json.optString("cfNative").ifBlank { json.optString("cf") }
+        if (streamUrl.isBlank() || !streamUrl.startsWith("http")) return false
+
+        val subs = json.optJSONObject("subtitle")
+        if (subs != null) {
+            val it = subs.keys()
+            while (it.hasNext()) {
+                val subName = it.next()
+                val rel = subs.optString(subName)
+                if (rel.isBlank()) continue
+                val subUrl = if (rel.startsWith("http")) rel.substringBefore("#") else "https://$host" + rel.substringBefore("#")
+                subtitleCallback(
+                    newSubtitleFile(subName, subUrl) {
+                        this.headers = mapOf("Referer" to "https://$host/", "User-Agent" to USER_AGENT)
+                    }
+                )
+            }
+        }
+
+        callback(
+            newExtractorLink(
+                source = name,
+                name = label,
+                url = streamUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = "https://$host/"
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf("Referer" to "https://$host/", "User-Agent" to USER_AGENT)
+            }
+        )
+        return true
+    }
+
+    // VGPlayer (bysekoze.com): Byse-family player - details -> playback -> AES-GCM decrypt -> m3u8
+    private suspend fun resolveByse(
+        embedUrl: String,
+        label: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val clean = embedUrl.replace("\\/", "/")
+        val base = try { "https://" + (URI(clean).host ?: return false) } catch (e: Exception) { return false }
+        val code = clean.trimEnd('/').substringAfterLast('/')
+        if (code.isBlank() || code.contains(".")) return false
+        val details = try {
+            JSONObject(app.get("$base/api/videos/$code/embed/details", headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)).text)
+        } catch (e: Exception) { return false }
+        val embedFrameUrl = details.optString("embed_frame_url")
+        if (embedFrameUrl.isBlank()) return false
+        val embedBase = try { "https://" + (URI(embedFrameUrl).host ?: return false) } catch (e: Exception) { return false }
+        val code2 = embedFrameUrl.trimEnd('/').substringAfterLast('/')
+        val playbackText = try {
+            app.get(
+                "$embedBase/api/videos/$code2/embed/playback",
+                headers = mapOf(
+                    "accept" to "*/*",
+                    "accept-language" to "en-US,en;q=0.5",
+                    "priority" to "u=1, i",
+                    "referer" to embedFrameUrl,
+                    "x-embed-parent" to clean,
+                    "User-Agent" to USER_AGENT
+                )
+            ).text
+        } catch (e: Exception) { return false }
+        val p = try { JSONObject(playbackText).optJSONObject("playback") } catch (e: Exception) { null } ?: return false
+        val keyParts = p.optJSONArray("key_parts") ?: return false
+        if (keyParts.length() < 2) return false
+        val decrypted = aesGcmDecrypt(p.optString("payload"), p.optString("iv"), keyParts) ?: return false
+        val sources = try { JSONObject(decrypted).optJSONArray("sources") } catch (e: Exception) { null } ?: return false
+        val streamUrl = (0 until sources.length()).mapNotNull { sources.optJSONObject(it) }
+            .map { it.optString("url") }
+            .firstOrNull { it.startsWith("http") } ?: return false
+        callback(
+            newExtractorLink(
+                source = name,
+                name = label,
+                url = streamUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = embedBase
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf("Referer" to embedBase, "User-Agent" to USER_AGENT)
+            }
+        )
+        return true
+    }
+
+    private fun aesCbcDecrypt(hex: String): String? {
+        return try {
+            val cleaned = hex.replace(Regex("[^0-9a-fA-F]"), "")
+            if (cleaned.isEmpty()) return null
+            val bytes = cleaned.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            if (bytes.isEmpty()) return null
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(UPN_KEY, "AES"), IvParameterSpec(UPN_IV))
+            String(cipher.doFinal(bytes), Charsets.UTF_8)
+        } catch (e: Exception) { null }
+    }
+
+    private fun aesGcmDecrypt(payload: String, iv: String, keyParts: org.json.JSONArray): String? {
+        return try {
+            val keyBytes = b64UrlDecode(keyParts.getString(0)) + b64UrlDecode(keyParts.getString(1))
+            val ivBytes = b64UrlDecode(iv)
+            val cipherBytes = b64UrlDecode(payload)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), GCMParameterSpec(128, ivBytes))
+            String(cipher.doFinal(cipherBytes), Charsets.UTF_8).removePrefix("\uFEFF")
+        } catch (e: Exception) { null }
+    }
+
+    private fun b64UrlDecode(s: String): ByteArray {
+        val fixed = s.replace('-', '+').replace('_', '/')
+        val pad = (4 - fixed.length % 4) % 4
+        return Base64.decode(fixed + "=".repeat(pad), Base64.DEFAULT)
     }
 }
