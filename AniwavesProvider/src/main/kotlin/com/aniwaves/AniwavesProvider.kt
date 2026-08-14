@@ -226,7 +226,12 @@ class AniwavesProvider : MainAPI() {
         }
 
         suspend fun parseSubtitles(json: JSONObject) {
-            val tracks = json.optJSONArray("tracks") ?: json.optJSONArray("subtitles") ?: return
+            val raw = json.opt("tracks") ?: json.opt("subtitles") ?: return
+            val tracks: JSONArray = when (raw) {
+                is JSONArray -> raw
+                is String -> try { JSONArray(raw.trim()) } catch (e: Exception) { return }
+                else -> return
+            }
             for (i in 0 until tracks.length()) {
                 val t = tracks.optJSONObject(i) ?: continue
                 val file = t.optString("file", "").replace("\\/", "/")
@@ -244,7 +249,20 @@ class AniwavesProvider : MainAPI() {
             if (!res.trim().startsWith("{")) return false
             val j = JSONObject(res)
             val streamUrl = when (val src = j.opt("sources")) {
-                is String -> src
+                is String -> {
+                    val t = src.trim()
+                    if (t.startsWith("[")) {
+                        // double-encoded JSON array string (megacloud-family hosts)
+                        var r = ""
+                        val a = JSONArray(t)
+                        for (i in 0 until a.length()) {
+                            val f = a.optJSONObject(i)?.optString("file") ?: ""
+                            if (f.isNotBlank()) { r = f; break }
+                        }
+                        r
+                    } else t
+                }
+                is JSONObject -> src.optString("file").ifBlank { src.optString("url") }
                 is JSONArray -> {
                     var r = ""
                     for (i in 0 until src.length()) {
@@ -257,7 +275,17 @@ class AniwavesProvider : MainAPI() {
             }.replace("\\/", "/")
 
             if (streamUrl.startsWith("http")) {
-                if (tryLink(streamUrl, embedUrl, tag, mapOf("Referer" to embedUrl), streamUrl.contains("m3u8", true))) return true
+                // EchoVideo/megacloud-family playlists come back with no file
+                // extension and a non-HLS content type. CloudStream picks the
+                // player mime from the URL extension (VIDEO -> progressive), and
+                // other players sniff by extension too, so append a ".m3u8" hint
+                // the same way the aniwaves site does on its master playlist.
+                var u = streamUrl
+                if (!u.contains(".m3u8", true) && !Regex("""\.[A-Za-z0-9]{2,5}(?:$|[?#])""").containsMatchIn(u)) {
+                    u += if (u.contains("?")) "&t.m3u8" else "?t.m3u8"
+                }
+                val origin = originOf(embedUrl)
+                if (tryLink(u, embedUrl, tag, mapOf("Referer" to "$origin/", "Origin" to origin), u.contains("m3u8", true))) return true
             }
             parseSubtitles(j)
             return false
