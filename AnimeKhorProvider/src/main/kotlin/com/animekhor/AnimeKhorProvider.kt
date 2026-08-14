@@ -356,7 +356,7 @@ class AnimeKhorProvider : MainAPI() {
     }
 
     // parse whatever format ok.ru served and emit the stream (returns true if emitted)
-    private fun emitOkruStream(
+    private suspend fun emitOkruStream(
         html: String,
         label: String,
         referer: String,
