@@ -377,6 +377,9 @@ class AnimeKhorProvider : MainAPI() {
         return true
     }
 
+    // Turbovid (turbovidhls.com / emturbovid / turboviplay): the embed page is behind a
+    // Cloudflare challenge, so don't scrape it - the master playlist is directly constructible
+    // on the CDN from the video code embedded in the URL.
     private suspend fun resolveTurbovid(
         embedUrl: String,
         label: String,
@@ -385,22 +388,28 @@ class AnimeKhorProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val clean = embedUrl.replace("\\/", "/")
-        val html = try { app.get(clean).text } catch (e: Exception) { return false }
-        val m3u8 = Regex("""var urlPlay\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
-            ?: Regex("""data-hash=["']([^"']+\.m3u8[^"']*)["']""").find(html)?.groupValues?.get(1)
-            ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(html)?.value
+        val code = clean.substringBefore("?").substringBefore("#").trimEnd('/').substringAfterLast('/')
+        if (code.isBlank() || code.contains(".")) return false
+        val m3u8 = (1..3).mapNotNull { i ->
+            val url = "https://cdn$i.turboviplay.com/data3/$code/$code.m3u8"
+            try {
+                val text = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).text
+                if (text.startsWith("#EXTM3U") || text.contains("#EXT-X-STREAM-INF")) url else null
+            } catch (e: Exception) { null }
+        }.firstOrNull()
         if (m3u8 == null) return false
         try {
-            val subJson = Regex("""var urlSub\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
-            if (subJson != null) {
-                val subText = app.get(subJson).text
-                for (m in Regex("\"file\"\\s*:\\s*\"([^\"]+\\.(?:vtt|srt)[^\"]*)\"").findAll(subText)) {
-                    subtitleCallback(
-                        newSubtitleFile("English", m.groupValues[1]) {
-                            this.headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)
-                        }
-                    )
-                }
+            val subText = app.get(
+                "https://sub.turboviplay.to/sub/$code/$code.json",
+                headers = mapOf("User-Agent" to USER_AGENT)
+            ).text
+            for (m in Regex("\"file\"\\s*:\\s*\"([^\"]+\\.(?:vtt|srt)[^\"]*)\"").findAll(subText)) {
+                val subUrl = m.groupValues[1]
+                subtitleCallback(
+                    newSubtitleFile(subUrl.substringAfterLast('/').substringBeforeLast('.').ifBlank { "English" }, subUrl) {
+                        this.headers = mapOf("User-Agent" to USER_AGENT)
+                    }
+                )
             }
         } catch (e: Exception) { }
         callback(
@@ -410,9 +419,9 @@ class AnimeKhorProvider : MainAPI() {
                 url = m3u8,
                 type = ExtractorLinkType.M3U8
             ) {
-                this.referer = clean
+                this.referer = "https://turbovidhls.com/"
                 this.quality = Qualities.Unknown.value
-                this.headers = mapOf("Referer" to clean, "User-Agent" to USER_AGENT)
+                this.headers = mapOf("User-Agent" to USER_AGENT)
             }
         )
         return true
@@ -433,6 +442,14 @@ class AnimeKhorProvider : MainAPI() {
             ?: Regex("""(?:file|src|url)\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"'\s<>]*)["']""").find(html)?.groupValues?.get(1)
             ?: Regex("""https?://[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*""").find(html)?.value
         if (url == null) return false
+        // only emit when the stream actually responds, so dead servers don't show in the picker
+        val playable = try {
+            app.get(
+                url,
+                headers = mapOf("Range" to "bytes=0-0", "Referer" to referer, "User-Agent" to USER_AGENT)
+            ).isSuccessful
+        } catch (e: Exception) { false }
+        if (!playable) return false
         callback(
             newExtractorLink(
                 source = name,
