@@ -347,9 +347,9 @@ class AnikotoProvider : MainAPI() {
         var found = false
         val cleanData = data.substringBefore("#")
         val ep = Regex("""[?&]ep=(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: return false
-        val malId = Regex("""[?&]mal=(\d+)""").find(cleanData)?.groupValues?.get(1)
-        val embedId = Regex("""[?&]embed=([^&]+)""").find(cleanData)?.groupValues?.get(1)
-        val siteIds = Regex("""[?&]ids=([^&]+)""").find(cleanData)?.groupValues?.get(1)
+        val malId = Regex("""[?&]mal=(\d+)""").find(cleanData)?.groupValues?.get(1) ?: ""
+        val embedId = Regex("""[?&]embed=([^&]+)""").find(cleanData)?.groupValues?.get(1) ?: ""
+        val siteIds = Regex("""[?&]ids=([^&]+)""").find(cleanData)?.groupValues?.get(1) ?: ""
         val requestedLang = Regex("""[?&]lang=(sub|dub)""").find(cleanData)?.groupValues?.get(1) ?: "sub"
 
         val watchUrl = cleanData.substringBefore("?")
@@ -357,7 +357,7 @@ class AnikotoProvider : MainAPI() {
 
         // ---- server 1: yenime/flikhub megaplay resolver (same library as anikoto, playable m3u8) ----
         for (lang in langs) {
-            if (malId == null) break
+            if (malId.isBlank()) break
             try {
                 val res = app.get(
                     "$flikHubApi/megaplay?mal=$malId&ep=$ep&type=$lang",
