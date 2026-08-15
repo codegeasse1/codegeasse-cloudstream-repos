@@ -32,7 +32,8 @@ class CinephileProvider : MainAPI() {
         if (page > 1) return newHomePageResponse(emptyList<HomePageList>())
         val params = if (request.data.contains("anime", true)) "action=tabcontent&tabId=8" else "action=home"
         val json = fetchCine(params) ?: return newHomePageResponse(emptyList<HomePageList>())
-        val sections = json.optJSONArray("sections") ?: return newHomePageResponse(emptyList<HomePageList>())
+        val data = json.optJSONObject("data") ?: return newHomePageResponse(emptyList<HomePageList>())
+        val sections = data.optJSONArray("sections") ?: return newHomePageResponse(emptyList<HomePageList>())
         val rows = mutableListOf<HomePageList>()
         for (i in 0 until sections.length()) {
             val sec = sections.optJSONObject(i) ?: continue
@@ -52,8 +53,10 @@ class CinephileProvider : MainAPI() {
         val title = optString("name").ifBlank { optString("title") }.trim().ifBlank { return null }
         val poster = optString("poster_url").ifBlank { optString("cover") }.ifBlank { null }
         val subjectType = optInt("subjectType", 0)
-        val genres = (optJSONArray("genres") ?: JSONArray()).let { arr ->
-            (0 until arr.length()).map { arr.optString(it) }
+        val genres = when (val g = opt("genres")) {
+            is JSONArray -> (0 until g.length()).map { g.optString(it) }
+            is String -> g.split(",").map { it.trim() }.filter { it.isNotBlank() }
+            else -> emptyList()
         }
         val type = when {
             subjectType == 1 -> TvType.Movie
@@ -87,16 +90,19 @@ class CinephileProvider : MainAPI() {
         val subjectId = url.trim()
         val json = fetchCine("action=detail&subjectId=$subjectId")
             ?: throw RuntimeException("Cinephile API error")
-        val title = json.optString("title").trim().ifBlank { "Unknown" }
-        val poster = json.optString("poster_url").ifBlank { null }
-        val plot = json.optString("description").ifBlank { null }
-        val genres = (json.optJSONArray("genres") ?: JSONArray()).let { arr ->
-            (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
-        }
-        val seasons = json.optJSONArray("seasons")
-        val isSeries = json.optInt("subjectType", 0) == 2 || (seasons != null && seasons.length() > 0)
+        val data = json.optJSONObject("data") ?: json
+        val title = data.optString("title").trim().ifBlank { "Unknown" }
+        val poster = data.optString("poster_url").ifBlank { null }
+        val plot = data.optString("description").ifBlank { null }
+        val genres = when (val g = data.opt("genres")) {
+            is JSONArray -> (0 until g.length()).map { g.optString(it) }
+            is String -> g.split(",").map { it.trim() }.filter { it.isNotBlank() }
+            else -> emptyList()
+        }.filter { it.isNotBlank() }
+        val seasons = data.optJSONArray("seasons")
+        val isSeries = data.optInt("subjectType", 0) == 2 || (seasons != null && seasons.length() > 0)
         val isAnime = genres.any { it.equals("anime", true) } || title.contains("anime", true)
-        val year = json.optString("release_date").take(4).toIntOrNull()
+        val year = data.optString("release_date").take(4).toIntOrNull()
 
         if (isSeries) {
             val episodes = mutableListOf<Episode>()
@@ -213,7 +219,8 @@ class CinephileProvider : MainAPI() {
         // 2) VidBinge-style playinfo streams (HLS / DASH / MP4) as a fallback.
         val piJson = fetchCine("action=playinfo&id=$subjectId&se=$se&ep=$ep")
         if (piJson != null) {
-            val streams = piJson.optJSONArray("streams")
+            val piData = piJson.optJSONObject("data") ?: piJson
+            val streams = piData.optJSONArray("streams")
             if (streams != null) {
                 for (i in 0 until streams.length()) {
                     val s = streams.optJSONObject(i) ?: continue
@@ -247,7 +254,7 @@ class CinephileProvider : MainAPI() {
                     } catch (e: Exception) { }
                 }
             }
-            val caps = piJson.optJSONArray("captions")
+            val caps = piData.optJSONArray("captions")
             if (caps != null) {
                 for (i in 0 until caps.length()) {
                     val c = caps.optJSONObject(i) ?: continue
