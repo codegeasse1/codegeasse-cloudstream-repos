@@ -98,9 +98,9 @@ class MoviesmodProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val pageUrl = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
-        val html = getPage(pageUrl)?.text ?: return HomePageResponse(emptyList(), hasNext = false)
+        val html = getPage(pageUrl)?.text ?: return newHomePageResponse(emptyList<HomePageList>(), hasNext = false)
         val items = extractItems(html)
-        return HomePageResponse(listOf(HomePageList("Latest Movies", items)), hasNext = items.isNotEmpty())
+        return newHomePageResponse(listOf(HomePageList("Latest Movies", items)), hasNext = items.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
