@@ -134,41 +134,25 @@ class JustAnimeProvider : MainAPI() {
             }
         }
 
-        val epPage = fetchApi("/anime/$id/episodes", mapOf("page" to "1"))
-        val episodes = epPage?.optJSONArray("episodes")?.let { arr ->
-            (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.toEpisode(id) }
-        } ?: emptyList()
-        val hasNext = epPage?.optBoolean("hasNextPage", false) ?: false
+        val episodes = mutableListOf<Episode>()
+        var page = 1
+        while (page <= 30) {
+            val epPage = fetchApi("/anime/$id/episodes", mapOf("page" to page.toString())) ?: break
+            val arr = epPage.optJSONArray("episodes") ?: break
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                arr.optJSONObject(i)?.toEpisode(id)?.let { episodes.add(it) }
+            }
+            if (!epPage.optBoolean("hasNextPage", false)) break
+            page++
+        }
         return newAnimeLoadResponse(title, id, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
             this.tags = genres
             this.year = year
-            this.hasNextPage = hasNext
-            this.nextPageUrl = if (hasNext) "$id|2" else null
             addEpisodes(DubStatus.Subbed, episodes)
         }
-    }
-
-    override suspend fun loadNextPage(nextPageUrl: String): EpisodeListResponse? {
-        val parts = nextPageUrl.split("|")
-        val id = parts.getOrNull(0)?.trim().orEmpty()
-        val page = parts.getOrNull(1)?.toIntOrNull() ?: return null
-        if (id.isBlank()) return null
-        val epPage = fetchApi("/anime/$id/episodes", mapOf("page" to page.toString())) ?: return null
-        val episodes = (0 until epPage.optJSONArray("episodes")?.length() ?: 0)
-            .mapNotNull { i -> epPage.optJSONArray("episodes")?.optJSONObject(i)?.toEpisode(id) }
-        val hasNext = epPage.optBoolean("hasNextPage", false)
-        val resp = newEpisodeListResponse(episodes)
-        resp.hasNextPage = hasNext
-        resp.nextPageUrl = if (hasNext) "$id|${page + 1}" else null
-        return resp
-    }
-
-    private fun fetchEpisodesPage(id: String, page: Int): List<Episode> {
-        val epPage = fetchApi("/anime/$id/episodes", mapOf("page" to page.toString())) ?: return emptyList()
-        val arr = epPage.optJSONArray("episodes") ?: return emptyList()
-        return (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.toEpisode(id) }
     }
 
     private fun JSONObject.toEpisode(id: String): Episode? {
