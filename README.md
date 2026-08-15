@@ -1,30 +1,36 @@
-# Codegeasse CloudStream Repository
+# 🎬 Codegeasse Extensions
 
-CloudStream 3 extensions repository — Movies, TV Series, Anime, Donghua and NSFW.
+A CloudStream 3 extension repository maintained by **Codegeasse** — Movies, TV Shows, Anime, Donghua and NSFW sources, all in one repo.
 
-### 🕹 Tools and Programming languages used :
+Fresh, working sources. No bloat.
+
+### 🧰 Built With
+
+Only what we actually use — Kotlin, plain GitHub Actions, zero fluff.
+
 <p align="left">
   <a href="https://skillicons.dev">
-    <img src="https://skillicons.dev/icons?i=kotlin,androidstudio,gradle,github,githubactions&theme=light&perline=5" />
+    <img src="https://skillicons.dev/icons?i=kotlin,github,githubactions&theme=light&perline=5" />
   </a>
 </p>
 
-### Requirements
+### 📋 Requirements
 
-Cloud Stream ( To install : [View Docs](https://recloudstream.github.io/csdocs/) )
+CloudStream 3 — install it here: [View Docs](https://recloudstream.github.io/csdocs/)
 
-### To Install Repo
+### 📥 Add This Repo
 
-1) Open CloudStream and go to **Settings** > **Extensions** > **Add Repository**
-
-2) Manual Install (Copy and Paste in add Repo of Cloud Stream) :
+1. Open CloudStream → **Settings** → **Extensions** → **Add Repository**
+2. Paste this link and hit add:
 
         https://raw.githubusercontent.com/codegeasse1/gcloudstream-repo-/builds/repo.json
 
+Done — your extensions will appear automatically and update on every build.
+
 ## 🧩 Available Plugins
 
-| Name | TV Types | Status |
-|------|----------|--------|
+| Name | Type | Status |
+|------|------|--------|
 | AniKageProvider | Anime | ✅ Working |
 | Anime4iProvider | Anime | ✅ Working |
 | AnimeKhorProvider | Anime | ✅ Working |
@@ -34,9 +40,9 @@ Cloud Stream ( To install : [View Docs](https://recloudstream.github.io/csdocs/)
 | AnikotoProvider | Anime | ✅ Working |
 | AniwavesProvider | Anime | ✅ Working |
 | C51CGProvider | NSFW | ✅ Working |
-| ChikiAni2dProvider | Anime | ⚠️ Partial (Dailymotion videos only) |
+| ChikiAni2dProvider | Anime | ⚠️ Partial — Dailymotion videos only |
 | ChikiAnimationProvider | Anime | ✅ Working |
-| CinephileProvider | Anime, AnimeMovie, Movie, TvSeries | ⚠️ Limited (most titles have no playable source) |
+| CinephileProvider | Anime, AnimeMovie, Movie, TvSeries | ⚠️ Limited — most titles have no playable source |
 | CoomerVideo | NSFW | ✅ Working |
 | DongStream | Anime | ✅ Working |
 | DonghuaStream | Anime | ✅ Working |
@@ -58,13 +64,10 @@ Cloud Stream ( To install : [View Docs](https://recloudstream.github.io/csdocs/)
 | Yomi | Anime, Movie, OVA | ✅ Working |
 | ZHAnime | Anime | ✅ Working |
 
-*32 plugins total.*
+**32 extensions and counting** — statuses are updated as sources break or get fixed.
 
-### DMCA
+### ⚖️ Disclaimer
 
-We hereby issue this notice to inform you that these extensions just function like an ordinary browser (like your browser) that fetch video files from internet,
-and do not violate the provisions of the Digital Millennium Copyright Act (DMCA).
-The Content these extensions may access is not hosted by us or the Cloudstream 3 application but the websites they are browsing in their autonomous mode. It is sole responsibility
-of the user and his/her countries' or states' law. If you think they are violating any intellectual property then please contact the actual file hosts not the owners of this repository or the CloudStream 3 app.
+These extensions behave like a normal browser: they visit the sites listed above and stream whatever video files those sites make publicly available. We don't host, store, or upload any content — every stream comes straight from the source website's own servers.
 
-Thank You.
+If you believe something here infringes your rights, contact the website actually hosting the content. Not us, and not the CloudStream team. Use at your own risk, and follow your country's laws.
