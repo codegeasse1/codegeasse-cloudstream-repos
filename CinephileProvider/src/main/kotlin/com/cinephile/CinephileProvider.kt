@@ -60,9 +60,10 @@ class CinephileProvider : MainAPI() {
             genres.any { it.equals("anime", true) } || title.contains("anime", true) -> TvType.Anime
             else -> TvType.TvShow
         }
+        val year = optString("year").take(4).toIntOrNull()
         return newMovieSearchResponse(title, subjectId, type, fix = false) {
             this.posterUrl = poster
-            this.year = optString("year").take(4).toIntOrNull()
+            this.year = year
         }
     }
 
@@ -106,7 +107,7 @@ class CinephileProvider : MainAPI() {
                     val maxEp = s.optInt("maxEp", 0)
                     for (ep in 1..maxEp) {
                         episodes.add(
-                            newEpisode("$subjectId|$sn|$ep") {
+                            newEpisode("$subjectId|$sn|$ep", fix = false) {
                                 this.name = "Episode $ep"
                                 this.episode = ep
                                 this.season = sn
@@ -295,9 +296,9 @@ class CinephileProvider : MainAPI() {
 
     private fun qualityFromSize(size: Long): Int {
         return when {
-            size > 4.5L * 1024 * 1024 * 1024 -> 1080
-            size > 1.8L * 1024 * 1024 * 1024 -> 720
-            size > 600L * 1024 * 1024 -> 480
+            size > 4_831_838_208L -> 1080
+            size > 1_932_735_283L -> 720
+            size > 629_145_600L -> 480
             else -> 720
         }
     }
