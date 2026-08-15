@@ -16,7 +16,7 @@ class CinephileProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "en"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvShow, TvType.Anime, TvType.AnimeMovie)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AnimeMovie)
 
     companion object {
         private const val API = "https://api.cinephile.live/api/cinephile"
@@ -58,7 +58,7 @@ class CinephileProvider : MainAPI() {
         val type = when {
             subjectType == 1 -> TvType.Movie
             genres.any { it.equals("anime", true) } || title.contains("anime", true) -> TvType.Anime
-            else -> TvType.TvShow
+            else -> TvType.TvSeries
         }
         val year = optString("year").take(4).toIntOrNull()
         return newMovieSearchResponse(title, subjectId, type, fix = false) {
@@ -107,7 +107,7 @@ class CinephileProvider : MainAPI() {
                     val maxEp = s.optInt("maxEp", 0)
                     for (ep in 1..maxEp) {
                         episodes.add(
-                            newEpisode("$subjectId|$sn|$ep", fix = false) {
+                            newEpisode("$mainUrl/#/ep?sid=$subjectId&s=$sn&e=$ep") {
                                 this.name = "Episode $ep"
                                 this.episode = ep
                                 this.season = sn
@@ -116,7 +116,7 @@ class CinephileProvider : MainAPI() {
                     }
                 }
             }
-            val type = if (isAnime) TvType.Anime else TvType.TvShow
+            val type = if (isAnime) TvType.Anime else TvType.TvSeries
             return newAnimeLoadResponse(title, subjectId, type) {
                 this.posterUrl = poster
                 this.plot = plot
@@ -140,10 +140,20 @@ class CinephileProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
-        val subjectId = parts.getOrNull(0)?.trim().orEmpty()
-        val se = parts.getOrNull(1)?.toIntOrNull() ?: 0
-        val ep = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        val sidMatch = Regex("sid=(\\d+)").find(data)
+        val subjectId: String
+        val se: Int
+        val ep: Int
+        if (sidMatch != null) {
+            subjectId = sidMatch.groupValues[1]
+            se = Regex("s=(\\d+)").find(data)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            ep = Regex("e=(\\d+)").find(data)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        } else {
+            val parts = data.split("|")
+            subjectId = parts.getOrNull(0)?.trim().orEmpty()
+            se = parts.getOrNull(1)?.toIntOrNull() ?: 0
+            ep = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        }
         if (subjectId.isBlank()) return false
         var found = false
 
