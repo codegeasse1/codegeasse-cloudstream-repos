@@ -30,6 +30,19 @@ class WatchAnimeWorldProvider : MainAPI() {
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.Anime)
 
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "Home",
+        "$mainUrl/category/language/hindi/" to "Hindi",
+        "$mainUrl/category/language/tamil/" to "Tamil",
+        "$mainUrl/category/language/telugu/" to "Telugu",
+        "$mainUrl/category/language/english/" to "English",
+        "$mainUrl/category/franchise/doraemon/" to "Doraemon",
+        "$mainUrl/category/franchise/dragon-ball/" to "Dragon Ball",
+        "$mainUrl/category/franchise/pokemon/" to "Pokemon",
+        "$mainUrl/category/franchise/shinchan/" to "Shinchan",
+        "$mainUrl/category/franchise/naruto/" to "Naruto",
+    )
+
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
     private val browserHeaders = mapOf(
@@ -81,9 +94,10 @@ class WatchAnimeWorldProvider : MainAPI() {
 
     // ---- catalog cards: <article class="post"> with <a class="lnk-blk"> link,
     // .entry-title title, .post-thumbnail img poster (homepage + search + seasons)
-    private fun extractItems(doc: Element): List<SearchResponse> {
+    // plus the "Most-Watched" top-picks cards: <a class="item__card lnk-blk"><img alt="Image Title">
+    private fun extractItems(container: Element): List<SearchResponse> {
         val items = mutableListOf<SearchResponse>()
-        for (article in doc.select("article.post")) {
+        for (article in container.select("article.post")) {
             val a = article.selectFirst("a.lnk-blk") ?: continue
             val url = fixUrlNull(a.attr("href")) ?: continue
             val title = article.selectFirst(".entry-title")?.text()?.trim() ?: continue
@@ -93,14 +107,48 @@ class WatchAnimeWorldProvider : MainAPI() {
                 this.posterUrl = poster
             })
         }
+        for (card in container.select("a.item__card.lnk-blk")) {
+            val url = fixUrlNull(card.attr("href")) ?: continue
+            val img = card.selectFirst("img") ?: continue
+            val title = img.attr("alt").trim().removePrefix("Image ").trim()
+            if (title.isBlank()) continue
+            val poster = fixPoster(img.attr("src"))
+            items.add(newAnimeSearchResponse(title, url, TvType.Anime) {
+                this.posterUrl = poster
+            })
+        }
         return items.distinctBy { it.url }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val pageUrl = if (page <= 1) "$mainUrl/" else "$mainUrl/page/$page/"
+        val target = request.data.ifBlank { "$mainUrl/" }
+        val isHome = target.trimEnd('/') == mainUrl
+        val pageUrl = when {
+            page <= 1 -> target
+            isHome -> target // homepage has no pagination (/page/2/ 404s)
+            else -> target.trimEnd('/') + "/page/$page/"
+        }
         val html = getPage(pageUrl)?.text ?: return newHomePageResponse(emptyList<HomePageList>(), hasNext = false)
-        val items = extractItems(Jsoup.parse(html))
-        return newHomePageResponse(listOf(HomePageList("Latest", items)), hasNext = items.isNotEmpty())
+        val doc = Jsoup.parse(html)
+
+        if (isHome) {
+            // one HomePageList per homepage widget section (Newest Drops, Most-Watched Shows,
+            // New Anime Arrivals, Just In: Cartoon Series, Most-Watched Films, Latest Anime Movies, Fresh Cartoon Films)
+            val lists = mutableListOf<HomePageList>()
+            for (section in doc.select("section.wdgt-home.widget")) {
+                val title = section.selectFirst(".section-title")?.text()?.trim()
+                    ?: section.selectFirst(".widget-title")?.text()?.trim()
+                    ?: continue
+                if (title.isBlank()) continue
+                val items = extractItems(section)
+                if (items.isEmpty()) continue
+                lists.add(HomePageList(title, items))
+            }
+            return newHomePageResponse(lists, hasNext = false)
+        }
+
+        val items = extractItems(doc)
+        return newHomePageResponse(request.name, items)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
