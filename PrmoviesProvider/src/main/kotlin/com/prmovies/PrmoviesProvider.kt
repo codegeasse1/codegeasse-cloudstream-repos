@@ -148,7 +148,7 @@ class PrmoviesProvider : MainAPI() {
                     this.year = year
                     this.tags = tags
                     this.duration = duration
-                    this.score = rating
+                    this.score = Score.from10(rating)
                 }
             }
             // series landing with no parsed episodes -> fall through to page-player handling
@@ -170,7 +170,7 @@ class PrmoviesProvider : MainAPI() {
                 this.year = year
                 this.tags = tags
                 this.duration = duration
-                this.score = rating
+                this.score = Score.from10(rating)
             }
         }
 
@@ -180,7 +180,7 @@ class PrmoviesProvider : MainAPI() {
             this.year = year
             this.tags = tags
             this.duration = duration
-            this.score = rating
+            this.score = Score.from10(rating)
         }
     }
 
