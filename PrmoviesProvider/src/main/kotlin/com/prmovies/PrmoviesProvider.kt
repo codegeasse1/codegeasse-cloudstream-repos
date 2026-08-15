@@ -54,13 +54,16 @@ class PrmoviesProvider : MainAPI() {
         for (card in doc.select(".ml-item")) {
             val a = card.selectFirst("a.ml-mask") ?: continue
             val url = fixUrlNull(a.attr("href")) ?: continue
-            val title = a.attr("oldtitle").ifBlank { a.attr("title") }
-                .ifBlank { card.selectFirst(".mli-info h2")?.text() }
-                .ifBlank { card.selectFirst("img.mli-thumb")?.attr("alt") }
-                .trim()
+            val title = (a.attr("oldtitle")
+                ?: a.attr("title")
+                ?: card.selectFirst(".mli-info h2")?.text()
+                ?: card.selectFirst("img.mli-thumb")?.attr("alt"))
+                ?.trim() ?: ""
             if (title.isBlank()) continue
-            val poster = card.selectFirst("img.mli-thumb")?.attr("data-original")?.ifBlank { null }
-                ?: card.selectFirst("img.mli-thumb")?.attr("src")?.ifBlank { null } ?: ""
+            val thumb = card.selectFirst("img.mli-thumb")
+            val poster = thumb?.attr("data-original")?.takeIf { it.isNotBlank() }
+                ?: thumb?.attr("src")?.takeIf { it.isNotBlank() }
+                ?: ""
             val isSeries = url.contains("/series/", true) ||
                 Regex("""(?i)\bseason\s*\d|\bepisode\s*\d|\bs\d{1,2}\b""").containsMatchIn(title)
             val response = if (isSeries) {
@@ -145,7 +148,7 @@ class PrmoviesProvider : MainAPI() {
                     this.year = year
                     this.tags = tags
                     this.duration = duration
-                    this.rating = rating
+                    this.score = rating
                 }
             }
             // series landing with no parsed episodes -> fall through to page-player handling
@@ -167,7 +170,7 @@ class PrmoviesProvider : MainAPI() {
                 this.year = year
                 this.tags = tags
                 this.duration = duration
-                this.rating = rating
+                this.score = rating
             }
         }
 
@@ -177,7 +180,7 @@ class PrmoviesProvider : MainAPI() {
             this.year = year
             this.tags = tags
             this.duration = duration
-            this.rating = rating
+            this.score = rating
         }
     }
 
