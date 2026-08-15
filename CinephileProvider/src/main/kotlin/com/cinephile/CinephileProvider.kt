@@ -67,7 +67,6 @@ class CinephileProvider : MainAPI() {
         val year = optString("year").take(4).toIntOrNull()
         return newMovieSearchResponse(title, subjectId, type, fix = false) {
             this.posterUrl = poster
-            this.backgroundUrl = poster
             this.year = year
         }
     }
@@ -128,7 +127,6 @@ class CinephileProvider : MainAPI() {
             val type = if (isAnime) TvType.Anime else TvType.TvSeries
             return newAnimeLoadResponse(title, subjectId, type) {
                 this.posterUrl = poster
-                this.backgroundUrl = poster
                 this.plot = plot
                 this.tags = genres
                 this.year = year
@@ -138,7 +136,6 @@ class CinephileProvider : MainAPI() {
 
         return newMovieLoadResponse(title, subjectId, if (isAnime) TvType.AnimeMovie else TvType.Movie, subjectId) {
             this.posterUrl = poster
-            this.backgroundUrl = poster
             this.plot = plot
             this.tags = genres
             this.year = year
