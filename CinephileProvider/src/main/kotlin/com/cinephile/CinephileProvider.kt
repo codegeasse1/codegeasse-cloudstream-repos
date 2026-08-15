@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class CinephileProvider : MainAPI() {
@@ -176,17 +177,21 @@ class CinephileProvider : MainAPI() {
                     val sourceType = r.optString("sourceType")
                     val sourceEpId = r.optString("sourceEpisodeId")
                     val link = r.optString("resourceLink")
+                    // fzmovies and ugc-anime proxies answer with Cloudflare/antibot
+                    // pages, never video - CloudStream cannot solve those, so skip.
+                    if (sourceType.equals("fzmovies", true) || link.contains("fzmovies", true) || link.contains("ugc-anime", true)) continue
                     val quality = qualityFromSize(r.optString("size").toLongOrNull() ?: 0L)
                     try {
                         if (sourceType.equals("kisskh", true) && sourceEpId.isNotBlank()) {
-                            val m3u8 = kisskhStream(sourceEpId)
-                            if (m3u8 != null) {
-                                val links = M3u8Helper.generateM3u8("$name - KissKH", m3u8, mainUrl)
+                            val kr = kisskhStream(sourceEpId)
+                            if (kr != null) {
+                                val (kBase, m3u8) = kr
+                                val links = M3u8Helper.generateM3u8("$name - KissKH", m3u8, kBase)
                                 if (links.isEmpty()) {
                                     callback(
                                         newExtractorLink(source = name, name = "KissKH", url = m3u8, type = ExtractorLinkType.M3U8) {
-                                            this.referer = mainUrl
-                                            this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
+                                            this.referer = kBase
+                                            this.headers = mapOf("User-Agent" to UA, "Referer" to kBase, "Origin" to kBase)
                                         }
                                     )
                                 } else {
@@ -195,8 +200,9 @@ class CinephileProvider : MainAPI() {
                                 found = true
                             }
                         } else if (link.isNotBlank()) {
+                            val directUrl = extractMediaUrl(link) ?: link
                             callback(
-                                newExtractorLink(source = name, name = "Stream $quality", url = link, type = ExtractorLinkType.VIDEO) {
+                                newExtractorLink(source = name, name = "Stream $quality", url = directUrl, type = ExtractorLinkType.VIDEO) {
                                     this.referer = mainUrl
                                     this.quality = quality
                                     this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
@@ -290,7 +296,7 @@ class CinephileProvider : MainAPI() {
     }
 
     // KissKH anime source: resolves an episode id to a playable stream URL.
-    private suspend fun kisskhStream(episodeId: String): String? {
+    private suspend fun kisskhStream(episodeId: String): Pair<String, String>? {
         for (base in listOf("https://kisskh.do", "https://kisskh.co", "https://kisskh.me")) {
             try {
                 val res = app.get("$base/api/DramaList/GetEpisodeStream?id=$episodeId&captionType=1", headers = mapOf(
@@ -302,7 +308,7 @@ class CinephileProvider : MainAPI() {
                 if (res.text.isBlank()) continue
                 val obj = JSONObject(res.text)
                 val v = obj.optString("value").ifBlank { obj.optString("stream").ifBlank { obj.optString("url") } }
-                if (v.isNotBlank()) return v
+                if (v.isNotBlank()) return base to v
             } catch (e: Exception) { }
         }
         return null
@@ -316,6 +322,21 @@ class CinephileProvider : MainAPI() {
         if (u.startsWith("//")) return "https:$u"
         if (u.startsWith("/")) return "$mainUrl$u"
         return "$mainUrl/$u"
+    }
+
+    // The resourceLink wraps a proxied media URL in its `url` query param.
+    // When that target is a real media file, hand it to the player directly
+    // (with headers) instead of going through the proxy's 302.
+    private fun extractMediaUrl(link: String): String? {
+        val m = Regex("[?&]url=([^&]+)").find(link) ?: return null
+        val decoded = try {
+            URLDecoder.decode(m.groupValues[1], "UTF-8")
+        } catch (e: Exception) {
+            return null
+        }
+        if (!decoded.startsWith("http://") && !decoded.startsWith("https://")) return null
+        if (decoded.contains(".mp4", true) || decoded.contains(".m3u8", true)) return decoded
+        return null
     }
 
     private fun qualityFromSize(size: Long): Int {
