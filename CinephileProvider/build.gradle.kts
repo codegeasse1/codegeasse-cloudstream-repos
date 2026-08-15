@@ -4,7 +4,7 @@ cloudstream {
     description = "Watch Movies, TV Shows and Anime from Cinephile"
     authors = listOf("Codegeasse")
     status = 1
-    tvTypes = listOf("Anime", "AnimeMovie", "Movie", "TvShow")
+    tvTypes = listOf("Anime", "AnimeMovie", "Movie", "TvSeries")
     iconUrl = "https://www.google.com/s2/favicons?domain=cinephile.live&sz=%size%"
 }
 
