@@ -2,7 +2,7 @@
 
 A CloudStream 3 extension repository maintained by **Codegeasse** — Movies, TV Shows, Anime, Donghua and NSFW sources, all in one repo.
 
-Fresh, working sources. No bloat.
+Fresh, working sources. No bloat. 🚀
 
 ### 🧰 Built With
 
