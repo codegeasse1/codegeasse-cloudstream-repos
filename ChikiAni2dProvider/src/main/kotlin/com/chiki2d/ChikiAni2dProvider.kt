@@ -12,10 +12,12 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 import java.net.URI
-import java.security.MessageDigest
 import javax.crypto.Cipher
+import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class ChikiAni2dProvider : MainAPI() {
     override var mainUrl = "https://chikianimation.com"
@@ -28,9 +30,6 @@ class ChikiAni2dProvider : MainAPI() {
     companion object {
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         private const val GX = "https://galaxydonghua.xyz"
-        // GDPlayer's playerConfig is encrypted with CryptoJS AES-JSON using a static passphrase
-        // (EVP_BytesToKey(MD5) + salt -> AES-256-CBC). Verified against the GDPlayer v3 assets.
-        private const val GDP_KEY = "F1r3b4Ll_GDP~5H"
     }
 
     override val mainPage = mainPageOf(
@@ -197,6 +196,14 @@ class ChikiAni2dProvider : MainAPI() {
         return found
     }
 
+    private data class GdTokens(
+        val pd: String,
+        val ps: String,
+        val qsx: String,
+        val kaken: String,
+        val apx: String,
+    )
+
     private suspend fun handleGdplayer(
         embedUrl: String,
         refererPage: String,
@@ -221,36 +228,52 @@ class ChikiAni2dProvider : MainAPI() {
             "sec-fetch-site" to "cross-site",
         )
         val page = try { app.get(embedUrl, headers = headers).text } catch (e: Exception) { return false }
-        val configMatch = Regex("playerConfig\\s*=\\s*(\\{[^;]+?\\})\\s*;").find(page) ?: return false
-        val configJson = try { JSONObject(configMatch.groupValues[1]) } catch (e: Exception) { return false }
-        val ct = configJson.optString("ct")
-        val saltHex = configJson.optString("s")
-        if (ct.isBlank() || saltHex.isBlank()) return false
 
-        val salt = hexToBytes(saltHex) ?: return false
-        val derived = evpBytesToKey(GDP_KEY.toByteArray(Charsets.UTF_8), salt, 48) ?: return false
-        val plain = aesDecrypt(
-            Base64.decode(ct, Base64.DEFAULT),
-            derived.copyOfRange(0, 32),
-            derived.copyOfRange(32, 48)
-        ) ?: return false
-        val pConf = try { JSONObject(plain) } catch (e: Exception) { return false }
+        // The embed page carries an inline JSFuck program that, once decoded, is a
+        // packr() call containing the per-page tokens (qsx, kaken, pd, ps, apx).
+        val tokens = decodeGdTokens(page) ?: return false
 
+        // 1) api-config: GET atob(apx) + qsx + "?p=" + ps -> encrypted blob -> dcx(pd) -> apiURL
+        val apiConfigBase = String(Base64.decode(tokens.apx, Base64.DEFAULT), Charsets.UTF_8)
+        val configRes = try {
+            app.get(
+                "$apiConfigBase${tokens.qsx}?p=${tokens.ps}",
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Referer" to embedUrl,
+                    "Accept" to "text/plain, */*; q=0.01",
+                )
+            ).text
+        } catch (e: Exception) { return false }
+        val configPlain = dcx(configRes.trim(), tokens.pd) ?: return false
+        val pConf = try { JSONObject(configPlain) } catch (e: Exception) { return false }
         val apiURL = pConf.optString("apiURL").ifBlank { pConf.optString("baseURL") }
-        val apiQuery = pConf.optString("apiQuery").ifBlank { pConf.optString("query") }
-        if (apiURL.isBlank() || apiQuery.isBlank()) return false
+        if (apiURL.isBlank()) return false
         val fixedApi = fixStreamUrl(apiURL, gxBase) ?: return false
 
+        // 2) api: POST apiURL + "api/?p=" + ps with body=kaken, content-type text/plain.
+        //    The response is encrypted with dcx(pd) and then JSON-parsed.
         val apiHeaders = mapOf(
             "User-Agent" to UA,
-            "Referer" to gxBase,
-            "Accept" to "application/json, text/javascript, */*; q=0.01",
+            "Referer" to embedUrl,
+            "Origin" to gxBase,
+            "Accept" to "text/plain, */*; q=0.01",
+            "Content-Type" to "text/plain;charset=UTF-8",
             "X-Requested-With" to "XMLHttpRequest",
         )
-        val apiRes = try {
-            app.get("${fixedApi.trimEnd('/')}/api/?$apiQuery", headers = apiHeaders).text
+        val apiBody = try {
+            app.post(
+                "${fixedApi.trimEnd('/')}/api/?p=${tokens.ps}",
+                headers = apiHeaders,
+                requestBody = tokens.kaken.toRequestBody("text/plain;charset=UTF-8".toMediaType()),
+            ).text
         } catch (e: Exception) { return false }
-        val resJson = try { JSONObject(apiRes) } catch (e: Exception) { return false }
+        val apiPlain = dcx(apiBody.trim(), tokens.pd)
+        val resJson = try {
+            if (apiPlain != null) JSONObject(apiPlain)
+            else JSONObject(apiBody.trim())
+        } catch (e: Exception) { return false }
+        if (resJson.optString("status") != "ok") return false
         val sources = resJson.optJSONArray("sources") ?: return false
         if (sources.length() == 0) return false
 
@@ -265,11 +288,11 @@ class ChikiAni2dProvider : MainAPI() {
             val quality = label.replace("p", "").toIntOrNull() ?: Qualities.Unknown.value
             try {
                 if (isM3u8) {
-                    val links = M3u8Helper.generateM3u8("$name - $label", file, gxBase)
+                    val links = M3u8Helper.generateM3u8("$name - $label", file, embedUrl)
                     if (links.isEmpty()) {
                         callback(
                             newExtractorLink(source = name, name = label, url = file, type = ExtractorLinkType.M3U8) {
-                                this.referer = gxBase
+                                this.referer = embedUrl
                                 this.quality = quality
                             }
                         )
@@ -279,7 +302,7 @@ class ChikiAni2dProvider : MainAPI() {
                 } else {
                     callback(
                         newExtractorLink(source = name, name = label, url = file, type = ExtractorLinkType.VIDEO) {
-                            this.referer = gxBase
+                            this.referer = embedUrl
                             this.quality = quality
                         }
                     )
@@ -300,6 +323,212 @@ class ChikiAni2dProvider : MainAPI() {
         }
 
         return any
+    }
+
+    /**
+     * The embed page's inline script is JSFuck. Its string payload is an octal-escape
+     * encoded packr() call, i.e. `eval(function(p,a,c,k,e,d){...}('PACKED',38,38,'DICT'.split('|')))`.
+     * Decode it to plain JS and pull out the per-page tokens.
+     */
+    private fun decodeGdTokens(page: String): GdTokens? {
+        val jStart = page.indexOf("ﾟωﾟﾉ=")
+        if (jStart < 0) return null
+        val jEnd = page.indexOf(") (ﾟΘﾟ)) ('_')", jStart)
+        if (jEnd < 0) return null
+        val jsfuck = page.substring(jStart, jEnd + ") (ﾟΘﾟ)) ('_')".length)
+
+        // Body of the string literal: between `(ﾟεﾟ+/*´∇｀*/` and `) (ﾟΘﾟ)) ('_')`.
+        val bStart = jsfuck.indexOf("(ﾟεﾟ+/*´∇｀*/")
+        if (bStart < 0) return null
+        val bodyStart = bStart + "(ﾟεﾟ+/*´∇｀*/".length
+        val body = jsfuck.substring(bodyStart, jEnd)
+
+        // Each char of the packr call is `\` + octal digits. Segments between the
+        // `(ﾟДﾟ)[ﾟεﾟ]` markers hold the digits as single-digit arithmetic terms.
+        val segs = body.split("(ﾟДﾟ)[ﾟεﾟ]")
+        val sb = StringBuilder()
+        for (i in 1 until segs.size) {
+            val st = stripConstants(segs[i]).trim().trimStart('+').trimEnd('+')
+            val digits = StringBuilder()
+            for (term in splitTopLevelTerms(st)) {
+                val t = term.trim()
+                val v = when {
+                    t.startsWith("-") -> -(evalArithmetic(t.substring(1)) ?: return null)
+                    else -> evalArithmetic(t.trimStart('+'))
+                } ?: return null
+                if (v < 0 || v > 7) return null
+                digits.append(v)
+            }
+            if (digits.isNotEmpty()) {
+                sb.append(digits.toString().toInt(8).toChar())
+            }
+        }
+        val packrCall = sb.toString()
+
+        // Extract the pieces of `eval(function(...){...}('PACKED',38,38,'DICT'.split('|')))`.
+        val pStart = packrCall.indexOf("}('")
+        if (pStart < 0) return null
+        val packedStart = pStart + 3
+        val packedEnd = packrCall.indexOf("',", packedStart)
+        if (packedEnd < 0) return null
+        val packed = packrCall.substring(packedStart, packedEnd)
+        val num1Start = packedEnd + 2
+        val num1End = packrCall.indexOf(",", num1Start)
+        if (num1End < 0) return null
+        val a = packrCall.substring(num1Start, num1End).toIntOrNull() ?: return null
+        val dictStartRaw = packrCall.indexOf(",'", num1End)
+        if (dictStartRaw < 0) return null
+        val dictStart = dictStartRaw + 2
+        val dictEnd = packrCall.indexOf("'.split", dictStart)
+        if (dictEnd < 0) return null
+        val dict = packrCall.substring(dictStart, dictEnd).split("|")
+
+        var code = packed
+        for (c in a - 1 downTo 0) {
+            val k = dict.getOrNull(c) ?: continue
+            if (k.isEmpty()) continue
+            code = code.replace(Regex("\\b" + packrBase36(c, a) + "\\b"), k)
+        }
+
+        fun grab(regex: Regex): String? = regex.find(code)?.groupValues?.get(1)?.trim()
+        val pd = grab(Regex("""pd="([^"]+)"""")) ?: return null
+        val ps = grab(Regex("""ps="([^"]+)"""")) ?: return null
+        val qsx = grab(Regex("""window\.qsx="([^"]+)"""")) ?: return null
+        val kaken = grab(Regex("""window\.kaken="([^"]+)"""")) ?: return null
+        val apx = grab(Regex("""window\.apx="([^"]+)"""")) ?: return null
+        if (pd.isBlank() || ps.isBlank() || qsx.isBlank() || kaken.isBlank() || apx.isBlank()) return null
+        return GdTokens(pd, ps, qsx, kaken, apx)
+    }
+
+    private fun stripConstants(s: String): String {
+        var t = s
+        val repl = listOf(
+            "(c^_^o)" to "0",
+            "(o^_^o)" to "3",
+            "(ﾟΘﾟ)" to "1",
+            "(ﾟｰﾟ)" to "4",
+            "c^_^o" to "0",
+            "o^_^o" to "3",
+            "ﾟΘﾟ" to "1",
+            "ﾟｰﾟ" to "4",
+        )
+        for ((k, v) in repl) t = t.replace(k, v)
+        return t
+    }
+
+    // Splits an expression into top-level additive terms, e.g. "1+4+(4+1)" -> ["1","+4","+(4+1)"].
+    private fun splitTopLevelTerms(s: String): List<String> {
+        val terms = mutableListOf<String>()
+        var depth = 0
+        var cur = StringBuilder()
+        for (ch in s) {
+            when (ch) {
+                '(' -> { depth++; cur.append(ch) }
+                ')' -> { depth--; cur.append(ch) }
+                '+', '-' -> {
+                    if (depth == 0) {
+                        if (cur.isNotBlank()) terms.add(cur.toString())
+                        cur = StringBuilder().append(ch)
+                    } else cur.append(ch)
+                }
+                else -> cur.append(ch)
+            }
+        }
+        if (cur.isNotBlank()) terms.add(cur.toString())
+        return terms.filter { it != "+" && it != "-" }
+    }
+
+    // Recursive-descent evaluator for expressions like "(4)+(4+1)" (digits, +, -, parens).
+    private fun evalArithmetic(s: String): Int? {
+        var pos = 0
+        fun skip() { while (pos < s.length && s[pos] == ' ') pos++ }
+        fun atom(): Int? {
+            skip()
+            if (pos >= s.length) return null
+            val c = s[pos]
+            return when {
+                c == '(' -> {
+                    pos++
+                    val v = expr() ?: return null
+                    skip()
+                    if (pos >= s.length || s[pos] != ')') return null
+                    pos++
+                    v
+                }
+                c.isDigit() -> {
+                    var v = 0
+                    while (pos < s.length && s[pos].isDigit()) {
+                        v = v * 10 + (s[pos] - '0')
+                        pos++
+                    }
+                    v
+                }
+                else -> null
+            }
+        }
+        fun expr(): Int? {
+            var v = atom() ?: return null
+            while (true) {
+                skip()
+                if (pos >= s.length) return v
+                val c = s[pos]
+                if (c == '+') { pos++; v += atom() ?: return null }
+                else if (c == '-') { pos++; v -= atom() ?: return null }
+                else return v
+            }
+        }
+        return expr()
+    }
+
+    // packr's e(c): the base-36 identifier for a dict index (e.g. 38 -> "10", 37 -> "B").
+    private fun packrBase36(c: Int, a: Int): String {
+        val prefix = if (c < a) "" else packrBase36(c / a, a)
+        val rem = c % a
+        val suffix = if (rem > 35) (rem + 29).toChar().toString() else Character.forDigit(rem, 36).toString()
+        return prefix + suffix
+    }
+
+    // dcx: PBKDF2-HMAC-SHA256(password, salt, 10000, 48 bytes) -> key[0..32) + iv[32..48),
+    // then AES-256-CBC. Matches CryptoJS: keySize 12 words, iterations 0x2710, hasher SHA256.
+    private fun dcx(input: String, password: String): String? {
+        val data = try { Base64.decode(input.trim(), Base64.DEFAULT) } catch (e: Exception) { return null }
+        if (data.size < 16) return null
+        val salt = data.copyOfRange(0, 16)
+        val ct = data.copyOfRange(16, data.size)
+        val derived = pbkdf2Sha256(password.toByteArray(Charsets.UTF_8), salt, 10000, 48) ?: return null
+        return aesDecrypt(ct, derived.copyOfRange(0, 32), derived.copyOfRange(32, 48))
+    }
+
+    private fun pbkdf2Sha256(password: ByteArray, salt: ByteArray, iterations: Int, dkLen: Int): ByteArray? {
+        return try {
+            val mac = Mac.getInstance("HmacSHA256")
+            mac.init(SecretKeySpec(password, "HmacSHA256"))
+            val out = ByteArray(dkLen)
+            val hLen = 32
+            val blocks = (dkLen + hLen - 1) / hLen
+            var offset = 0
+            for (block in 1..blocks) {
+                val u = ByteArray(salt.size + 4)
+                salt.copyInto(u)
+                val bi = block
+                u[salt.size] = ((bi ushr 24) and 0xFF).toByte()
+                u[salt.size + 1] = ((bi ushr 16) and 0xFF).toByte()
+                u[salt.size + 2] = ((bi ushr 8) and 0xFF).toByte()
+                u[salt.size + 3] = (bi and 0xFF).toByte()
+                var t = mac.doFinal(u)
+                var last = t
+                var i = 1
+                while (i < iterations) {
+                    last = mac.doFinal(last)
+                    for (j in t.indices) t[j] = (t[j].toInt() xor last[j].toInt()).toByte()
+                    i++
+                }
+                val n = minOf(hLen, dkLen - offset)
+                t.copyInto(out, offset, 0, n)
+                offset += n
+            }
+            out
+        } catch (e: Exception) { null }
     }
 
     private suspend fun handleDailymotion(
@@ -339,38 +568,6 @@ class ChikiAni2dProvider : MainAPI() {
             u.startsWith("/") -> if (host != null) "$host$u" else "${base.trimEnd('/')}$u"
             else -> if (host != null) "$host/$u" else "${base.trimEnd('/')}/$u"
         }
-    }
-
-    private fun hexToBytes(hex: String): ByteArray? {
-        val h = hex.trim()
-        if (h.length % 2 != 0) return null
-        if (!h.all { it in "0123456789abcdefABCDEF" }) return null
-        return try {
-            ByteArray(h.length / 2) { i ->
-                ((Character.digit(h[i * 2], 16) shl 4) + Character.digit(h[i * 2 + 1], 16)).toByte()
-            }
-        } catch (e: Exception) { null }
-    }
-
-    // OpenSSL EVP_BytesToKey (MD5, single iteration) as used by CryptoJS password-based AES.
-    private fun evpBytesToKey(password: ByteArray, salt: ByteArray, numBytes: Int): ByteArray? {
-        return try {
-            val out = ByteArray(numBytes)
-            val md = MessageDigest.getInstance("MD5")
-            var prev: ByteArray? = null
-            var filled = 0
-            while (filled < numBytes) {
-                md.reset()
-                prev?.let { md.update(it) }
-                md.update(password)
-                md.update(salt)
-                val digest = md.digest()
-                digest.copyInto(out, filled)
-                filled += digest.size
-                prev = digest
-            }
-            out
-        } catch (e: Exception) { null }
     }
 
     private fun aesDecrypt(blob: ByteArray, key: ByteArray, iv: ByteArray): String? {
