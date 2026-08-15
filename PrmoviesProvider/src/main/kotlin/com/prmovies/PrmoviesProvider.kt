@@ -119,9 +119,6 @@ class PrmoviesProvider : MainAPI() {
         val duration = doc.selectFirst(".mvici-right span[itemprop=duration]")?.text()?.trim()
             ?.let { Regex("""(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
 
-        val rating = doc.selectFirst(".imdb_r span[itemprop=ratingValue]")?.text()?.trim()
-            ?.let { Regex("""(\d+(?:\.\d+)?)""").find(it)?.groupValues?.get(1)?.toFloatOrNull() }
-
         if (url.contains("/series/", true)) {
             // real series landing page: #seasons -> .tvseason -> episode links
             val episodes = mutableListOf<Episode>()
@@ -148,7 +145,6 @@ class PrmoviesProvider : MainAPI() {
                     this.year = year
                     this.tags = tags
                     this.duration = duration
-                    this.score = Score.from10(rating)
                 }
             }
             // series landing with no parsed episodes -> fall through to page-player handling
@@ -170,7 +166,6 @@ class PrmoviesProvider : MainAPI() {
                 this.year = year
                 this.tags = tags
                 this.duration = duration
-                this.score = Score.from10(rating)
             }
         }
 
@@ -180,7 +175,6 @@ class PrmoviesProvider : MainAPI() {
             this.year = year
             this.tags = tags
             this.duration = duration
-            this.score = Score.from10(rating)
         }
     }
 
