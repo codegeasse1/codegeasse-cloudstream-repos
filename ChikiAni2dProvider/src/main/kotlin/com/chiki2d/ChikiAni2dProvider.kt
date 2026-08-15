@@ -439,19 +439,21 @@ class ChikiAni2dProvider : MainAPI() {
     }
 
     // Recursive-descent evaluator for expressions like "(4)+(4+1)" (digits, +, -, parens).
+    // atom() and expr() are mutually recursive, so they're lambdas behind vars.
     private fun evalArithmetic(s: String): Int? {
         var pos = 0
         fun skip() { while (pos < s.length && s[pos] == ' ') pos++ }
-        fun atom(): Int? {
+        lateinit var expr: () -> Int?
+        val atom: () -> Int? = {
             skip()
-            if (pos >= s.length) return null
+            if (pos >= s.length) return@atom null
             val c = s[pos]
-            return when {
+            when {
                 c == '(' -> {
                     pos++
-                    val v = expr() ?: return null
+                    val v = expr() ?: return@atom null
                     skip()
-                    if (pos >= s.length || s[pos] != ')') return null
+                    if (pos >= s.length || s[pos] != ')') return@atom null
                     pos++
                     v
                 }
@@ -466,15 +468,15 @@ class ChikiAni2dProvider : MainAPI() {
                 else -> null
             }
         }
-        fun expr(): Int? {
-            var v = atom() ?: return null
+        expr = {
+            var v = atom() ?: return@expr null
             while (true) {
                 skip()
-                if (pos >= s.length) return v
+                if (pos >= s.length) return@expr v
                 val c = s[pos]
-                if (c == '+') { pos++; v += atom() ?: return null }
-                else if (c == '-') { pos++; v -= atom() ?: return null }
-                else return v
+                if (c == '+') { pos++; v += atom() ?: return@expr null }
+                else if (c == '-') { pos++; v -= atom() ?: return@expr null }
+                else return@expr v
             }
         }
         return expr()
