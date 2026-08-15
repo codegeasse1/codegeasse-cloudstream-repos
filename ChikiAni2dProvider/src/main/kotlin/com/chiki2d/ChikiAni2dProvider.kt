@@ -341,7 +341,13 @@ class ChikiAni2dProvider : MainAPI() {
         val bStart = jsfuck.indexOf("(ﾟεﾟ+/*´∇｀*/")
         if (bStart < 0) return null
         val bodyStart = bStart + "(ﾟεﾟ+/*´∇｀*/".length
-        val body = jsfuck.substring(bodyStart, jEnd)
+        var body = jsfuck.substring(bodyStart, jEnd)
+
+        // The string is built as `(ﾟДﾟ)[ﾟoﾟ] + (ﾟДﾟ)[ﾟεﾟ]+math ... (ﾟДﾟ)[ﾟεﾟ]+math (ﾟДﾟ)[ﾟoﾟ]`,
+        // so the trailing `(ﾟДﾟ)[ﾟoﾟ]` marks the end of the string part (older layouts
+        // omit it entirely, in which case lastIndexOf returns -1 and nothing is cut).
+        val oMarker = body.lastIndexOf("(ﾟДﾟ)[ﾟoﾟ]")
+        if (oMarker >= 0) body = body.substring(0, oMarker)
 
         // Each char of the packr call is `\` + octal digits. Segments between the
         // `(ﾟДﾟ)[ﾟεﾟ]` markers hold the digits as single-digit arithmetic terms.
@@ -438,48 +444,60 @@ class ChikiAni2dProvider : MainAPI() {
         return terms.filter { it != "+" && it != "-" }
     }
 
-    // Recursive-descent evaluator for expressions like "(4)+(4+1)" (digits, +, -, parens).
-    // atom() and expr() are mutually recursive, so they're lambdas behind vars.
+    // Evaluator for additive expressions of digits, '+', '-', and parentheses,
+    // e.g. "(4)+(4+1)". Iterative (explicit value/op stacks) so there are no
+    // local-function forward references or lambda-label complications.
     private fun evalArithmetic(s: String): Int? {
-        var pos = 0
-        fun skip() { while (pos < s.length && s[pos] == ' ') pos++ }
-        lateinit var expr: () -> Int?
-        val atom: () -> Int? = {
-            skip()
-            if (pos >= s.length) return@atom null
-            val c = s[pos]
+        val chars = s.filter { it != ' ' }
+        val values = mutableListOf<Int>()
+        val ops = mutableListOf<Char>()
+        var i = 0
+        while (i < chars.length) {
+            val c = chars[i]
             when {
-                c == '(' -> {
-                    pos++
-                    val v = expr() ?: return@atom null
-                    skip()
-                    if (pos >= s.length || s[pos] != ')') return@atom null
-                    pos++
-                    v
-                }
                 c.isDigit() -> {
                     var v = 0
-                    while (pos < s.length && s[pos].isDigit()) {
-                        v = v * 10 + (s[pos] - '0')
-                        pos++
+                    while (i < chars.length && chars[i].isDigit()) {
+                        v = v * 10 + (chars[i] - '0')
+                        i++
                     }
-                    v
+                    values.add(v)
                 }
-                else -> null
+                c == '(' -> {
+                    ops.add(c)
+                    i++
+                }
+                c == ')' -> {
+                    while (ops.isNotEmpty() && ops.last() != '(') {
+                        if (values.size < 2) return null
+                        val b = values.removeAt(values.size - 1)
+                        val a = values.removeAt(values.size - 1)
+                        values.add(if (ops.removeAt(ops.size - 1) == '+') a + b else a - b)
+                    }
+                    if (ops.isEmpty()) return null
+                    ops.removeAt(ops.size - 1)
+                    i++
+                }
+                c == '+' || c == '-' -> {
+                    while (ops.isNotEmpty() && ops.last() != '(') {
+                        if (values.size < 2) return null
+                        val b = values.removeAt(values.size - 1)
+                        val a = values.removeAt(values.size - 1)
+                        values.add(if (ops.removeAt(ops.size - 1) == '+') a + b else a - b)
+                    }
+                    ops.add(c)
+                    i++
+                }
+                else -> return null
             }
         }
-        expr = {
-            var v = atom() ?: return@expr null
-            while (true) {
-                skip()
-                if (pos >= s.length) return@expr v
-                val c = s[pos]
-                if (c == '+') { pos++; v += atom() ?: return@expr null }
-                else if (c == '-') { pos++; v -= atom() ?: return@expr null }
-                else return@expr v
-            }
+        while (ops.isNotEmpty()) {
+            if (ops.last() == '(' || values.size < 2) return null
+            val b = values.removeAt(values.size - 1)
+            val a = values.removeAt(values.size - 1)
+            values.add(if (ops.removeAt(ops.size - 1) == '+') a + b else a - b)
         }
-        return expr()
+        return if (values.size == 1) values[0] else null
     }
 
     // packr's e(c): the base-36 identifier for a dict index (e.g. 38 -> "10", 37 -> "B").
