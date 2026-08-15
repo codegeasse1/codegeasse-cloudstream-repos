@@ -132,7 +132,7 @@ class WatchAnimeWorldProvider : MainAPI() {
 
         val tags = doc.select("a[href*=/category/]")
             .mapNotNull { it.text().trim().ifBlank { null } }
-            .filter { t -> t.length > 1 && !listOf("Hindi", "Tamil", "Telugu", "English", "Japanese", "Sub").contains(t, true) }
+            .filter { t -> t.length > 1 && listOf("Hindi", "Tamil", "Telugu", "English", "Japanese", "Sub").none { it.equals(t, true) } }
             .distinct()
             .take(10)
 
@@ -329,7 +329,7 @@ class WatchAnimeWorldProvider : MainAPI() {
         }
     }
 
-    private fun emitLink(url: String, label: String, callback: (ExtractorLink) -> Unit, referer: String) {
+    private suspend fun emitLink(url: String, label: String, callback: (ExtractorLink) -> Unit, referer: String) {
         val clean = url.trim().trim('"', '\'')
         if (clean.isBlank()) return
         val isM3u8 = clean.contains(".m3u8", true)
