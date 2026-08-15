@@ -38,6 +38,7 @@ class CinephileProvider : MainAPI() {
         for (i in 0 until sections.length()) {
             val sec = sections.optJSONObject(i) ?: continue
             val secName = sec.optString("section").ifBlank { "Row ${i + 1}" }
+                .let { if (it.equals("Banner", true)) "Featured" else it }
             val items = sec.optJSONArray("movies") ?: continue
             val list = mutableListOf<SearchResponse>()
             for (j in 0 until items.length()) {
@@ -66,6 +67,7 @@ class CinephileProvider : MainAPI() {
         val year = optString("year").take(4).toIntOrNull()
         return newMovieSearchResponse(title, subjectId, type, fix = false) {
             this.posterUrl = poster
+            this.backgroundUrl = poster
             this.year = year
         }
     }
@@ -87,7 +89,8 @@ class CinephileProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val subjectId = url.trim()
+        val subjectId = url.trim().substringAfterLast("/").substringBefore("?")
+        if (subjectId.isBlank()) throw RuntimeException("Invalid Cinephile url: $url")
         val json = fetchCine("action=detail&subjectId=$subjectId")
             ?: throw RuntimeException("Cinephile API error")
         val data = json.optJSONObject("data") ?: json
@@ -125,6 +128,7 @@ class CinephileProvider : MainAPI() {
             val type = if (isAnime) TvType.Anime else TvType.TvSeries
             return newAnimeLoadResponse(title, subjectId, type) {
                 this.posterUrl = poster
+                this.backgroundUrl = poster
                 this.plot = plot
                 this.tags = genres
                 this.year = year
@@ -134,6 +138,7 @@ class CinephileProvider : MainAPI() {
 
         return newMovieLoadResponse(title, subjectId, if (isAnime) TvType.AnimeMovie else TvType.Movie, subjectId) {
             this.posterUrl = poster
+            this.backgroundUrl = poster
             this.plot = plot
             this.tags = genres
             this.year = year
@@ -155,7 +160,8 @@ class CinephileProvider : MainAPI() {
             se = Regex("s=(\\d+)").find(data)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             ep = Regex("e=(\\d+)").find(data)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         } else {
-            val parts = data.split("|")
+            val clean = data.substringBefore("#").substringBefore("?").trim()
+            val parts = clean.substringAfterLast("/").split("|")
             subjectId = parts.getOrNull(0)?.trim().orEmpty()
             se = parts.getOrNull(1)?.toIntOrNull() ?: 0
             ep = parts.getOrNull(2)?.toIntOrNull() ?: 0
@@ -183,6 +189,7 @@ class CinephileProvider : MainAPI() {
                                     callback(
                                         newExtractorLink(source = name, name = "KissKH", url = m3u8, type = ExtractorLinkType.M3U8) {
                                             this.referer = mainUrl
+                                            this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
                                         }
                                     )
                                 } else {
@@ -195,6 +202,7 @@ class CinephileProvider : MainAPI() {
                                 newExtractorLink(source = name, name = "Stream $quality", url = link, type = ExtractorLinkType.VIDEO) {
                                     this.referer = mainUrl
                                     this.quality = quality
+                                    this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
                                 }
                             )
                             found = true
@@ -237,6 +245,7 @@ class CinephileProvider : MainAPI() {
                                     newExtractorLink(source = name, name = label, url = u, type = ExtractorLinkType.M3U8) {
                                         this.referer = mainUrl
                                         this.quality = quality
+                                        this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
                                     }
                                 )
                             } else {
@@ -247,6 +256,7 @@ class CinephileProvider : MainAPI() {
                                 newExtractorLink(source = name, name = label, url = u, type = ExtractorLinkType.VIDEO) {
                                     this.referer = mainUrl
                                     this.quality = quality
+                                    this.headers = mapOf("User-Agent" to UA, "Referer" to mainUrl)
                                 }
                             )
                         }
