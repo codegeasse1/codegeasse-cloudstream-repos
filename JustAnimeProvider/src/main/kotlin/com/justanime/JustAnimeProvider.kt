@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URLEncoder
+import android.net.Uri
 
 class JustAnimeProvider : MainAPI() {
     override var mainUrl = "https://justanime.to"
@@ -37,6 +37,10 @@ class JustAnimeProvider : MainAPI() {
     )
     private val apiHeaderJson = JSONObject(apiHeaders).toString()
     private var lastApiError = ""
+
+    // Space-safe percent encoding (URLEncoder would emit '+' for spaces, which
+    // can be mis-decoded by the site's proxy).
+    private fun enc(s: String): String = Uri.encode(s)
 
     override val mainPage = mainPageOf(
         "$mainUrl/trending" to "Trending",
@@ -241,26 +245,38 @@ class JustAnimeProvider : MainAPI() {
                 }
             }
         }
-        if (!found) throw RuntimeException("JustAnime: no links found. $lastApiError")
+        if (!found) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "JustAnime error: $lastApiError",
+                    url = mainUrl,
+                    type = ExtractorLinkType.M3U8
+                )
+            )
+        }
         return found
     }
 
     private fun proxyUrl(url: String, headerJson: String): String {
-        return "$PROXY?url=${URLEncoder.encode(url, "UTF-8")}&headers=${URLEncoder.encode(headerJson, "UTF-8")}"
+        return "$PROXY?url=${enc(url)}&headers=${enc(headerJson)}"
     }
 
     private suspend fun fetchApi(path: String, params: Map<String, String> = emptyMap()): JSONObject? {
         val query = if (params.isEmpty()) "" else "?" + params.entries.joinToString("&") { (k, v) ->
-            "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
+            "${enc(k)}=${enc(v)}"
         }
         val coreUrl = "$API$path$query"
-        return fetchViaProxy(coreUrl) ?: fetchViaDirect(coreUrl)
+        fetchViaProxy(coreUrl)?.let { return it }
+        fetchViaDirect(coreUrl)?.let { return it }
+        fetchViaProxy(coreUrl)?.let { return it }
+        return null
     }
 
     private suspend fun fetchViaProxy(coreUrl: String): JSONObject? {
         return try {
             val res = app.get(
-                "$PROXY?url=${URLEncoder.encode(coreUrl, "UTF-8")}&headers=${URLEncoder.encode(apiHeaderJson, "UTF-8")}",
+                "$PROXY?url=${enc(coreUrl)}&headers=${enc(apiHeaderJson)}",
                 headers = apiHeaders
             )
             val text = res.text.trim()
