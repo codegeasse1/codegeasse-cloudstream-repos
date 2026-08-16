@@ -36,6 +36,7 @@ class JustAnimeProvider : MainAPI() {
         "Origin" to mainUrl,
     )
     private val apiHeaderJson = JSONObject(apiHeaders).toString()
+    private var lastApiError = ""
 
     override val mainPage = mainPageOf(
         "$mainUrl/trending" to "Trending",
@@ -108,7 +109,7 @@ class JustAnimeProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val id = url.trim().substringBefore("|").substringAfterLast("/")
         if (id.isBlank() || !id.all { it.isDigit() }) throw RuntimeException("Invalid JustAnime url")
-        val json = fetchApi("/anime/$id") ?: throw RuntimeException("JustAnime API error")
+        val json = fetchApi("/anime/$id") ?: throw RuntimeException("JustAnime API error: $lastApiError")
         val data = json.optJSONObject("data") ?: json
         val titleObj = data.optJSONObject("title")
         val title = titleObj?.optString("english").orEmpty()
@@ -240,6 +241,7 @@ class JustAnimeProvider : MainAPI() {
                 }
             }
         }
+        if (!found) throw RuntimeException("JustAnime: no links found. $lastApiError")
         return found
     }
 
@@ -248,17 +250,46 @@ class JustAnimeProvider : MainAPI() {
     }
 
     private suspend fun fetchApi(path: String, params: Map<String, String> = emptyMap()): JSONObject? {
+        val query = if (params.isEmpty()) "" else "?" + params.entries.joinToString("&") { (k, v) ->
+            "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
+        }
+        val coreUrl = "$API$path$query"
+        return fetchViaProxy(coreUrl) ?: fetchViaDirect(coreUrl)
+    }
+
+    private suspend fun fetchViaProxy(coreUrl: String): JSONObject? {
         return try {
-            val query = if (params.isEmpty()) "" else "?" + params.entries.joinToString("&") { (k, v) ->
-                "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
-            }
-            val coreUrl = "$API$path$query"
             val res = app.get(
                 "$PROXY?url=${URLEncoder.encode(coreUrl, "UTF-8")}&headers=${URLEncoder.encode(apiHeaderJson, "UTF-8")}",
                 headers = apiHeaders
             )
-            if (res.text.isBlank()) null else JSONObject(res.text)
+            val text = res.text.trim()
+            if (text.isBlank()) {
+                lastApiError = "proxy: empty response (status ${res.code})"
+                null
+            } else {
+                val json = JSONObject(text)
+                if (json.has("error")) {
+                    lastApiError = "proxy rejected: ${json.optString("error").take(140)}"
+                    null
+                } else json
+            }
         } catch (e: Exception) {
+            lastApiError = "proxy threw: ${e.message?.take(140)}"
+            null
+        }
+    }
+
+    private suspend fun fetchViaDirect(coreUrl: String): JSONObject? {
+        return try {
+            val res = app.get(coreUrl, headers = apiHeaders)
+            val text = res.text.trim()
+            if (text.isBlank()) {
+                lastApiError = "direct: empty response (status ${res.code})"
+                null
+            } else JSONObject(text)
+        } catch (e: Exception) {
+            lastApiError = "direct threw: ${e.message?.take(140)}"
             null
         }
     }
