@@ -23,12 +23,13 @@ class JustAnimeProvider : MainAPI() {
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     }
 
-    // core.justanime.to is Cloudflare-challenged for non-browser clients (OkHttp
-    // gets a 403 JS challenge, so direct API calls always fail), while
-    // neko.justanime.to/m3u8-proxy is open and fetches upstream server-side. So
-    // every API call AND every stream is routed through the m3u8-proxy, which
-    // also adds the correct upstream headers (hotlink protection) and rewrites
-    // HLS playlists so each segment URL points back through itself.
+    // API calls go DIRECT to core.justanime.to first (reachable from the app,
+    // returns the stream headers object we need), falling back to the
+    // m3u8-proxy when Cloudflare blocks. For playback we emit BOTH the direct
+    // upstream URL (vivibebe.site — served open, playlist accessible) and a
+    // neko.justanime.to/m3u8-proxy-wrapped copy (the site's own player always
+    // plays through the proxy, so it's the most reliable path if segments are
+    // hotlink-gated). Subtitles are direct: cdn.anizara.store is open.
     private val apiHeaders = mapOf(
         "User-Agent" to UA,
         "Accept" to "application/json, text/plain, */*",
@@ -206,13 +207,30 @@ class JustAnimeProvider : MainAPI() {
                     val qualityLabel = s.optString("quality").ifBlank { "Auto" }
                     val quality = qualityLabel.filter { it.isDigit() }.toIntOrNull()
                         ?: Qualities.Unknown.value
+                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     try {
                         callback(
                             newExtractorLink(
                                 source = name,
                                 name = "$langLabel $qualityLabel",
+                                url = url,
+                                type = linkType
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = quality
+                                this.headers = mapOf(
+                                    "User-Agent" to UA,
+                                    "Referer" to headers["Referer"].orEmpty(),
+                                    "Origin" to headers["Origin"].orEmpty(),
+                                ).filterValues { it.isNotBlank() }
+                            }
+                        )
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = "$langLabel $qualityLabel (proxy)",
                                 url = proxyUrl(url, headerJson),
-                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                type = linkType
                             ) {
                                 this.referer = mainUrl
                                 this.quality = quality
@@ -238,7 +256,7 @@ class JustAnimeProvider : MainAPI() {
                         subtitleCallback(
                             SubtitleFile(
                                 s.optString("lang").ifBlank { "Subtitle" },
-                                proxyUrl(su, headerJson)
+                                su
                             )
                         )
                     } catch (e: Exception) { }
@@ -267,8 +285,8 @@ class JustAnimeProvider : MainAPI() {
             "${enc(k)}=${enc(v)}"
         }
         val coreUrl = "$API$path$query"
-        fetchViaProxy(coreUrl)?.let { return it }
         fetchViaDirect(coreUrl)?.let { return it }
+        fetchViaProxy(coreUrl)?.let { return it }
         fetchViaProxy(coreUrl)?.let { return it }
         return null
     }
