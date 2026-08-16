@@ -23,16 +23,19 @@ class JustAnimeProvider : MainAPI() {
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     }
 
-    // The API only serves browsers: it requires an Origin/Referer of justanime.to
-    // (plus a real browser UA to get past Cloudflare). The video CDN is hotlink-
-    // protected, so streams are proxied through the site's own m3u8-proxy, which
-    // fetches with the right upstream headers and rewrites every segment URL.
+    // core.justanime.to is Cloudflare-challenged for non-browser clients (OkHttp
+    // gets a 403 JS challenge, so direct API calls always fail), while
+    // neko.justanime.to/m3u8-proxy is open and fetches upstream server-side. So
+    // every API call AND every stream is routed through the m3u8-proxy, which
+    // also adds the correct upstream headers (hotlink protection) and rewrites
+    // HLS playlists so each segment URL points back through itself.
     private val apiHeaders = mapOf(
         "User-Agent" to UA,
         "Accept" to "application/json, text/plain, */*",
         "Referer" to "$mainUrl/",
         "Origin" to mainUrl,
     )
+    private val apiHeaderJson = JSONObject(apiHeaders).toString()
 
     override val mainPage = mainPageOf(
         "$mainUrl/trending" to "Trending",
@@ -174,7 +177,7 @@ class JustAnimeProvider : MainAPI() {
     ): Boolean {
         val parts = data.split("|")
         val id = parts.getOrNull(0)?.trim().orEmpty()
-        val episode = parts.getOrNull(1)?.trim().orEmpty()
+        val episode = parts.getOrNull(1)?.trim().orEmpty().ifBlank { "1" }
         if (id.isBlank() || episode.isBlank()) return false
         var found = false
 
@@ -249,7 +252,11 @@ class JustAnimeProvider : MainAPI() {
             val query = if (params.isEmpty()) "" else "?" + params.entries.joinToString("&") { (k, v) ->
                 "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
             }
-            val res = app.get("$API$path$query", headers = apiHeaders)
+            val coreUrl = "$API$path$query"
+            val res = app.get(
+                "$PROXY?url=${URLEncoder.encode(coreUrl, "UTF-8")}&headers=${URLEncoder.encode(apiHeaderJson, "UTF-8")}",
+                headers = apiHeaders
+            )
             if (res.text.isBlank()) null else JSONObject(res.text)
         } catch (e: Exception) {
             null
