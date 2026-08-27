@@ -116,14 +116,20 @@ class MrdsProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "${request.data}page/$page/"
+        // Hikari 51CG pagination scheme: Home → /page/N/, categories → /category/<slug>/N/
+        val url = when {
+            page <= 1 -> request.data
+            request.data == "$mainUrl/" -> "$mainUrl/page/$page/"
+            else -> request.data.trimEnd('/') + "/$page/"
+        }
         val document = app.get(url).document
 
         val homeItems = document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
             element.toSearchResultAsync()
         }
 
-        return newHomePageResponse(request.name, homeItems)
+        // Unlimited pagination: keep loading pages until the site returns no more cards.
+        return newHomePageResponse(request.name, homeItems, hasNext = homeItems.isNotEmpty())
     }
 
     // ---------------------------------------------------------------
