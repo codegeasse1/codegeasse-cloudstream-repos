@@ -122,7 +122,12 @@ class C51CGProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "${request.data}page/$page/"
+        // Hikari 51CG pagination scheme: Home → /page/N/, categories → /category/<slug>/N/
+        val url = when {
+            page <= 1 -> request.data
+            request.data == "$mainUrl/" -> "$mainUrl/page/$page/"
+            else -> request.data.trimEnd('/') + "/$page/"
+        }
         val document = app.get(url).document
 
         // Skip ad-articles (class "ad-item")
@@ -130,7 +135,8 @@ class C51CGProvider : MainAPI() {
             element.toSearchResult()
         }
 
-        return newHomePageResponse(request.name, items)
+        // Unlimited pagination: keep loading pages until the site returns no more cards.
+        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
     // ---------------------------------------------------------------
