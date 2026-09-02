@@ -1,0 +1,659 @@
+[
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=anikage.cc&sz=%size%",
+        "fileHash": "sha256-149fe34a9b07efd27fe2f0152aa7918d8ecb000db9e1bace6c9ee027a94b906b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 25377,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 2,
+        "internalName": "AniKageProvider",
+        "description": "AniKage Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AniKageProvider.cs3",
+        "name": "AniKageProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=anikototv.to&sz=%size%",
+        "fileHash": "sha256-bf1224b1fa196a563c97f33b12e0aab660af9a226e30329c0b80dcec8df70533",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 39816,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 3,
+        "internalName": "AnikotoProvider",
+        "description": "Anikoto Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AnikotoProvider.cs3",
+        "name": "AnikotoProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=anime4i.com&sz=%size%",
+        "fileHash": "sha256-080d413bd464772dc36af830cff592754d24daa27ecb59de376913e71d27ada2",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 13756,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "Anime4iProvider",
+        "description": "Watch Chinese Anime / Donghua from Anime4i",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/Anime4iProvider.cs3",
+        "name": "Anime4iProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animekhor.org&sz=%size%",
+        "fileHash": "sha256-b8107b747aa84852b0919388d9e44196571037b8beba5afd221a90d2405a4cb3",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 46066,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 5,
+        "internalName": "AnimeKhorProvider",
+        "description": "Watch Chinese Anime / Donghua from AnimeKhor",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AnimeKhorProvider.cs3",
+        "name": "AnimeKhorProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animexin.dev&sz=%size%",
+        "fileHash": "sha256-f17bb5e69fe5965e69184b6faa269770589a93e5310306e2b146e016aa60b1d9",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 15443,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "AnimeXinProvider",
+        "description": "AnimeXin Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AnimeXinProvider.cs3",
+        "name": "AnimeXinProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animex.one&sz=%size%",
+        "fileHash": "sha256-8549d2656692ba8f427b7325402ded259042b1707d130b53077985b60c0f1bbc",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 27449,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "AnimeXProvider",
+        "description": "AnimeX Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AnimeXProvider.cs3",
+        "name": "AnimeXProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=anineko.to&sz=%size%",
+        "fileHash": "sha256-6488a4de1b6537ca92c171db64b889c5970e36e767c31d75bc242a842d3cbbd8",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 21306,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "AninekoProvider",
+        "description": "AniNeko Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AninekoProvider.cs3",
+        "name": "AninekoProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=aniwaves.ru&sz=%size%",
+        "fileHash": "sha256-cb48fd51abcedabff0e2af91a539c9f99c6de8848605816e25a8bb8bcee02d46",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 41013,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "AniwavesProvider",
+        "description": "Aniwaves Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/AniwavesProvider.cs3",
+        "name": "AniwavesProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=51cg1.com&sz=%size%",
+        "fileHash": "sha256-7171e74c03fd973bed9dd4787ffbb656b6bd6fcd7c35732bf82eda1fba986eba",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 22231,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": -1,
+        "internalName": "C51CGProvider",
+        "description": "51CG Video Provider",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/C51CGProvider.cs3",
+        "name": "C51CGProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=chikianimation.com&sz=%size%",
+        "fileHash": "sha256-bc902fb6ae3d5d9252e1ae30cc1982d54b203cd530b18322c3121f8aefa55f75",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 35426,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "ChikiAni2dProvider",
+        "description": "Watch Chinese Anime 2D / Donghua from ChikiAnimation",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/ChikiAni2dProvider.cs3",
+        "name": "ChikiAni2dProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=chikianimation.online&sz=%size%",
+        "fileHash": "sha256-84a303d60f9d37ca0752eaac87909928b6c4a9b535a4c21635236cc9a9b3e03c",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 37673,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "ChikiAnimationProvider",
+        "description": "Watch Chinese Anime 3D / Donghua from ChikiAnimation",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/ChikiAnimationProvider.cs3",
+        "name": "ChikiAnimationProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=cinephile.live&sz=%size%",
+        "fileHash": "sha256-e34ef77aca54ee0c614acc9e0e9feecd1e8e7181edad127458a8db839e26290b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 28491,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "CinephileProvider",
+        "description": "Watch Movies, TV Shows and Anime from Cinephile",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/CinephileProvider.cs3",
+        "name": "CinephileProvider"
+    },
+    {
+        "iconUrl": "https://official.coomer.com.co/favicon.ico",
+        "fileHash": "sha256-550a74fa74616a1078abbcf7ad5521e60afe8a4bfbb0a4c3366463c4ccd77311",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 21075,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "CoomerVideo",
+        "description": "Scraper for CoomerVideo",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/CoomerVideo.cs3",
+        "name": "CoomerVideo"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=donghuastream.org&sz=%size%",
+        "fileHash": "sha256-41e776c3dbcb7fbf47020a558aa0bd460c8d93f51eedcf75e592e75a9f7f6fff",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 17469,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": -1,
+        "internalName": "DonghuaStream",
+        "description": "Watch Chinese Anime / Donghua from DonghuaStream",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/DonghuaStream.cs3",
+        "name": "DonghuaStream"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=donghuaworld.com&sz=%size%",
+        "fileHash": "sha256-a9b1446b1ca7f8fecad7cc5ba8cf1b8417369415b329c874424ae77a39ba81da",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 17459,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": -1,
+        "internalName": "DonghuaWorld",
+        "description": "Watch Chinese Anime / Donghua from Donghua World",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/DonghuaWorld.cs3",
+        "name": "DonghuaWorld"
+    },
+    {
+        "iconUrl": "https://dongstream.com/favicon-32x32.png",
+        "fileHash": "sha256-b71e5de560d9f088132af7c682151a496406d9169eb953f313b2c3fd77a9838e",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 18767,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "DongStream",
+        "description": "Scraper for DongStream",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/DongStream.cs3",
+        "name": "DongStream"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=justanime.to&sz=%size%",
+        "fileHash": "sha256-2dbbd72a13282e0bc28f2b0ce80eda40d319f8744e58f25fb913cb8619010b43",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 24412,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 4,
+        "internalName": "JustAnimeProvider",
+        "description": "JustAnime Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/JustAnimeProvider.cs3",
+        "name": "JustAnimeProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=kanav.ad&sz=%size%",
+        "fileHash": "sha256-ee69b5f37c59a67e50997bf207d18471c92958fc8427173665277d16072435b7",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 20629,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "KanAVProvider",
+        "description": "KanAV Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/KanAVProvider.cs3",
+        "name": "KanAVProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=leakporner.org&sz=%size%",
+        "fileHash": "sha256-a868f0b836ed5608ce1d904d1592f3befefbac18746080913b0f4027a36d4a87",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 20485,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "LeakPornerProvider",
+        "description": "LeakPorner Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/LeakPornerProvider.cs3",
+        "name": "LeakPornerProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=luciferdonghua.in&sz=%size%",
+        "fileHash": "sha256-0046a494022449bb48e4d09c2416dd565b1bab235eede3862f233639aab36899",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 17479,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "LuciferDonghuaProvider",
+        "description": "Watch Chinese Anime / Donghua from LuciferDonghua",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/LuciferDonghuaProvider.cs3",
+        "name": "LuciferDonghuaProvider"
+    },
+    {
+        "iconUrl": "https://www.9191md.me/template/ym005_pc/html/style/images/favicon.ico",
+        "fileHash": "sha256-356d312de562c0c09adb4d37b4b10845708b52d9b34b404f809c78ca75af2f51",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 17263,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "MadouVideo",
+        "description": "Scraper for \u9ebb\u8c46\u89c6\u9891 (9191md)",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/MadouVideo.cs3",
+        "name": "MadouVideo"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=misterdonghua.com&sz=%size%",
+        "fileHash": "sha256-a0af87bd268ee3b0ff465ff5f1643372b0dd27418285253a8a8f056a55a443b5",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 17393,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": -1,
+        "internalName": "MisterDonghua",
+        "description": "Watch Chinese Anime / Donghua from Mister Donghua",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/MisterDonghua.cs3",
+        "name": "MisterDonghua"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=moviesmod.zone&sz=%size%",
+        "fileHash": "sha256-9b075e61fd11980c3046bf759289bc5dbe4327d2a21fa85fe7f153c43d81494a",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 29261,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TVSeries"
+        ],
+        "version": 3,
+        "internalName": "MoviesmodProvider",
+        "description": "MoviesMod Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/MoviesmodProvider.cs3",
+        "name": "MoviesmodProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=mrds.com&sz=%size%",
+        "fileHash": "sha256-7d08fd1c3dbab3991505d6d10abb68fca2f3930db8ac45e6714895b890f30784",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 20903,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "MrdsProvider",
+        "description": "MRDS Video Provider",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/MrdsProvider.cs3",
+        "name": "MrdsProvider"
+    },
+    {
+        "iconUrl": "https://i2.wp.com/naruldonghua.com/wp-content/uploads/2023/12/cropped-Narul-Donghua-32x32.jpg",
+        "fileHash": "sha256-13abcd23666d88a42da75e75ad80e82f3c5cfaf565e96ff7c40dbc6eec402b37",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 24878,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime",
+            "Movie"
+        ],
+        "version": 2,
+        "internalName": "NarulDonghua",
+        "description": "Scraper for Narul Donghua",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/NarulDonghua.cs3",
+        "name": "NarulDonghua"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pimpbunny.com&sz=%size%",
+        "fileHash": "sha256-8c3a5e6439fcacfe411cdb8b941dc925fd3185eadf384433663a43488e2d8044",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 28802,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": -1,
+        "internalName": "PimpBunnyProvider",
+        "description": "PimpBunny Video Provider",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/PimpBunnyProvider.cs3",
+        "name": "PimpBunnyProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=91porna.com&sz=%size%",
+        "fileHash": "sha256-ab0a1072bcb7502dd02c6939a5b701c803694c4a924c57dc6657d9d043ab5f40",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 25020,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": -1,
+        "internalName": "Porna91Provider",
+        "description": "91Porna Video Provider",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/Porna91Provider.cs3",
+        "name": "Porna91Provider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=asiangirl.porn&sz=%size%",
+        "fileHash": "sha256-a99bcff1da55c94ac9e48de669311823551bc1b720622f0d908f00e1391e128b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 18930,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "PppPornProvider",
+        "description": "ppp.porn Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/PppPornProvider.cs3",
+        "name": "PppPornProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=prmovies.directory&sz=%size%",
+        "fileHash": "sha256-15c21e869d2638b08cd10be6a45bc45863f3254b3a94daf2d7612d07eacff7f9",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 22573,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TVSeries"
+        ],
+        "version": 1,
+        "internalName": "PrmoviesProvider",
+        "description": "Prmovies Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/PrmoviesProvider.cs3",
+        "name": "PrmoviesProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=reanime.to&sz=%size%",
+        "fileHash": "sha256-8430f372715a59fec98ab404544b0007988a9b1e3e0834cb5946cdacaf9b24a7",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 35932,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 5,
+        "internalName": "ReAnimeProvider",
+        "description": "Re:Anime Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/ReAnimeProvider.cs3",
+        "name": "ReAnimeProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=m.taiav.com&sz=%size%",
+        "fileHash": "sha256-75a3647faedfc15c1709949fe3110e2a401a91c1be36b6a3e9ff34f645846280",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 22820,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 1,
+        "internalName": "TaiAV",
+        "description": "TaiAV Extension for m.taiav.com",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/TaiAV.cs3",
+        "name": "TaiAV"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=watchanimeworld.top&sz=%size%",
+        "fileHash": "sha256-fc0ad935db1fab1991076fa5f69d6ece7797fe06fb958db51655af1a59028ff3",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 26566,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "WatchAnimeWorldProvider",
+        "description": "Anime World India Extension",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/WatchAnimeWorldProvider.cs3",
+        "name": "WatchAnimeWorldProvider"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=yomi.to&sz=%size%",
+        "fileHash": "sha256-ac6ea8a70bc18537b9c39f5cd052c3af5e037b8fd04528ddefc2876029beb42b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 24145,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime",
+            "Movie",
+            "OVA"
+        ],
+        "version": 6,
+        "internalName": "Yomi",
+        "description": "Watch Anime Free from Yomi",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/Yomi.cs3",
+        "name": "Yomi"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=zhanime.online&sz=%size%",
+        "fileHash": "sha256-ebc8785d257ffd350b807eed45f32cb5ac3045dfc3bed5bfcdfd3dccfff165e1",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/codegeasse1/codegeasse-cloudstream-repos",
+        "fileSize": 26297,
+        "status": 1,
+        "authors": [
+            "Codegeasse"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 1,
+        "internalName": "ZHAnime",
+        "description": "Scraper for ZH Anime",
+        "url": "https://raw.githubusercontent.com/codegeasse1/codegeasse-cloudstream-repos/builds/ZHAnime.cs3",
+        "name": "ZHAnime"
+    }
+]
