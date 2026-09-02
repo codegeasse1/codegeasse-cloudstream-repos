@@ -160,7 +160,7 @@ class C51CGProvider : MainAPI() {
         val rawPosterUrl = scriptImgMatch ?: fallbackImg
 
         var finalPosterUrl = rawPosterUrl
-        if (rawPosterUrl != null && rawPosterUrl.contains("pic.xustgq.cn")) {
+        if (rawPosterUrl != null && rawPosterUrl.contains("pic.sbhioa.cn")) {
             finalPosterUrl = decryptImageUrl(rawPosterUrl) ?: rawPosterUrl
         }
 
@@ -259,7 +259,7 @@ class C51CGProvider : MainAPI() {
             poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         }
 
-        if (poster != null && poster.contains("pic.xustgq.cn")) {
+        if (poster != null && poster.contains("pic.sbhioa.cn")) {
             poster = decryptImageUrl(poster) ?: poster
         }
 
