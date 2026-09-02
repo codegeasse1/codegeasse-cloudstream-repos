@@ -19,6 +19,9 @@ class MrdsProvider : MainAPI() {
     override var lang = "en"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Movie, TvType.Others)
+    companion object {
+        private const val MAX_SEARCH_PAGES = 30
+    }
 
     // ---------------------------------------------------------------
     // REMOTE TRANSLATION TOGGLE
@@ -165,28 +168,31 @@ class MrdsProvider : MainAPI() {
     // ---------------------------------------------------------------
     // SEARCH (path-based pagination: /search/<term>/ / /page/N/)
     // ---------------------------------------------------------------
-    override suspend fun search(query: String): List<SearchResponse> {
+    private suspend fun searchPage(query: String, page: Int): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val maxPages = 8
-
-        suspend fun fetchPage(page: Int): List<SearchResponse> {
-            val url = if (page == 1)
-                "$mainUrl/search/$encodedQuery/"
-            else
-                "$mainUrl/search/$encodedQuery/$page/"
-            val document = app.get(url).document
-            return document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
-                element.toSearchResultAsync()
-            }
+        val url = if (page <= 1)
+            "$mainUrl/search/$encodedQuery/"
+        else
+            "$mainUrl/search/$encodedQuery/$page/"
+        val document = app.get(url).document
+        return document.select("article:not(.ad-item):has(.post-card) a").mapNotNull { element ->
+            element.toSearchResultAsync()
         }
+    }
 
+    override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
-        for (page in 1..maxPages) {
-            val pageResults = fetchPage(page)
+        for (page in 1..MAX_SEARCH_PAGES) {
+            val pageResults = searchPage(query, page)
             if (pageResults.isEmpty()) break
             results.addAll(pageResults)
         }
         return results
+    }
+
+    override suspend fun search(query: String, page: Int): SearchResponseList? {
+        val items = searchPage(query, page)
+        return newSearchResponseList(items, hasNext = items.isNotEmpty())
     }
 
     // ---------------------------------------------------------------
